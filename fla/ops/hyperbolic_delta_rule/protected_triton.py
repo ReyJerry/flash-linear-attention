@@ -103,7 +103,7 @@ def _run_chunk(q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, sca
     # every S_t. This extra fused Chunk call is differentiable and batch-safe.
     readout_q = k.unsqueeze(3).expand(B, T, H, V, K).reshape(B, T, H * V, K).contiguous()
     realized_flat, _ = chunk_hyperbolic_delta_rule(
-        readout_q, k_flat, v_flat, beta_flat, curvature=curvature, scale=scale,
+        readout_q, k_flat, v_flat, beta_flat, curvature=curvature, scale=1.0,
         initial_state=state_flat, output_final_state=True, chunk_size=16, check_inputs=False,
     )
     out = out_flat.reshape(B, T, H, V)

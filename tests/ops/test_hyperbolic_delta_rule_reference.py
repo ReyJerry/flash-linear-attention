@@ -349,3 +349,28 @@ def test_protected_reference_forward_and_gradients():
     assert grad[-1].abs() > 0
 
 
+
+
+def test_shared_key_gram_projection_matches_per_value_solve():
+    protected_path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'
+    spec = importlib.util.spec_from_file_location('hyperbolic_protected_reference', protected_path.resolve())
+    protected = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(protected)
+    torch.manual_seed(101)
+    B, T, H, K, V, R = 1, 5, 1, 7, 3, 2
+    k = torch.nn.functional.normalize(torch.randn(B, T, H, K, dtype=torch.float64), dim=-1)
+    v = 0.1 * torch.randn(B, T, H, V, dtype=torch.float64)
+    bank_k = torch.nn.functional.normalize(torch.randn(B, H, R, K, dtype=torch.float64), dim=-1)
+    bank_v = 0.1 * torch.randn(B, H, R, V, dtype=torch.float64)
+    scores = torch.zeros(B, H, R, dtype=torch.float64)
+    c = torch.tensor(0.4, dtype=torch.float64)
+    kb, vb = protected._project_chunk_torch(k, v, bank_k, bank_v, scores, c, eps=1e-8)
+    for t in range(T):
+        for vi in range(V):
+            gram = bank_k[0, 0] @ bank_k[0, 0].T - c * bank_v[0, 0, :, vi, None] * bank_v[0, 0, None, :, vi]
+            rhs = bank_k[0, 0] @ k[0, t, 0] - c * bank_v[0, 0, :, vi] * v[0, t, 0, vi]
+            alpha = torch.linalg.solve(gram + 1e-8 * torch.eye(R, dtype=torch.float64), rhs)
+            ref_k = k[0, t, 0] - bank_k[0, 0].T @ alpha
+            ref_v = v[0, t, 0, vi] - bank_v[0, 0, :, vi] @ alpha
+            torch.testing.assert_close(kb[0, t, 0, vi], ref_k, atol=1e-7, rtol=1e-7)
+            torch.testing.assert_close(vb[0, t, 0, vi], ref_v, atol=1e-7, rtol=1e-7)

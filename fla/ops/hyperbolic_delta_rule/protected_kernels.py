@@ -59,7 +59,7 @@ def protected_hyperbolic_fwd_kernel(
     Q, Kp, Vp, Beta, H0, PK0, PV0, PC0, O, HT, PK1, PV1, PC1,
     TapeS, TapePK, TapePV, TapePC, Curvature,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, R: tl.constexpr, T: tl.constexpr,
-    SCALE: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr,
+    SCALE: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr, SAVE: tl.constexpr,
 ):
     p = tl.program_id(0)
     b, h, vi = p // (H * V), (p // V) % H, p % V
@@ -78,12 +78,13 @@ def protected_hyperbolic_fwd_kernel(
     for t in range(0, T):
         token = b * T + t
         tape = ((token * H + h) * V + vi)
-        tl.store(TapeS + tape * K + ik, s, ik < K)
-        tl.store(TapePC + tape, tl.load(pc_out))
-        for r in tl.static_range(0, R):
-            tl.store(TapePK + (tape * R + r) * K + ik,
-                     tl.load(pk_out + r * K + ik, ik < K, 0), ik < K)
-            tl.store(TapePV + tape * R + r, tl.load(pv_out + r))
+        if SAVE:
+            tl.store(TapeS + tape * K + ik, s, ik < K)
+            tl.store(TapePC + tape, tl.load(pc_out))
+            for r in tl.static_range(0, R):
+                tl.store(TapePK + (tape * R + r) * K + ik,
+                         tl.load(pk_out + r * K + ik, ik < K, 0), ik < K)
+                tl.store(TapePV + tape * R + r, tl.load(pv_out + r))
         kt = tl.load(Kp + (token * H + h) * K + ik, ik < K, 0).to(tl.float32)
         qt = tl.load(Q + (token * H + h) * K + ik, ik < K, 0).to(tl.float32)
         vt = tl.load(Vp + (token * H + h) * V + vi).to(tl.float32)

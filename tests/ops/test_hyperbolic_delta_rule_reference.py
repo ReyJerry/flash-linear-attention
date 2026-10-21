@@ -280,19 +280,52 @@ def test_learnable_curvature_reference_gradient():
     assert torch.isfinite(grad) and grad.abs() > 0
 
 
-def test_protected_reference_preserves_previous_associations():
+def test_protected_reference_replaces_bank_and_is_differentiable():
     protected_path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'
     spec = importlib.util.spec_from_file_location('hyperbolic_protected_reference', protected_path.resolve())
     protected = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(protected)
-    q, k, v, beta, state = make_case(T=9, K=5, V=3, B=1, H=1, c=0.5)
-    out, final, pk, pv, pc = protected.protected_recurrent_hyperbolic_delta_rule(
-        q, k, v, beta, curvature=0.5, initial_state=state, protection_rank=3,
+    q, k, v, beta, state = make_case(T=33, K=5, V=3, B=1, H=1, c=0.5)
+    k = k.detach().requires_grad_()
+    v = v.detach().requires_grad_()
+    selection_scores = torch.linspace(-1, 1, 33, dtype=k.dtype).reshape(1, 33, 1).requires_grad_()
+    out, final, pk, pv, scores, count = protected.naive_protected_chunkwise_hyperbolic_delta_rule(
+        q, k, v, beta, curvature=0.5, initial_state=state,
+        protection_rank=3, chunk_size=16, checkpoint=False, selection_scores=selection_scores,
     )
-    for vi in range(v.shape[-1]):
-        for j in range(int(pc[0, 0, vi])):
-            got = pk[0, 0, vi, j] @ final[0, 0, :, vi]
-            torch.testing.assert_close(got, pv[0, 0, vi, j], atol=1e-7, rtol=1e-7)
+    assert out.shape == v.shape and final.shape == state.shape
+    assert pk.shape == (1, 1, 3, 5) and pv.shape == (1, 1, 3, 3)
+    assert scores.shape == (1, 1, 3) and count.shape == (1, 1)
+    loss = out.square().mean() + final.square().mean() + pk.square().mean() + pv.square().mean()
+    gk, gv, gs = torch.autograd.grad(loss, (k, v, selection_scores))
+    assert torch.isfinite(gk).all() and torch.isfinite(gv).all() and torch.isfinite(gs).all()
+    assert gk.abs().sum() > 0 and gv.abs().sum() > 0
+    assert gs.abs().sum() > 0
+
+
+def test_protected_checkpoint_matches_uncheckpointed_forward_and_gradients():
+    protected_path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'
+    spec = importlib.util.spec_from_file_location('hyperbolic_protected_reference', protected_path.resolve())
+    protected = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(protected)
+    q, k, v, beta, state = make_case(T=19, K=5, V=2, B=1, H=1, c=0.5)
+    def run(checkpoint):
+        q1, k1, v1, b1, s1 = [x.detach().clone().requires_grad_() for x in (q, k, v, beta, state)]
+        c = torch.tensor(0.5, dtype=torch.float64, requires_grad=True)
+        result = protected.naive_protected_chunkwise_hyperbolic_delta_rule(
+            q1, k1, v1, b1, curvature=c, initial_state=s1, protection_rank=2,
+            chunk_size=16, checkpoint=checkpoint,
+        )
+        loss = result[0].square().sum() + result[1].square().sum() + result[3].square().sum()
+        grads = torch.autograd.grad(loss, (q1, k1, v1, b1, s1, c))
+        return result[:2], grads
+    (out_a, state_a), grad_a = run(False)
+    (out_b, state_b), grad_b = run(True)
+    torch.testing.assert_close(out_a, out_b, atol=1e-8, rtol=1e-7)
+    torch.testing.assert_close(state_a, state_b, atol=1e-8, rtol=1e-7)
+    for a, b in zip(grad_a, grad_b):
+        torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-6)
+
 
 def test_protected_reference_forward_and_gradients():
     protected_path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'
@@ -307,9 +340,10 @@ def test_protected_reference_forward_and_gradients():
     )
     assert out.shape == v.shape
     assert final.shape == state.shape
-    assert pk.shape == (1, 1, 3, 2, 5)
-    assert pv.shape == (1, 1, 3, 2)
-    assert pc.shape == (1, 1, 3)
+    assert pk.shape == (1, 1, 2, 5)
+    assert pv.shape == (1, 1, 2, 3)
+    assert scores.shape == (1, 1, 2)
+    assert pc.shape == (1, 1)
     grad = torch.autograd.grad(out.square().sum() + final.square().sum(), (q, k, v, beta, state, raw_c))
     assert all(torch.isfinite(g).all() for g in grad)
     assert grad[-1].abs() > 0

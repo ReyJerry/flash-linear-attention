@@ -56,13 +56,13 @@ def _project_chunk_torch(k, v, bank_k, bank_v, bank_scores, curvature, eps=_EPS)
     return kbar, vbar
 
 
-def _recurrent_chunk_torch(q, k, v, beta, state, curvature, scale):
+def _recurrent_chunk_torch(q, k, v, beta, state, curvature, scale, readout_k=None):
     """Sequential PyTorch oracle for one chunk; differentiable through every update."""
     outputs, realized = [], []
     for t in range(q.shape[1]):
         kt, qt, vt, bt = k[:, t], q[:, t], v[:, t], beta[:, t]
         # [B,H,V,K] and [B,H,K,V]
-        residual = vt - torch.einsum('bhvk,bhkv->bhv', kt, state.permute(0, 1, 3, 2))
+        residual = vt - torch.einsum('bhvk,bhvk->bhv', kt, state.permute(0, 1, 3, 2))
         a = kt.square().sum(dim=-1) - curvature * vt.square()
         valid = a > _EPS
         safe_a = torch.where(valid, a, torch.ones_like(a))
@@ -71,7 +71,8 @@ def _recurrent_chunk_torch(q, k, v, beta, state, curvature, scale):
         candidate = (state + kt.permute(0, 1, 3, 2) * u.unsqueeze(-2)) / den.unsqueeze(-2)
         state = torch.where(valid.unsqueeze(-2), candidate, state)
         outputs.append(scale * torch.einsum('bhk,bhkv->bhv', qt, state))
-        realized.append(torch.einsum('bhk,bhkv->bhv', k[:, t], state))
+        realized_key = k[:, t] if readout_k is None else readout_k[:, t]
+        realized.append(torch.einsum('bhk,bhkv->bhv', realized_key, state))
     if outputs:
         return torch.stack(outputs, dim=1), state, torch.stack(realized, dim=1)
     return v, state, v
@@ -157,7 +158,7 @@ def naive_protected_chunkwise_hyperbolic_delta_rule(
 
         def run_chunk(qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c):
             kbar, vbar = _project_chunk_torch(kc, vc, bank_k, bank_v, bank_scores, c)
-            out, next_state, realized = _recurrent_chunk_torch(qc, kbar, vbar, bc, state, c, scale)
+            out, next_state, realized = _recurrent_chunk_torch(qc, kbar, vbar, bc, state, c, scale, readout_k=kc)
             next_bank_k, next_bank_v, next_scores, next_count = _select_bank(
                 bank_k, bank_v, bank_scores, kc, realized, sc,
                 temperature=temperature, novelty_weight=novelty_weight,

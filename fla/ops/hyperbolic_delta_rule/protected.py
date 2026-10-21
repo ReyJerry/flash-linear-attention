@@ -42,10 +42,17 @@ def _protected_reference(q, k, v, beta, curvature, scale, initial_state,
         pv = q.new_zeros(B, H, V, protection_rank)
         pc = torch.zeros(B, H, V, dtype=torch.int32, device=q.device)
     else:
+        if protected_values is None:
+            raise ValueError("protected_values is required with protected_keys.")
         pk, pv = protected_keys.to(dtype), protected_values.to(dtype)
-        pc = protected_count.to(device=q.device, dtype=torch.int32)
+        if protected_count is None:
+            pc = (pk.square().sum(-1) > 0).sum(-1).to(torch.int32)
+        else:
+            pc = protected_count.to(device=q.device, dtype=torch.int32)
     if pk.shape != (B, H, V, protection_rank, K) or pv.shape != (B, H, V, protection_rank) or pc.shape != (B, H, V):
         raise ValueError("Protected bank shape mismatch.")
+    if bool(((pc < 0) | (pc > protection_rank)).any().item()):
+        raise ValueError("protected_count must be in [0, protection_rank].")
     outputs, states, keys_out, values_out, counts_out = [], [], [], [], []
     out_scale = K ** -0.5 if scale is None else scale
     for b in range(B):

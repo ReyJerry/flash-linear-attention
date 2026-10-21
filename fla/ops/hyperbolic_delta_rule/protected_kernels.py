@@ -186,7 +186,7 @@ def protected_kv_project_bwd_kernel(
     tl.store(DV + v_base, dv, it < T)
     dpk_base = (((b * H + h) * V + vi) * R + rows[:, None]) * K + ik[None, :]
     tl.store(DBankKByValue + dpk_base, dpk, (rows[:, None] < R) & (ik[None, :] < K))
-    dpv_base = ((b * H + h) * V + vi) * R + rows
+    dpv_base = ((b * H + h) * R + rows) * V + vi
     tl.store(DBankV + dpv_base, dpv, rows < R)
     tl.store(DC + (b * H + h) * V + vi, dc)
 

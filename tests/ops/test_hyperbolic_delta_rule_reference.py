@@ -374,3 +374,25 @@ def test_shared_key_gram_projection_matches_per_value_solve():
             ref_v = v[0, t, 0, vi] - bank_v[0, 0, :, vi] @ alpha
             torch.testing.assert_close(kb[0, t, 0, vi], ref_k, atol=1e-7, rtol=1e-7)
             torch.testing.assert_close(vb[0, t, 0, vi], ref_v, atol=1e-7, rtol=1e-7)
+
+
+def test_shared_key_projection_vjp_is_finite_and_differentiable():
+    protected_path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'
+    spec = importlib.util.spec_from_file_location('hyperbolic_protected_reference', protected_path.resolve())
+    protected = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(protected)
+    torch.manual_seed(211)
+    B, T, H, K, V, R = 2, 4, 2, 6, 3, 2
+    k = torch.nn.functional.normalize(torch.randn(B, T, H, K, dtype=torch.float64), dim=-1).requires_grad_()
+    v = (0.03 * torch.randn(B, T, H, V, dtype=torch.float64)).requires_grad_()
+    bank_k = torch.nn.functional.normalize(torch.randn(B, H, R, K, dtype=torch.float64), dim=-1).requires_grad_()
+    bank_v = (0.03 * torch.randn(B, H, R, V, dtype=torch.float64)).requires_grad_()
+    scores = torch.zeros(B, H, R, dtype=torch.float64)
+    curvature = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)
+    kb, vb = protected._project_chunk_torch(k, v, bank_k, bank_v, scores, curvature, eps=1e-8)
+    gk = torch.randn_like(kb)
+    gv = torch.randn_like(vb)
+    grads = torch.autograd.grad((kb, vb), (k, v, bank_k, bank_v, curvature), (gk, gv))
+    assert all(torch.isfinite(g).all() for g in grads)
+    assert grads[2].abs().sum() > 0 and grads[3].abs().sum() > 0
+    assert grads[4].abs() > 0

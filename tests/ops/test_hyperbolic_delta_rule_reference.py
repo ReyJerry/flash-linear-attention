@@ -285,20 +285,14 @@ def test_protected_reference_preserves_previous_associations():
     spec = importlib.util.spec_from_file_location('hyperbolic_protected_reference', protected_path.resolve())
     protected = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(protected)
-    dtype = torch.float64
-    q = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]]]], dtype=dtype).reshape(1, 2, 1, 2)
-    k = torch.tensor([[[[1.0, 0.0], [0.6, 0.8]]]], dtype=dtype).reshape(1, 2, 1, 2)
-    v = torch.tensor([[[[0.2], [0.3]]]], dtype=dtype).reshape(1, 2, 1, 1)
-    beta = torch.ones(1, 2, 1, dtype=dtype)
-    out, state, pk, pv = protected.protected_recurrent_hyperbolic_delta_rule(
-        q, k, v, beta, curvature=0.5, protection_rank=4,
+    q, k, v, beta, state = make_case(T=9, K=5, V=3, B=1, H=1, c=0.5)
+    out, final, pk, pv, pc = protected.protected_recurrent_hyperbolic_delta_rule(
+        q, k, v, beta, curvature=0.5, initial_state=state, protection_rank=3,
     )
-    assert torch.isfinite(out).all() and torch.isfinite(state).all()
-    assert pk.shape[:3] == pv.shape[:3]
-    for j in range(pk.shape[2] - 1):
-        got = torch.einsum('k,kv->v', pk[0, 0, j], state[0, 0])
-        torch.testing.assert_close(got, pv[0, 0, j], atol=1e-7, rtol=1e-7)
-
+    for vi in range(v.shape[-1]):
+        for j in range(int(pc[0, 0, vi])):
+            got = pk[0, 0, vi, j] @ final[0, 0, :, vi]
+            torch.testing.assert_close(got, pv[0, 0, vi, j], atol=1e-7, rtol=1e-7)
 
 def test_protected_reference_forward_and_gradients():
     protected_path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'

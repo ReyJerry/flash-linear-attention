@@ -30,10 +30,10 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
         # for zero-length and packed sequences, without reading cu_seqlens on CPU.
         slots = triton.cdiv(total, chunk_size) + N
         cp = torch.empty((slots, H, K, V) if save_checkpoints else (0,), device=q.device, dtype=torch.float32)
-        common = dict(H=H, K=K, V=V, C=curvature, SCALE=scale, BT=chunk_size, SAVE=save_checkpoints)
+        common = dict(H=H, K=K, V=V, SCALE=scale, BT=chunk_size, SAVE=save_checkpoints)
         if mode == 'chunk':
             hyperbolic_delta_rule_chunk_fwd_kernel[(N * H, V)](
-                q, k, v, beta, h0, cu, o, ht, cp,
+                q, k, v, beta, h0, cu, o, ht, cp, curvature,
                 BK=max(16, triton.next_power_of_2(K)), **common, num_warps=4, enable_fp_fusion=False,
             )
         else:
@@ -41,8 +41,8 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
                 q, k, v, beta, h0, cu, o, ht, cp,
                 BK=triton.next_power_of_2(K), BV=16, **common, num_warps=4, enable_fp_fusion=False,
             )
-        ctx.save_for_backward(q, k, v, beta, h0, cu, cp)
-        ctx.curvature, ctx.scale, ctx.chunk_size = curvature, scale, chunk_size
+        ctx.save_for_backward(q, k, v, beta, h0, cu, cp, curvature)
+        ctx.scale, ctx.chunk_size = scale, chunk_size
         ctx.set_materialize_grads(False)
         return o, ht
 
@@ -53,7 +53,7 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
 
         from .kernels import hyperbolic_delta_rule_bwd_kernel
 
-        q, k, v, beta, h0, cu, cp = ctx.saved_tensors
+        q, k, v, beta, h0, cu, cp, curvature = ctx.saved_tensors
         B, T, H, K = q.shape
         V, N = v.shape[-1], h0.shape[0]
         do = torch.zeros_like(v, dtype=q.dtype) if do is None else do.contiguous()
@@ -64,16 +64,17 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
         dv = torch.empty_like(v, dtype=torch.float32)
         db = torch.empty_like(beta, dtype=torch.float32)
         dh0 = torch.empty_like(h0)
+        dc = torch.empty((nv, B, T, H), device=q.device, dtype=torch.float32)
         scratch = torch.empty((N, H, ctx.chunk_size, K, V), device=q.device, dtype=torch.float32)
         hyperbolic_delta_rule_bwd_kernel[(N * H, nv)](
-            q, k, v, beta, cu, cp, do, dht, scratch, dq, dk, dv, db, dh0,
-            H=H, K=K, V=V, TOTAL=B * T, C=ctx.curvature, SCALE=ctx.scale,
+            q, k, v, beta, cu, cp, do, dht, scratch, dq, dk, dv, db, dh0, dc, curvature,
+            H=H, K=K, V=V, TOTAL=B * T, SCALE=ctx.scale,
             BT=ctx.chunk_size, BK=triton.next_power_of_2(K), BV=16,
             num_warps=4, enable_fp_fusion=False,
         )
         return (
             dq.sum(0).to(q.dtype), dk.sum(0).to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), dh0,
-            None, None, None, None, None, None,
+            None, dc.sum().reshape_as(curvature).to(curvature.dtype), None, None, None, None,
         )
 
 
@@ -102,7 +103,14 @@ def _apply_hyperbolic_delta_rule(
     cu = (torch.arange(B + 1, device=q.device, dtype=torch.int64) * T
           if cu_seqlens is None else cu_seqlens.contiguous())
     save = torch.is_grad_enabled() and any(x.requires_grad for x in (q, k, v, beta, h0))
-    o, ht = HyperbolicDeltaRuleFunction.apply(q, k, v, beta, h0, cu, float(curvature), scale, chunk_size, mode, save)
+    if isinstance(curvature, torch.Tensor):
+        curvature_tensor = curvature.to(device=q.device, dtype=torch.float32).reshape(()).contiguous()
+    else:
+        curvature_tensor = torch.tensor(float(curvature), device=q.device, dtype=torch.float32)
+    save = save or (torch.is_grad_enabled() and curvature_tensor.requires_grad)
+    o, ht = HyperbolicDeltaRuleFunction.apply(
+        q, k, v, beta, h0, cu, curvature_tensor, scale, chunk_size, mode, save,
+    )
     return o, ht if output_final_state else None
 
 
@@ -111,7 +119,7 @@ def fused_recurrent_hyperbolic_delta_rule(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
-    curvature: float = 1.0,
+    curvature: float | torch.Tensor = 1.0,
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
@@ -129,9 +137,8 @@ def fused_recurrent_hyperbolic_delta_rule(
     Caller contract: finite inputs, beta in [0,1], nonzero keys,
     ||k||^2-c*v^2 > 0 and c*||S[:,v]||^2 < 1. Enable check_inputs to validate
     values (synchronizes the GPU). No clamping or implicit key normalization is
-    performed. Curvature is a fixed Python scalar >=0. Gradients include q,k,v,
-    beta and initial/final state; double backward and curvature gradients are not
-    supported. There is no additional learned forget gate in this rule.
+    performed. Curvature may be a scalar tensor; the Triton backward computes its
+    first-order gradient. Double backward is not supported.
     """
     return _apply_hyperbolic_delta_rule(
         q, k, v, beta, curvature, scale, initial_state, output_final_state,

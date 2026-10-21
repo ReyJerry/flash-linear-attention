@@ -68,15 +68,23 @@ def check_inputs(q, k, v, beta, initial_state, cu_seqlens, curvature, scale, che
     return N, (K ** -0.5 if scale is None else float(scale))
 
 
-def prepare_key_value(k, raw_v, curvature: float = 1.0, value_margin: float = 0.5):
+def prepare_key_value(k, raw_v, curvature: float | torch.Tensor = 1.0, value_margin: float = 0.5):
     """Normalize keys and bound values strictly inside the spacelike constraint.
 
     This is layer preprocessing, NOT part of the low-level update. A zero key is
     mapped to the first basis vector. Float32 preprocessing avoids half-precision
     rounding at the geometric boundary. Float64 is retained for reference tests.
     """
-    if not math.isfinite(curvature) or curvature < 0 or not 0 < value_margin < 1:
-        raise ValueError('Require curvature >= 0 and 0 < value_margin < 1.')
+    if not 0 < value_margin < 1:
+        raise ValueError('Require 0 < value_margin < 1.')
+    if isinstance(curvature, torch.Tensor):
+        if curvature.numel() != 1:
+            raise ValueError('curvature must be scalar.')
+        c = curvature.to(device=k.device, dtype=torch.float64 if k.dtype == torch.float64 else torch.float32)
+    else:
+        if not math.isfinite(curvature) or curvature < 0:
+            raise ValueError('Require finite curvature >= 0.')
+        c = curvature
     dtype = torch.float64 if k.dtype == torch.float64 or raw_v.dtype == torch.float64 else torch.float32
     k = k.to(dtype)
     norm = k.norm(dim=-1, keepdim=True)
@@ -84,7 +92,10 @@ def prepare_key_value(k, raw_v, curvature: float = 1.0, value_margin: float = 0.
     basis[..., 0] = 1
     k = torch.where(norm > 1e-6, k / norm.clamp_min(1e-6), basis)
     # max(c, 1) makes the flat-curvature limit continuous and keeps values bounded.
-    radius = value_margin / math.sqrt(max(curvature, 1.0))
+    if isinstance(c, torch.Tensor):
+        radius = value_margin * torch.rsqrt(torch.maximum(c, c.new_tensor(1.0)))
+    else:
+        radius = value_margin / math.sqrt(max(c, 1.0))
     v = raw_v.to(dtype).tanh() * radius * k.norm(dim=-1, keepdim=True)
     return k, v
 

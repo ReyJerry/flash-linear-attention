@@ -18,12 +18,13 @@ import triton.language as tl
 
 @triton.jit
 def hyperbolic_delta_rule_fwd_kernel(
-    Q, Kp, Vp, Beta, H0, Cu, O, HT, CP,
+    Q, Kp, Vp, Beta, H0, Cu, O, HT, CP, Curvature,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
-    C: tl.constexpr, SCALE: tl.constexpr, BT: tl.constexpr,
+    SCALE: tl.constexpr, BT: tl.constexpr,
     BK: tl.constexpr, BV: tl.constexpr, SAVE: tl.constexpr,
 ):
     nh, tile_v = tl.program_id(0), tl.program_id(1)
+    C = tl.load(Curvature).to(tl.float32)
     n, h = nh // H, nh % H
     bos, eos = tl.load(Cu + n), tl.load(Cu + n + 1)
     ik = tl.arange(0, BK)
@@ -54,13 +55,14 @@ def hyperbolic_delta_rule_fwd_kernel(
 
 @triton.jit
 def hyperbolic_delta_rule_chunk_fwd_kernel(
-    Q, Kp, Vp, Beta, H0, Cu, O, HT, CP,
+    Q, Kp, Vp, Beta, H0, Cu, O, HT, CP, Curvature,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
-    C: tl.constexpr, SCALE: tl.constexpr, BT: tl.constexpr,
+    SCALE: tl.constexpr, BT: tl.constexpr,
     BK: tl.constexpr, SAVE: tl.constexpr,
 ):
     # One (sequence, head, value) per program. No cross-value atomics.
     nh, value = tl.program_id(0), tl.program_id(1)
+    C = tl.load(Curvature).to(tl.float32)
     n, h = nh // H, nh % H
     bos, eos = tl.load(Cu + n), tl.load(Cu + n + 1)
     rows, ik = tl.arange(0, BT), tl.arange(0, BK)
@@ -107,9 +109,9 @@ def hyperbolic_delta_rule_chunk_fwd_kernel(
 @triton.jit
 def hyperbolic_delta_rule_bwd_kernel(
     Q, Kp, Vp, Beta, Cu, CP, DO, DHT, Scratch,
-    DQ, DK, DV, DBeta, DH0,
+    DQ, DK, DV, DBeta, DH0, DC, Curvature,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, TOTAL: tl.constexpr,
-    C: tl.constexpr, SCALE: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
+    SCALE: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
 ):
     nh, tile_v = tl.program_id(0), tl.program_id(1)
     n, h = nh // H, nh % H
@@ -118,6 +120,7 @@ def hyperbolic_delta_rule_bwd_kernel(
     iv = tile_v * BV + tl.arange(0, BV)
     hs = (nh * K + ik[:, None]) * V + iv[None, :]
     mask = (ik[:, None] < K) & (iv[None, :] < V)
+    C = tl.load(Curvature).to(tl.float32)
     ds = tl.load(DHT + hs, mask, 0).to(tl.float32)
     num_chunks = tl.cdiv(eos - bos, BT)
     for block_rev in range(0, num_chunks):
@@ -169,6 +172,7 @@ def hyperbolic_delta_rule_bwd_kernel(
             dv = C * u * gden + gr - 2.0 * C * vt * ga
             db = gu * r / a
             dk = tl.sum(gnum * u[None, :] - prev * gr[None, :], 1) + 2.0 * kt * tl.sum(ga, 0)
+            dc = tl.sum(vt * u * gden - vt * vt * ga, 0)
             ds = gnum - kt[:, None] * gr[None, :]
             # Sum shared q/k gradients deterministically after the kernel, not with atomics.
             partial = tile_v * TOTAL * H * K + ko
@@ -176,5 +180,6 @@ def hyperbolic_delta_rule_bwd_kernel(
             tl.store(DK + partial, dk, ik < K)
             tl.store(DV + vo, dv, iv < V)
             tl.store(DBeta + vo, db, iv < V)
+            tl.store(DC + (tile_v * TOTAL + t) * H + h, dc)
         tl.debug_barrier()
     tl.store(DH0 + hs, ds, mask)

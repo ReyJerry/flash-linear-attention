@@ -24,6 +24,7 @@ from fla.ops.hyperbolic_delta_rule import (
 )
 from fla.ops.hyperbolic_delta_rule.naive import prepare_key_value
 from fla.ops.hyperbolic_delta_rule.protected import protected_recurrent_hyperbolic_delta_rule
+from fla.ops.hyperbolic_delta_rule.protected import protected_recurrent_hyperbolic_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -136,21 +137,19 @@ class HyperbolicDeltaNet(nn.Module):
         cached_recurrent = None if last_state is None else last_state['recurrent_state']
         if isinstance(cached_recurrent, dict):
             initial_state = cached_recurrent['state']
-            protected_keys = cached_recurrent['protected_keys']
-            protected_values = cached_recurrent['protected_values']
+            protected_keys = cached_recurrent.get('protected_keys')
+            protected_values = cached_recurrent.get('protected_values')
+            protected_count = cached_recurrent.get('protected_count')
         else:
             initial_state = cached_recurrent
-            protected_keys = protected_values = None
+            protected_keys = protected_values = protected_count = None
         curvature = F.softplus(self.curvature_raw) if self.learnable_curvature else self.curvature
-        curvature_value = float(curvature.detach().item()) if isinstance(curvature, torch.Tensor) else curvature
         conv_states = (None, None, None)
         if last_state is not None and last_state.get('conv_state') is not None:
             conv_states = last_state['conv_state']
         hidden_states, indices, cu_seqlens = unpad_hidden_states(
             hidden_states, kwargs.get('cu_seqlens'), attention_mask if q_len else None, q_len,
         )
-        if self.protection_rank and (cu_seqlens is not None or attention_mask is not None):
-            raise ValueError('Explicit protection currently supports dense, unpadded batches only.')
         projections = (self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states))
         if self.use_short_conv and hidden_states.shape[1] > 0:
             convolved = [
@@ -165,9 +164,9 @@ class HyperbolicDeltaNet(nn.Module):
         if self.num_v_heads != self.num_heads:
             q, k = (repeat(x, 'b t h d -> b t (h g) d', g=self.num_v_heads // self.num_heads) for x in (q, k))
         q = F.normalize(q.float(), dim=-1, eps=1e-6).to(hidden_states.dtype)
-        k, v = prepare_key_value(k, raw_v, curvature_value, self.value_margin)
+        k, v = prepare_key_value(k, raw_v, curvature, self.value_margin)
         beta = self.b_proj(hidden_states).float().sigmoid()
-        mode = 'naive' if (self.learnable_curvature or self.protection_rank) else self.mode
+        mode = self.mode
         if mode != 'naive' and not self.training and q_len <= 64:
             mode = 'fused_recurrent'
         op = {
@@ -179,12 +178,18 @@ class HyperbolicDeltaNet(nn.Module):
         if mode == 'fused_recurrent':
             extra['checkpoint_size'] = self.chunk_size
         if self.protection_rank:
-            o, final_state, protected_keys, protected_values = protected_recurrent_hyperbolic_delta_rule(
+            o, final_state, protected_keys, protected_values, protected_count = protected_recurrent_hyperbolic_delta_rule(
                 q, k, v, beta, curvature=curvature, scale=1.0, initial_state=initial_state,
-                protected_keys=protected_keys, protected_values=protected_values,
-                protection_rank=self.protection_rank,
+                output_final_state=use_cache, protected_keys=protected_keys,
+                protected_values=protected_values, protected_count=protected_count,
+                protection_rank=self.protection_rank, checkpoint_size=max(64, self.chunk_size),
             )
-            recurrent_state = {'state': final_state, 'protected_keys': protected_keys, 'protected_values': protected_values}
+            recurrent_state = {
+                'state': final_state,
+                'protected_keys': protected_keys,
+                'protected_values': protected_values,
+                'protected_count': protected_count,
+            }
         else:
             o, final_state = op(
                 q, k, v, beta, curvature=curvature, scale=1.0,

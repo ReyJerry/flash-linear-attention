@@ -17,7 +17,7 @@ def chunk_hyperbolic_delta_rule(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
-    curvature: float = 1.0,
+    curvature: float | torch.Tensor = 1.0,
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,

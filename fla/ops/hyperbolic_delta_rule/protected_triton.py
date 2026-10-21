@@ -16,6 +16,61 @@ from .naive import check_inputs as validate_inputs
 from .protected import _EMPTY_SCORE, _select_bank
 
 
+class _TritonSmoothBankUpdate(torch.autograd.Function):
+    """Smooth bounded-bank update with an exact first-order VJP in Triton."""
+
+    @staticmethod
+    def forward(ctx, bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores, temperature):
+        import triton
+        from .protected_kernels import soft_bank_update_fwd_kernel
+
+        B, T, H, K = cand_k.shape
+        V, R = cand_v.shape[-1], bank_k.shape[-2]
+        bk, bv, br = max(16, triton.next_power_of_2(K)), max(16, triton.next_power_of_2(V)), max(16, triton.next_power_of_2(R))
+        next_k, next_v = torch.empty_like(bank_k), torch.empty_like(bank_v)
+        next_scores = torch.empty_like(bank_scores)
+        count = torch.empty((B, H), device=cand_k.device, dtype=torch.int32)
+        tape_k = torch.empty((B, T, H, R, K), device=cand_k.device, dtype=torch.float32)
+        tape_v = torch.empty((B, T, H, R, V), device=cand_v.device, dtype=torch.float32)
+        tape_scores = torch.empty((B, T, H, R), device=cand_k.device, dtype=torch.float32)
+        soft_bank_update_fwd_kernel[(B * H,)](
+            bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores,
+            next_k, next_v, next_scores, count, tape_k, tape_v, tape_scores,
+            T=T, H=H, K=K, V=V, R=R, TEMP=temperature, SENTINEL=_EMPTY_SCORE,
+            BK=bk, BV=bv, BR=br, num_warps=4, enable_fp_fusion=False,
+        )
+        ctx.save_for_backward(bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores, tape_k, tape_v, tape_scores)
+        ctx.temperature = float(temperature)
+        ctx.mark_non_differentiable(count)
+        return next_k, next_v, next_scores, count
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dnext_k, dnext_v, dnext_scores, dcount):
+        import triton
+        from .protected_kernels import soft_bank_update_bwd_kernel
+
+        bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores, tape_k, tape_v, tape_scores = ctx.saved_tensors
+        B, T, H, K = cand_k.shape
+        V, R = cand_v.shape[-1], bank_k.shape[-2]
+        dnext_k = torch.zeros_like(bank_k) if dnext_k is None else dnext_k.contiguous()
+        dnext_v = torch.zeros_like(bank_v) if dnext_v is None else dnext_v.contiguous()
+        dnext_scores = torch.zeros_like(bank_scores) if dnext_scores is None else dnext_scores.contiguous()
+        dinit_k, dinit_v = torch.empty_like(bank_k), torch.empty_like(bank_v)
+        dinit_scores = torch.empty_like(bank_scores)
+        dcand_k, dcand_v = torch.empty_like(cand_k), torch.empty_like(cand_v)
+        dcand_scores = torch.empty_like(cand_scores)
+        soft_bank_update_bwd_kernel[(B * H,)](
+            bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores,
+            tape_k, tape_v, tape_scores, dnext_k, dnext_v, dnext_scores,
+            dinit_k, dinit_v, dinit_scores, dcand_k, dcand_v, dcand_scores,
+            T=T, H=H, K=K, V=V, R=R, TEMP=ctx.temperature, SENTINEL=_EMPTY_SCORE,
+            BK=max(16, triton.next_power_of_2(K)), BV=max(16, triton.next_power_of_2(V)),
+            BR=max(16, triton.next_power_of_2(R)), num_warps=4, enable_fp_fusion=False,
+        )
+        return dinit_k, dinit_v, dinit_scores, dcand_k, dcand_v, dcand_scores, None
+
+
 class _ProtectedProjection(torch.autograd.Function):
     """Triton projection with analytic VJP and shared-Key gradient reduction."""
 

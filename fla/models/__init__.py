@@ -24,6 +24,11 @@ from fla.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
 from fla.models.gsa2 import GSA2Config, GSA2ForCausalLM, GSA2Model
 from fla.models.hgrn import HGRNConfig, HGRNForCausalLM, HGRNModel
 from fla.models.hgrn2 import HGRN2Config, HGRN2ForCausalLM, HGRN2Model
+from fla.models.hyperbolic_deltanet import (
+    HyperbolicDeltaNetConfig,
+    HyperbolicDeltaNetForCausalLM,
+    HyperbolicDeltaNetModel,
+)
 from fla.models.kda import KDAConfig, KDAForCausalLM, KDAModel
 from fla.models.lightnet import LightNetConfig, LightNetForCausalLM, LightNetModel
 from fla.models.linear_attn import LinearAttentionConfig, LinearAttentionForCausalLM, LinearAttentionModel
@@ -109,6 +114,9 @@ __all__ = [
     'HGRNConfig',
     'HGRNForCausalLM',
     'HGRNModel',
+    'HyperbolicDeltaNetConfig',
+    'HyperbolicDeltaNetForCausalLM',
+    'HyperbolicDeltaNetModel',
     'KDAConfig',
     'KDAForCausalLM',
     'KDAModel',

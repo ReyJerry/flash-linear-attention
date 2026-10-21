@@ -298,3 +298,33 @@ def test_protected_reference_preserves_previous_associations():
     for j in range(pk.shape[2] - 1):
         got = torch.einsum('k,kv->v', pk[0, 0, j], state[0, 0])
         torch.testing.assert_close(got, pv[0, 0, j], atol=1e-7, rtol=1e-7)
+
+
+def test_protected_reference_forward_and_gradients():
+    protected_path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'
+    spec = importlib.util.spec_from_file_location('hyperbolic_protected_reference', protected_path.resolve())
+    protected = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(protected)
+    q, k, v, beta, state = make_case(T=7, K=5, V=3, B=1, H=1, c=0.5)
+    raw_c = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)
+    c = torch.nn.functional.softplus(raw_c)
+    out, final, pk, pv, pc = protected.protected_recurrent_hyperbolic_delta_rule(
+        q, k, v, beta, curvature=c, initial_state=state, protection_rank=2,
+    )
+    assert out.shape == v.shape
+    assert final.shape == state.shape
+    assert pk.shape == (1, 1, 3, 2, 5)
+    assert pv.shape == (1, 1, 3, 2)
+    assert pc.shape == (1, 1, 3)
+    grad = torch.autograd.grad(out.square().sum() + final.square().sum(), (q, k, v, beta, state, raw_c))
+    assert all(torch.isfinite(g).all() for g in grad)
+    assert grad[-1].abs() > 0
+
+
+def test_learnable_curvature_reference_gradient():
+    q, k, v, beta, state = make_case(T=4, K=4, V=2, B=1, H=1, dtype=torch.float64)
+    raw = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)
+    curvature = torch.nn.functional.softplus(raw)
+    out, final = recurrent(q, k, v, beta, curvature=curvature, initial_state=state, output_final_state=True)
+    grad = torch.autograd.grad(out.square().sum() + final.square().sum(), raw)[0]
+    assert torch.isfinite(grad) and grad.abs() > 0

@@ -38,7 +38,7 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
             )
         else:
             hyperbolic_delta_rule_fwd_kernel[(N * H, triton.cdiv(V, 16))](
-                q, k, v, beta, h0, cu, o, ht, cp,
+                q, k, v, beta, h0, cu, o, ht, cp, curvature,
                 BK=triton.next_power_of_2(K), BV=16, **common, num_warps=4, enable_fp_fusion=False,
             )
         ctx.save_for_backward(q, k, v, beta, h0, cu, cp, curvature)

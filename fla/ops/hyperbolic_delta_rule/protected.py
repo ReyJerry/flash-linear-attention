@@ -119,32 +119,30 @@ def _select_bank_smooth(
 
     Empty slots are filled in order. Once full, each slot receives a smooth
     score-weighted convex update. No hard top-k, straight-through estimator,
-    detach, or discrete ranking is used for replacement.
+    or detached surrogate gradient is used.
     """
     R = bank_k.shape[-2]
     next_k, next_v, next_scores = bank_k, bank_v, bank_scores
+    tau = max(float(temperature), 1.0e-3)
     for t in range(candidate_k.shape[1]):
-        ck = candidate_k[:, t]
-        cv = candidate_v[:, t]
-        cs = candidate_scores[:, t]
+        ck, cv, cs = candidate_k[:, t], candidate_v[:, t], candidate_scores[:, t]
         active = next_scores.detach() > (_EMPTY_SCORE / 2)
-        count = int(active[0, 0].sum().item())
-        if count < R:
-            slot = F.one_hot(
-                torch.full((bank_k.shape[0], bank_k.shape[1]), count, device=bank_k.device, dtype=torch.long),
-                num_classes=R,
-            ).to(bank_k.dtype)
-            slot_k, slot_v, slot_s = slot.unsqueeze(-1), slot.unsqueeze(-1), slot
-            next_k = next_k * (1.0 - slot_k) + ck.unsqueeze(2) * slot_k
-            next_v = next_v * (1.0 - slot_v) + cv.unsqueeze(2) * slot_v
-            next_scores = next_scores * (1.0 - slot_s) + cs.unsqueeze(-1) * slot_s
-        else:
-            p_replace = torch.softmax(-next_scores / max(float(temperature), 1.0e-3), dim=-1)
-            sigma = torch.sigmoid((cs.unsqueeze(-1) - next_scores) / max(float(temperature), 1.0e-3))
-            gate = p_replace * sigma
-            next_k = (1.0 - gate.unsqueeze(-1)) * next_k + gate.unsqueeze(-1) * ck.unsqueeze(2)
-            next_v = (1.0 - gate.unsqueeze(-1)) * next_v + gate.unsqueeze(-1) * cv.unsqueeze(2)
-            next_scores = (1.0 - gate) * next_scores + gate * cs.unsqueeze(-1)
+        count = active.sum(dim=-1)
+        has_space = count < R
+        slot_index = count.clamp(max=R - 1)
+        slot = F.one_hot(slot_index, num_classes=R).to(bank_k.dtype) * has_space.unsqueeze(-1)
+        inserted_k = next_k * (1.0 - slot.unsqueeze(-1)) + ck.unsqueeze(2) * slot.unsqueeze(-1)
+        inserted_v = next_v * (1.0 - slot.unsqueeze(-1)) + cv.unsqueeze(2) * slot.unsqueeze(-1)
+        inserted_s = next_scores * (1.0 - slot) + cs.unsqueeze(-1) * slot
+        p_replace = torch.softmax(-next_scores / tau, dim=-1)
+        sigma = torch.sigmoid((cs.unsqueeze(-1) - next_scores) / tau)
+        gate = p_replace * sigma
+        replaced_k = (1.0 - gate.unsqueeze(-1)) * next_k + gate.unsqueeze(-1) * ck.unsqueeze(2)
+        replaced_v = (1.0 - gate.unsqueeze(-1)) * next_v + gate.unsqueeze(-1) * cv.unsqueeze(2)
+        replaced_s = (1.0 - gate) * next_scores + gate * cs.unsqueeze(-1)
+        next_k = torch.where(has_space[..., None, None], inserted_k, replaced_k)
+        next_v = torch.where(has_space[..., None, None], inserted_v, replaced_v)
+        next_scores = torch.where(has_space[..., None], inserted_s, replaced_s)
     count = (next_scores.detach() > (_EMPTY_SCORE / 2)).sum(dim=-1).to(torch.int32)
     return next_k, next_v, next_scores, count
 

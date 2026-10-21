@@ -123,12 +123,18 @@ or use a specialized batched triangular solver. Backward stores one replay
 interval per sequence/value tile and reduces q/k partial gradients in PyTorch
 without atomics. Runtime memory depends on sequence count and head dimensions.
 
-The intended CUDA contract is FP16/BF16/FP32 input, FP32 state/accumulation,
-K<=256, and chunk/checkpoint size 16 or 32. Near-boundary values can make the
-triangular systems ill-conditioned; start with the default margin and short
-chunks. Learned curvature, explicit protected-memory subspaces, double backward,
-other devices, and torch.compile/CUDA-graph compatibility are not implemented or
-certified. Model quality and long-training stability have not been measured.
+The base CUDA contract is FP16/BF16/FP32 input, FP32 state/accumulation,
+K<=256, and chunk/checkpoint size 16 or 32. Learned curvature is supported by
+the base recurrent/chunk Triton paths with first-order curvature gradients.
+Protected Triton supports K,V<=128 and protection_rank<=16; it stores per-token
+state and bank tapes for backward, so training memory is O(T H V R K). This is
+a correctness-first implementation, not a memory-optimized kernel. Protected
+mode is dense-only; checkpoint_size is accepted for API consistency but does
+not reduce tape memory. Near-boundary values can make the projection system
+ill-conditioned. Double backward, other devices, and torch.compile/CUDA-graph
+compatibility are not implemented or certified. Model quality and long-training
+stability have not been measured. No GPU execution has been verified in the
+current CPU-only environment.
 
 ## Validation status
 

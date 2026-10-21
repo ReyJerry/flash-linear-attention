@@ -68,3 +68,32 @@ def test_layer_padding_and_cache(conv):
     empty_out, _, cache = layer(x[:, :2], attention_mask=zeros, past_key_values=cache, use_cache=True)
     torch.testing.assert_close(empty_out, torch.zeros_like(empty_out))
     torch.testing.assert_close(cache[0]['recurrent_state'], state)
+
+
+def test_layer_learnable_curvature_and_protected_cache():
+    torch.manual_seed(91)
+    learned = HyperbolicDeltaNet(
+        hidden_size=32, head_dim=16, num_heads=2, curvature=0.5,
+        learnable_curvature=True, use_short_conv=False, fuse_norm=False,
+        mode='chunk', layer_idx=0,
+    ).cuda().train()
+    x = torch.randn(1, 7, 32, device='cuda')
+    learned(x)[0].square().mean().backward()
+    assert learned.curvature_raw.grad is not None
+    assert torch.isfinite(learned.curvature_raw.grad).all()
+    assert learned.curvature_raw.grad.abs() > 0
+
+    protected = HyperbolicDeltaNet(
+        hidden_size=32, head_dim=16, num_heads=2, curvature=0.5,
+        protection_rank=2, use_short_conv=False, fuse_norm=False,
+        mode='fused_recurrent', layer_idx=0,
+    ).cuda().eval()
+    cache = Cache()
+    with torch.no_grad():
+        first, _, cache = protected(x, past_key_values=cache, use_cache=True)
+        state = cache[0]['recurrent_state']
+        assert state['protected_keys'].shape == (1, 2, 8, 2, 16)
+        assert state['protected_values'].shape == (1, 2, 8, 2)
+        assert state['protected_count'].shape == (1, 2, 8)
+        second, _, cache = protected(x[:, :1], past_key_values=cache, use_cache=True)
+        assert torch.isfinite(first).all() and torch.isfinite(second).all()

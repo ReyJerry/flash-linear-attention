@@ -335,8 +335,8 @@ def test_protected_reference_forward_and_gradients():
     q, k, v, beta, state = make_case(T=7, K=5, V=3, B=1, H=1, c=0.5)
     raw_c = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)
     c = torch.nn.functional.softplus(raw_c)
-    out, final, pk, pv, pc = protected.protected_recurrent_hyperbolic_delta_rule(
-        q, k, v, beta, curvature=c, initial_state=state, protection_rank=2,
+    out, final, pk, pv, scores, pc = protected.protected_recurrent_hyperbolic_delta_rule(
+        q, k, v, beta, curvature=c, initial_state=state, protection_rank=2, mode='naive',
     )
     assert out.shape == v.shape
     assert final.shape == state.shape

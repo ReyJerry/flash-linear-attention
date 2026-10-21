@@ -98,10 +98,17 @@ def protected_recurrent_hyperbolic_delta_rule_triton(
         pv0 = torch.zeros((B, H, V, protection_rank), device=q.device, dtype=torch.float32)
         pc0 = torch.zeros((B, H, V), device=q.device, dtype=torch.int32)
     else:
+        if protected_values is None:
+            raise ValueError("protected_values is required with protected_keys.")
         pk0, pv0 = protected_keys.float().contiguous(), protected_values.float().contiguous()
-        pc0 = protected_count.to(device=q.device, dtype=torch.int32).contiguous()
+        if protected_count is None:
+            pc0 = (pk0.square().sum(-1) > 0).sum(-1).to(torch.int32)
+        else:
+            pc0 = protected_count.to(device=q.device, dtype=torch.int32).contiguous()
         if pk0.shape != (B, H, V, protection_rank, K) or pv0.shape != (B, H, V, protection_rank) or pc0.shape != (B, H, V):
             raise ValueError("Protected bank shape mismatch.")
+        if bool(((pc0 < 0) | (pc0 > protection_rank)).any().item()):
+            raise ValueError("protected_count must be in [0, protection_rank].")
     c = curvature.to(device=q.device, dtype=torch.float32).reshape(()).contiguous() if isinstance(curvature, torch.Tensor) else torch.tensor(cval, device=q.device, dtype=torch.float32)
     save_tape = torch.is_grad_enabled() and any(x.requires_grad for x in (q, k, v, beta, h0, c))
     scale = K ** -0.5 if scale is None else float(scale)

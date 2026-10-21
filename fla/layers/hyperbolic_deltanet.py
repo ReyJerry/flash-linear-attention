@@ -185,7 +185,7 @@ class HyperbolicDeltaNet(nn.Module):
                 output_final_state=use_cache, protected_keys=protected_keys,
                 protected_values=protected_values, protected_count=protected_count,
                 protected_scores=protected_scores, mode='triton' if q.is_cuda else 'naive',
-                protection_rank=self.protection_rank, checkpoint_size=max(64, self.chunk_size),
+                protection_rank=self.protection_rank, checkpoint_size=self.chunk_size,
             )
             recurrent_state = {
                 'state': final_state,

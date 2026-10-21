@@ -168,7 +168,7 @@ def test_protected_triton_forward_backward_and_shared_bank_gradients():
     )
 
     torch.manual_seed(73)
-    B, T, H, K, V = 1, 19, 1, 16, 3
+    B, T, H, K, V = 2, 19, 1, 16, 3
     q = torch.randn(B, T, H, K, device='cuda', dtype=torch.float32, requires_grad=True)
     k = torch.nn.functional.normalize(torch.randn_like(q), dim=-1).detach().requires_grad_()
     v = (0.08 * torch.randn(B, T, H, V, device='cuda')).requires_grad_()
@@ -196,3 +196,39 @@ def test_protected_triton_forward_backward_and_shared_bank_gradients():
     )
     for a, e in zip(ga, gr):
         torch.testing.assert_close(a.float(), e.float(), atol=2e-2, rtol=2e-1)
+
+
+def test_protected_triton_checkpoint_peak_memory_and_parity():
+    from fla.ops.hyperbolic_delta_rule.protected import protected_recurrent_hyperbolic_delta_rule
+
+    torch.manual_seed(117)
+    B, T, H, K, V = 2, 65, 1, 16, 4
+    base = (
+        torch.randn(B, T, H, K, device='cuda', dtype=torch.float32),
+        torch.nn.functional.normalize(torch.randn(B, T, H, K, device='cuda'), dim=-1),
+        0.06 * torch.randn(B, T, H, V, device='cuda'),
+        torch.rand(B, T, H, V, device='cuda'),
+        torch.zeros(B, H, K, V, device='cuda'),
+    )
+    def run(checkpoint):
+        args = tuple(x.detach().clone().requires_grad_() for x in base)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        out = protected_recurrent_hyperbolic_delta_rule(
+            *args[:4], curvature=0.5, initial_state=args[4], protection_rank=2,
+            checkpoint_size=16, mode='triton', checkpoint=checkpoint,
+        )
+        loss = out[0].square().mean() + out[1].square().mean() + out[2].square().mean() * 1e-3 + out[3].square().mean() * 1e-3
+        grads = torch.autograd.grad(loss, args)
+        torch.cuda.synchronize()
+        peak = torch.cuda.max_memory_allocated()
+        return tuple(x.detach() for x in out[:2]), tuple(g.detach() for g in grads), peak
+    result_plain, grads_plain, peak_plain = run(False)
+    result_ckpt, grads_ckpt, peak_ckpt = run(True)
+    for a, b in zip(result_plain, result_ckpt):
+        torch.testing.assert_close(a, b, atol=1e-4, rtol=1e-3)
+    for a, b in zip(grads_plain, grads_ckpt):
+        torch.testing.assert_close(a, b, atol=2e-3, rtol=2e-2)
+    # Memory reduction is hardware / allocator dependent. Record both peaks;
+    # avoid a brittle universal threshold in CI.
+    print(f'protected peak allocated: no_checkpoint={peak_plain}, checkpoint={peak_ckpt}')

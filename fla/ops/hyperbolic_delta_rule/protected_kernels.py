@@ -199,3 +199,119 @@ __all__ = [
     "protected_kv_project_fwd_kernel",
     "protected_kv_project_bwd_kernel",
 ]
+
+
+
+@triton.jit
+def soft_bank_update_fwd_kernel(
+    BankK, BankV, BankScores, CandK, CandV, CandScores,
+    NextK, NextV, NextScores, Count, TapeK, TapeV, TapeScores,
+    T: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, R: tl.constexpr,
+    TEMP: tl.constexpr, SENTINEL: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, BR: tl.constexpr,
+):
+    """Exact forward for smooth replacement; no discrete top-k or STE."""
+    p = tl.program_id(0)
+    b, h = p // H, p % H
+    rows, ik, iv = tl.arange(0, BR), tl.arange(0, BK), tl.arange(0, BV)
+    bank_base = (b * H + h) * R
+    bank_k = tl.load(BankK + (bank_base + rows[:, None]) * K + ik[None, :],
+                     (rows[:, None] < R) & (ik[None, :] < K), 0).to(tl.float32)
+    bank_v = tl.load(BankV + (bank_base + rows[:, None]) * V + iv[None, :],
+                     (rows[:, None] < R) & (iv[None, :] < V), 0).to(tl.float32)
+    scores = tl.load(BankScores + bank_base + rows, rows < R, SENTINEL).to(tl.float32)
+    for t in range(0, T):
+        tape_base = (((b * T + t) * H + h) * R)
+        tl.store(TapeK + (tape_base + rows[:, None]) * K + ik[None, :],
+                 bank_k, (rows[:, None] < R) & (ik[None, :] < K))
+        tl.store(TapeV + (tape_base + rows[:, None]) * V + iv[None, :],
+                 bank_v, (rows[:, None] < R) & (iv[None, :] < V))
+        tl.store(TapeScores + tape_base + rows, scores, rows < R)
+        cand_k = tl.load(CandK + ((b * T + t) * H + h) * K + ik, ik < K, 0).to(tl.float32)
+        cand_v = tl.load(CandV + ((b * T + t) * H + h) * V + iv, iv < V, 0).to(tl.float32)
+        cand_s = tl.load(CandScores + (b * T + t) * H + h).to(tl.float32)
+        active = (rows < R) & (scores > SENTINEL / 2.0)
+        count = tl.sum(active.to(tl.int32), axis=0)
+        if count < R:
+            slot = rows == count
+            bank_k = tl.where(slot[:, None], cand_k[None, :], bank_k)
+            bank_v = tl.where(slot[:, None], cand_v[None, :], bank_v)
+            scores = tl.where(slot, cand_s, scores)
+        else:
+            safe_scores = tl.where(rows < R, scores, 0.0)
+            p_replace = tl.softmax(-safe_scores / TEMP, axis=0)
+            sigma = 1.0 / (1.0 + tl.exp(-(cand_s - scores) / TEMP))
+            gate = p_replace * sigma
+            bank_k = (1.0 - gate[:, None]) * bank_k + gate[:, None] * cand_k[None, :]
+            bank_v = (1.0 - gate[:, None]) * bank_v + gate[:, None] * cand_v[None, :]
+            scores = (1.0 - gate) * scores + gate * cand_s
+    tl.store(NextK + (bank_base + rows[:, None]) * K + ik[None, :],
+             bank_k, (rows[:, None] < R) & (ik[None, :] < K))
+    tl.store(NextV + (bank_base + rows[:, None]) * V + iv[None, :],
+             bank_v, (rows[:, None] < R) & (iv[None, :] < V))
+    tl.store(NextScores + bank_base + rows, scores, rows < R)
+    count = tl.sum(((rows < R) & (scores > SENTINEL / 2.0)).to(tl.int32), axis=0)
+    tl.store(Count + p, count)
+
+
+@triton.jit
+def soft_bank_update_bwd_kernel(
+    BankK, BankV, BankScores, CandK, CandV, CandScores,
+    TapeK, TapeV, TapeScores, DNextK, DNextV, DNextScores,
+    DInitK, DInitV, DInitScores, DCandK, DCandV, DCandScores,
+    T: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, R: tl.constexpr,
+    TEMP: tl.constexpr, SENTINEL: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, BR: tl.constexpr,
+):
+    """Exact reverse-mode derivative of the smooth sequential bank update."""
+    p = tl.program_id(0)
+    b, h = p // H, p % H
+    rows, ik, iv = tl.arange(0, BR), tl.arange(0, BK), tl.arange(0, BV)
+    bank_base = (b * H + h) * R
+    d_k = tl.load(DNextK + (bank_base + rows[:, None]) * K + ik[None, :],
+                  (rows[:, None] < R) & (ik[None, :] < K), 0).to(tl.float32)
+    d_v = tl.load(DNextV + (bank_base + rows[:, None]) * V + iv[None, :],
+                  (rows[:, None] < R) & (iv[None, :] < V), 0).to(tl.float32)
+    d_s = tl.load(DNextScores + bank_base + rows, rows < R, 0).to(tl.float32)
+    for rev in range(0, T):
+        t = T - 1 - rev
+        tape_base = (((b * T + t) * H + h) * R)
+        old_k = tl.load(TapeK + (tape_base + rows[:, None]) * K + ik[None, :],
+                        (rows[:, None] < R) & (ik[None, :] < K), 0).to(tl.float32)
+        old_v = tl.load(TapeV + (tape_base + rows[:, None]) * V + iv[None, :],
+                        (rows[:, None] < R) & (iv[None, :] < V), 0).to(tl.float32)
+        old_s = tl.load(TapeScores + tape_base + rows, rows < R, SENTINEL).to(tl.float32)
+        cand_k = tl.load(CandK + ((b * T + t) * H + h) * K + ik, ik < K, 0).to(tl.float32)
+        cand_v = tl.load(CandV + ((b * T + t) * H + h) * V + iv, iv < V, 0).to(tl.float32)
+        cand_s = tl.load(CandScores + (b * T + t) * H + h).to(tl.float32)
+        active = (rows < R) & (old_s > SENTINEL / 2.0)
+        count = tl.sum(active.to(tl.int32), axis=0)
+        if count < R:
+            slot = rows == count
+            d_cand_k = tl.sum(tl.where(slot[:, None], d_k, 0.0), axis=0)
+            d_cand_v = tl.sum(tl.where(slot[:, None], d_v, 0.0), axis=0)
+            d_cand_s = tl.sum(tl.where(slot, d_s, 0.0), axis=0)
+            d_k = tl.where(slot[:, None], 0.0, d_k)
+            d_v = tl.where(slot[:, None], 0.0, d_v)
+            d_s = tl.where(slot, 0.0, d_s)
+        else:
+            p_replace = tl.softmax(-old_s / TEMP, axis=0)
+            sigma = 1.0 / (1.0 + tl.exp(-(cand_s - old_s) / TEMP))
+            gate = p_replace * sigma
+            d_gate = tl.sum(d_k * (cand_k[None, :] - old_k), axis=1)
+            d_gate += tl.sum(d_v * (cand_v[None, :] - old_v), axis=1)
+            d_gate += d_s * (cand_s - old_s)
+            d_cand_k = tl.sum(gate[:, None] * d_k, axis=0)
+            d_cand_v = tl.sum(gate[:, None] * d_v, axis=0)
+            d_cand_s = tl.sum(gate * d_s, axis=0)
+            hgate = d_gate * p_replace * sigma / TEMP
+            d_cand_s += tl.sum(hgate * (1.0 - sigma), axis=0)
+            d_s = (1.0 - gate) * d_s + p_replace * tl.sum(hgate, axis=0) - hgate * (2.0 - sigma)
+            d_k = (1.0 - gate[:, None]) * d_k
+            d_v = (1.0 - gate[:, None]) * d_v
+        tl.store(DCandK + ((b * T + t) * H + h) * K + ik, d_cand_k, ik < K)
+        tl.store(DCandV + ((b * T + t) * H + h) * V + iv, d_cand_v, iv < V)
+        tl.store(DCandScores + (b * T + t) * H + h, d_cand_s)
+    tl.store(DInitK + (bank_base + rows[:, None]) * K + ik[None, :],
+             d_k, (rows[:, None] < R) & (ik[None, :] < K))
+    tl.store(DInitV + (bank_base + rows[:, None]) * V + iv[None, :],
+             d_v, (rows[:, None] < R) & (iv[None, :] < V))
+    tl.store(DInitScores + bank_base + rows, d_s, rows < R)

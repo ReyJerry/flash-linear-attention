@@ -47,10 +47,11 @@ def protected_recurrent_hyperbolic_delta_rule(
     outputs, finals, saved_keys, saved_values = [], [], [], []
     out_scale = K ** -0.5 if scale is None else scale
     for b in range(B):
-        batch_states, batch_keys, batch_values = [], [], []
+        batch_states, batch_keys, batch_values, head_outputs = [], [], [], []
         for h in range(H):
             s = state[b, h]
             old_k, old_v = list(protected_keys[b, h].unbind(0)), list(protected_values[b, h].unbind(0))
+            this_head_outputs = []
             for t in range(T):
                 kt, vt, bt = k[b, t, h], v[b, t, h], beta[b, t, h]
                 a = kt.square().sum() - c * vt.square()
@@ -80,17 +81,19 @@ def protected_recurrent_hyperbolic_delta_rule(
                         raise FloatingPointError("Projection left the positive Klein chart.")
                     cols.append(updated[1:] / updated[0])
                 s = torch.stack(cols, dim=-1)
-                outputs.append(out_scale * torch.einsum("k,kv->v", q[b, t, h], s))
+                this_head_outputs.append(out_scale * torch.einsum("k,kv->v", q[b, t, h], s))
                 old_k.append(kt)
                 old_v.append(torch.einsum("k,kv->v", kt, s))
                 old_k, old_v = old_k[-protection_rank:], old_v[-protection_rank:]
             batch_states.append(s)
+            head_outputs.append(torch.stack(this_head_outputs) if this_head_outputs else v.new_zeros(0, V))
             batch_keys.append(torch.stack(old_k) if old_k else q.new_zeros(0, K))
             batch_values.append(torch.stack(old_v) if old_v else q.new_zeros(0, V))
         finals.append(torch.stack(batch_states))
+        outputs.append(torch.stack(head_outputs, dim=1))
         saved_keys.append(batch_keys)
         saved_values.append(batch_values)
-    out = torch.stack(outputs).reshape(B, T, H, V) if outputs else v
+    out = torch.stack(outputs) if outputs else v
     ht = torch.stack(finals)
     max_rank = max((x.shape[0] for row in saved_keys for x in row), default=0)
     pk, pv = q.new_zeros(B, H, max_rank, K), q.new_zeros(B, H, max_rank, V)

@@ -140,3 +140,52 @@ def test_invalid_geometric_input_is_rejected(op):
     q, k, v, beta, _ = make_case(3, 7, 5, torch.float32)
     with pytest.raises(ValueError, match='Require'):
         op(q, k, torch.full_like(v, 2), beta, check_inputs=True)
+
+
+def test_learnable_curvature_triton_gradient():
+    args = list(make_case(9, 16, 8, torch.float32, vector=True, N=1))
+    raw_c = torch.tensor(0.2, device='cuda', dtype=torch.float32, requires_grad=True)
+    c = torch.nn.functional.softplus(raw_c)
+    out, final = fused_recurrent_hyperbolic_delta_rule(
+        *args[:4], curvature=c, initial_state=args[4], output_final_state=True, checkpoint_size=16,
+    )
+    actual = torch.autograd.grad(out.square().sum() + final.square().sum(), (*args, raw_c))
+    oracle_args = tuple(x.detach().double().requires_grad_() for x in args)
+    raw_ref = raw_c.detach().double().requires_grad_()
+    c_ref = torch.nn.functional.softplus(raw_ref)
+    ref_out, ref_final = naive_recurrent_hyperbolic_delta_rule(
+        *oracle_args[:4], curvature=c_ref, initial_state=oracle_args[4], output_final_state=True,
+    )
+    expected = torch.autograd.grad(ref_out.square().sum() + ref_final.square().sum(), (*oracle_args, raw_ref))
+    for a, e in zip(actual, expected):
+        torch.testing.assert_close(a.float(), e.to(a.dtype).float(), atol=5e-3, rtol=5e-2)
+
+
+def test_protected_triton_forward_backward():
+    from fla.ops.hyperbolic_delta_rule.protected import _protected_reference, protected_recurrent_hyperbolic_delta_rule
+
+    torch.manual_seed(73)
+    B, T, H, K, V = 1, 7, 1, 16, 3
+    q = torch.randn(B, T, H, K, device='cuda', dtype=torch.float32, requires_grad=True)
+    k = torch.nn.functional.normalize(torch.randn_like(q), dim=-1).detach().requires_grad_()
+    v = (0.12 * torch.randn(B, T, H, V, device='cuda')).requires_grad_()
+    beta = torch.rand(B, T, H, V, device='cuda', dtype=torch.float32, requires_grad=True)
+    h0 = torch.zeros(B, H, K, V, device='cuda', dtype=torch.float32, requires_grad=True)
+    curvature = torch.tensor(0.5, device='cuda', dtype=torch.float32, requires_grad=True)
+    actual = protected_recurrent_hyperbolic_delta_rule(
+        q, k, v, beta, curvature=curvature, initial_state=h0, protection_rank=2,
+    )
+    oracle_inputs = tuple(x.detach().double().requires_grad_() for x in (q, k, v, beta, h0))
+    c_ref = curvature.detach().double().requires_grad_()
+    expected = _protected_reference(
+        *oracle_inputs[:4], curvature=c_ref, scale=K ** -0.5,
+        initial_state=oracle_inputs[4], protected_keys=None, protected_values=None,
+        protected_count=None, protection_rank=2,
+    )
+    torch.testing.assert_close(actual[0].float(), expected[0].to(q.dtype).float(), atol=5e-3, rtol=5e-2)
+    torch.testing.assert_close(actual[1].float(), expected[1].to(q.dtype).float(), atol=5e-3, rtol=5e-2)
+    do, dh = torch.randn_like(actual[0]), torch.randn_like(actual[1])
+    ga = torch.autograd.grad((actual[0], actual[1]), (q, k, v, beta, h0, curvature), (do, dh))
+    gr = torch.autograd.grad((expected[0], expected[1]), (*oracle_inputs, c_ref), (do.double(), dh.double()))
+    for a, e in zip(ga, gr):
+        torch.testing.assert_close(a.float(), e.to(a.dtype).float(), atol=1e-2, rtol=1e-1)

@@ -3,119 +3,164 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Triton operator wrapper for explicit Lorentz-protected KV updates."""
+"""End-to-end Triton protected projection + existing WY/Chunk recurrence."""
 
 from __future__ import annotations
 
 import torch
 from torch.autograd.function import once_differentiable
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
+from .chunk import chunk_hyperbolic_delta_rule
 from .naive import check_inputs as validate_inputs
+from .protected import _EMPTY_SCORE, _select_bank
 
 
-class ProtectedHyperbolicDeltaRuleFunction(torch.autograd.Function):
+class _ProtectedProjection(torch.autograd.Function):
+    """Triton projection with analytic VJP and shared-Key gradient reduction."""
 
     @staticmethod
-    def forward(ctx, q, k, v, beta, h0, pk0, pv0, pc0, curvature, scale, save_tape):
+    def forward(ctx, k, v, bank_k, bank_v, bank_scores, curvature, eps):
         import triton
+        from .protected_kernels import shared_key_gram_fwd_kernel, protected_kv_project_fwd_kernel
 
-        from .protected_kernels import protected_hyperbolic_fwd_kernel
-
-        B, T, H, K = q.shape
-        V, R = v.shape[-1], pk0.shape[3]
-        o, ht = torch.empty_like(v, dtype=q.dtype), torch.empty_like(h0)
-        pk1, pv1, pc1 = torch.empty_like(pk0), torch.empty_like(pv0), torch.empty_like(pc0)
-        tape_s = torch.empty((B, T, H, V, K) if save_tape else (0,), device=q.device, dtype=torch.float32)
-        tape_pk = torch.empty((B, T, H, V, R, K) if save_tape else (0,), device=q.device, dtype=torch.float32)
-        tape_pv = torch.empty((B, T, H, V, R) if save_tape else (0,), device=q.device, dtype=torch.float32)
-        tape_pc = torch.empty((B, T, H, V) if save_tape else (0,), device=q.device, dtype=torch.int32)
-        common = dict(H=H, K=K, V=V, R=R, T=T, SCALE=scale, SAVE=save_tape,
-                      BK=max(16, triton.next_power_of_2(K)), BR=max(16, triton.next_power_of_2(R)))
-        protected_hyperbolic_fwd_kernel[(B * H * V,)](
-            q, k, v, beta, h0, pk0, pv0, pc0, o, ht, pk1, pv1, pc1,
-            tape_s, tape_pk, tape_pv, tape_pc, curvature, **common,
-            num_warps=8, enable_fp_fusion=False,
+        B, T, H, K = k.shape
+        V, R = v.shape[-1], bank_k.shape[-2]
+        bt = min(32, triton.next_power_of_2(max(T, 1)))
+        bk, br = max(16, triton.next_power_of_2(K)), max(16, triton.next_power_of_2(R))
+        ainv = torch.empty((B, H, R, R), device=k.device, dtype=torch.float32)
+        shared_key_gram_fwd_kernel[(B * H,)](
+            bank_k, bank_scores, ainv, H=H, K=K, R=R, EPS=eps,
+            BK=bk, BR=br, num_warps=4, enable_fp_fusion=False,
         )
-        ctx.save_for_backward(q, k, v, beta, h0, tape_s, tape_pk, tape_pv, tape_pc, curvature)
-        ctx.scale, ctx.rank, ctx.save_tape = scale, R, save_tape
-        ctx.mark_non_differentiable(pk1, pv1, pc1)
+        kb = torch.empty((B, T, H, V, K), device=k.device, dtype=torch.float32)
+        vb = torch.empty((B, T, H, V), device=v.device, dtype=torch.float32)
+        alpha = torch.empty((B, T, H, V, R), device=k.device, dtype=torch.float32)
+        ginv = torch.empty((B, H, V, R, R), device=k.device, dtype=torch.float32)
+        valid = torch.empty((B, T, H, V), device=k.device, dtype=torch.uint8)
+        c = curvature.to(device=k.device, dtype=torch.float32).reshape(()).contiguous()
+        protected_kv_project_fwd_kernel[(B * H * V,)](
+            k, v, bank_k, bank_v, bank_scores, ainv, c, kb, vb, alpha, ginv, valid,
+            T=T, H=H, K=K, V=V, R=R, EPS=eps, BT=bt, BK=bk, BR=br,
+            num_warps=4, enable_fp_fusion=False,
+        )
+        ctx.save_for_backward(k, v, bank_k, bank_v, bank_scores, c, alpha, ginv, valid, kb, vb)
+        ctx.eps = eps
         ctx.set_materialize_grads(False)
-        return o, ht, pk1, pv1, pc1
+        return kb, vb
 
     @staticmethod
     @once_differentiable
-    def backward(ctx, do, dht, dpk, dpv, dpc):
+    def backward(ctx, dkb, dvb):
         import triton
+        from .protected_kernels import protected_kv_project_bwd_kernel
 
-        from .protected_kernels import protected_hyperbolic_bwd_kernel
-
-        q, k, v, beta, h0, tape_s, tape_pk, tape_pv, tape_pc, curvature = ctx.saved_tensors
-        B, T, H, K = q.shape
-        V, R = v.shape[-1], ctx.rank
-        if not ctx.save_tape:
-            raise RuntimeError("Protected backward was invoked without saved state tapes.")
-        do = torch.zeros_like(v) if do is None else do.contiguous()
-        dht = torch.zeros_like(h0) if dht is None else dht.contiguous()
-        dq = torch.empty((B, T, H, V, K), device=q.device, dtype=torch.float32)
-        dk = torch.empty_like(dq)
-        dv, db = torch.empty_like(v, dtype=torch.float32), torch.empty_like(beta, dtype=torch.float32)
-        dh0, dc = torch.empty_like(h0), torch.empty((B, T, H, V), device=q.device, dtype=torch.float32)
-        protected_hyperbolic_bwd_kernel[(B * H * V,)](
-            q, k, v, beta, tape_s, tape_pk, tape_pv, tape_pc, curvature,
-            do, dht, dq, dk, dv, db, dh0, dc,
-            H=H, K=K, V=V, R=R, T=T, SCALE=ctx.scale,
-            BK=max(16, triton.next_power_of_2(K)), BR=max(16, triton.next_power_of_2(R)), SAVE=save_tape,
-            num_warps=8, enable_fp_fusion=False,
+        k, v, bank_k, bank_v, bank_scores, c, alpha, ginv, valid, kb, vb = ctx.saved_tensors
+        B, T, H, K = k.shape
+        V, R = v.shape[-1], bank_k.shape[-2]
+        dkb = torch.zeros_like(kb) if dkb is None else dkb.contiguous().float()
+        dvb = torch.zeros_like(vb) if dvb is None else dvb.contiguous().float()
+        dk_v = torch.empty((B, T, H, V, K), device=k.device, dtype=torch.float32)
+        dv = torch.empty_like(v, dtype=torch.float32)
+        dbank_k_v = torch.empty((B, H, V, R, K), device=k.device, dtype=torch.float32)
+        dbank_v = torch.empty_like(bank_v, dtype=torch.float32)
+        dc = torch.empty((B, H, V), device=k.device, dtype=torch.float32)
+        protected_kv_project_bwd_kernel[(B * H * V,)](
+            k, v, bank_k, bank_v, bank_scores, c, alpha, ginv, valid, dkb, dvb,
+            dk_v, dv, dbank_k_v, dbank_v, dc,
+            T=T, H=H, K=K, V=V, R=R, BT=min(32, triton.next_power_of_2(max(T, 1))),
+            BK=max(16, triton.next_power_of_2(K)), BR=max(16, triton.next_power_of_2(R)),
+            num_warps=4, enable_fp_fusion=False,
         )
-        return (
-            dq.sum(dim=3).to(q.dtype), dk.sum(dim=3).to(k.dtype), dv.to(v.dtype), db.to(beta.dtype),
-            dh0, None, None, None, dc.sum().reshape_as(curvature).to(curvature.dtype), None, None,
+        # One shared Key bank receives the sum of all independent Value-channel VJPs.
+        return dk_v.sum(dim=3).to(k.dtype), dv.to(v.dtype), dbank_k_v.sum(dim=2).to(bank_k.dtype), dbank_v.to(bank_v.dtype), None, dc.sum().reshape_as(c), None
+
+
+def _run_chunk(q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, scale):
+    kb, vb = _ProtectedProjection.apply(k, v, bank_k, bank_v, bank_scores, curvature, 1.0e-5)
+    outs, states = [], []
+    # The projected Key can differ by Value channel. Reuse the repository's
+    # Triton WY/Chunk recurrence per channel; gradients are concatenated back.
+    for vi in range(v.shape[-1]):
+        oi, si = chunk_hyperbolic_delta_rule(
+            q, kb[:, :, :, vi, :], vb[:, :, :, vi:vi + 1], beta[:, :, :, vi:vi + 1],
+            curvature=curvature, scale=scale, initial_state=state[:, :, :, vi:vi + 1],
+            output_final_state=True, chunk_size=16, check_inputs=False,
         )
+        outs.append(oi)
+        states.append(si)
+    return torch.cat(outs, -1), torch.cat(states, -1)
 
 
-def protected_recurrent_hyperbolic_delta_rule_triton(
-    q, k, v, beta, curvature, scale, initial_state, protected_keys, protected_values,
-    protected_count, protection_rank, checkpoint_size, check_inputs,
+def triton_protected_chunkwise_hyperbolic_delta_rule(
+    q, k, v, beta, curvature=1.0, scale=None, initial_state=None,
+    protected_keys=None, protected_values=None, protected_scores=None,
+    protected_count=None, selection_scores=None, protection_rank=4,
+    checkpoint_size=16, check_inputs=False, checkpoint=True,
+    temperature=0.25, novelty_weight=0.5,
 ):
-    if q.device.type != "cuda":
-        raise ValueError("Triton protected updates require CUDA.")
+    if q.device.type != 'cuda':
+        raise ValueError("Triton protected mode requires CUDA.")
+    if checkpoint_size not in (16, 32):
+        raise ValueError("checkpoint_size must be 16 or 32.")
     if not isinstance(protection_rank, int) or not 1 <= protection_rank <= 16:
-        raise ValueError("Triton protection_rank must be in [1, 16].")
+        raise ValueError("protection_rank must be in [1, 16].")
     B, T, H, K = q.shape
     V = v.shape[-1]
     if K > 128 or V > 128:
-        raise ValueError("Protected Triton kernels support K,V <= 128.")
-    cval = float(curvature.detach().item()) if isinstance(curvature, torch.Tensor) else float(curvature)
-    if not torch.isfinite(torch.tensor(cval)) or cval <= 0:
-        raise ValueError("Protected updates require finite curvature > 0.")
+        raise ValueError("Protected Triton currently supports K,V <= 128.")
     validate_inputs(q, k, v, beta, initial_state, None, curvature, scale, check_inputs)
-    tensors = (q, k, v, beta) + (() if initial_state is None else (initial_state,))
-    if any(x.dtype not in (torch.float16, torch.bfloat16, torch.float32) for x in tensors):
-        raise ValueError("Protected Triton inputs must use float16, bfloat16, or float32.")
     if beta.ndim == 3:
         beta = beta.unsqueeze(-1).expand_as(v)
     q, k, v, beta = (x.contiguous() for x in (q, k, v, beta))
-    h0 = torch.zeros((B, H, K, V), device=q.device, dtype=torch.float32) if initial_state is None else initial_state.float().contiguous()
+    c = curvature.to(device=q.device, dtype=torch.float32).reshape(()).contiguous() if isinstance(curvature, torch.Tensor) else torch.tensor(float(curvature), device=q.device, dtype=torch.float32)
+    state = torch.zeros((B, H, K, V), device=q.device, dtype=torch.float32) if initial_state is None else initial_state.float().contiguous()
     if protected_keys is None:
-        pk0 = torch.zeros((B, H, V, protection_rank, K), device=q.device, dtype=torch.float32)
-        pv0 = torch.zeros((B, H, V, protection_rank), device=q.device, dtype=torch.float32)
-        pc0 = torch.zeros((B, H, V), device=q.device, dtype=torch.int32)
+        bank_k = torch.zeros((B, H, protection_rank, K), device=q.device, dtype=torch.float32)
+        bank_v = torch.zeros((B, H, protection_rank, V), device=q.device, dtype=torch.float32)
+        bank_scores = torch.full((B, H, protection_rank), _EMPTY_SCORE, device=q.device, dtype=torch.float32)
     else:
         if protected_values is None:
             raise ValueError("protected_values is required with protected_keys.")
-        pk0, pv0 = protected_keys.float().contiguous(), protected_values.float().contiguous()
-        if protected_count is None:
-            pc0 = (pk0.square().sum(-1) > 0).sum(-1).to(torch.int32)
+        bank_k, bank_v = protected_keys.float().contiguous(), protected_values.float().contiguous()
+        if protected_scores is not None:
+            bank_scores = protected_scores.float().contiguous()
         else:
-            pc0 = protected_count.to(device=q.device, dtype=torch.int32).contiguous()
-        if pk0.shape != (B, H, V, protection_rank, K) or pv0.shape != (B, H, V, protection_rank) or pc0.shape != (B, H, V):
-            raise ValueError("Protected bank shape mismatch.")
-        if bool(((pc0 < 0) | (pc0 > protection_rank)).any().item()):
-            raise ValueError("protected_count must be in [0, protection_rank].")
-    c = curvature.to(device=q.device, dtype=torch.float32).reshape(()).contiguous() if isinstance(curvature, torch.Tensor) else torch.tensor(cval, device=q.device, dtype=torch.float32)
-    save_tape = torch.is_grad_enabled() and any(x.requires_grad for x in (q, k, v, beta, h0, c))
+            if protected_count is None:
+                protected_count = (bank_k.square().sum(-1) > 0).sum(-1)
+            if protected_count.ndim == 3:
+                protected_count = protected_count.amax(-1)
+            slots = torch.arange(protection_rank, device=q.device).view(1, 1, -1)
+            bank_scores = torch.where(slots < protected_count[..., None], 0.0, _EMPTY_SCORE).float()
+    if bank_k.shape != (B, H, protection_rank, K) or bank_v.shape != (B, H, protection_rank, V):
+        raise ValueError("Protected bank shape mismatch.")
+    scores = k.norm(dim=-1) if selection_scores is None else selection_scores.to(device=q.device, dtype=torch.float32)
+    if scores.shape != (B, T, H):
+        raise ValueError("selection_scores must have shape [B,T,H].")
     scale = K ** -0.5 if scale is None else float(scale)
-    return ProtectedHyperbolicDeltaRuleFunction.apply(q, k, v, beta, h0, pk0, pv0, pc0, c, scale, save_tape)
+    outputs = []
+    for start in range(0, T, checkpoint_size):
+        end = min(start + checkpoint_size, T)
+        qc, kc, vc, bc, sc = q[:, start:end], k[:, start:end], v[:, start:end], beta[:, start:end], scores[:, start:end]
+
+        def run(qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c):
+            out, next_state = _run_chunk(qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, c, scale)
+            # Hard top-k forward, straight-through soft gradients across chunk boundaries.
+            from .protected import _select_bank
+            next_k, next_v, next_scores, _ = _select_bank(
+                bank_k, bank_v, bank_scores, kc, vc, sc,
+                temperature=temperature, novelty_weight=novelty_weight,
+            )
+            return out, next_state, next_k, next_v, next_scores
+
+        args = (qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c)
+        needs_grad = torch.is_grad_enabled() and any(x.requires_grad for x in args)
+        result = activation_checkpoint(run, *args, use_reentrant=False) if checkpoint and needs_grad else run(*args)
+        out, state, bank_k, bank_v, bank_scores = result
+        outputs.append(out)
+    output = torch.cat(outputs, dim=1) if outputs else q.new_zeros((B, 0, H, V))
+    count = (bank_scores.detach() > (_EMPTY_SCORE / 2)).sum(-1).to(torch.int32)
+    return output.to(q.dtype), state, bank_k, bank_v, bank_scores, count
 
 
-__all__ = ["protected_recurrent_hyperbolic_delta_rule_triton"]
+__all__ = ["triton_protected_chunkwise_hyperbolic_delta_rule"]

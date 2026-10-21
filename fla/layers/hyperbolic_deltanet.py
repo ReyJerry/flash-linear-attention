@@ -139,9 +139,10 @@ class HyperbolicDeltaNet(nn.Module):
             protected_keys = cached_recurrent.get('protected_keys')
             protected_values = cached_recurrent.get('protected_values')
             protected_count = cached_recurrent.get('protected_count')
+            protected_scores = cached_recurrent.get('protected_scores')
         else:
             initial_state = cached_recurrent
-            protected_keys = protected_values = protected_count = None
+            protected_keys = protected_values = protected_count = protected_scores = None
         curvature = F.softplus(self.curvature_raw) if self.learnable_curvature else self.curvature
         conv_states = (None, None, None)
         if last_state is not None and last_state.get('conv_state') is not None:
@@ -179,16 +180,18 @@ class HyperbolicDeltaNet(nn.Module):
         if self.protection_rank:
             if cu_seqlens is not None or attention_mask is not None:
                 raise ValueError('Protected memory currently requires dense, unpadded batches.')
-            o, final_state, protected_keys, protected_values, protected_count = protected_recurrent_hyperbolic_delta_rule(
+            o, final_state, protected_keys, protected_values, protected_scores, protected_count = protected_recurrent_hyperbolic_delta_rule(
                 q, k, v, beta, curvature=curvature, scale=1.0, initial_state=initial_state,
                 output_final_state=use_cache, protected_keys=protected_keys,
                 protected_values=protected_values, protected_count=protected_count,
+                protected_scores=protected_scores, mode='triton' if q.is_cuda else 'naive',
                 protection_rank=self.protection_rank, checkpoint_size=max(64, self.chunk_size),
             )
             recurrent_state = {
                 'state': final_state,
                 'protected_keys': protected_keys,
                 'protected_values': protected_values,
+                'protected_scores': protected_scores,
                 'protected_count': protected_count,
             }
         else:

@@ -24,7 +24,6 @@ from fla.ops.hyperbolic_delta_rule import (
 )
 from fla.ops.hyperbolic_delta_rule.naive import prepare_key_value
 from fla.ops.hyperbolic_delta_rule.protected import protected_recurrent_hyperbolic_delta_rule
-from fla.ops.hyperbolic_delta_rule.protected import protected_recurrent_hyperbolic_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -178,6 +177,8 @@ class HyperbolicDeltaNet(nn.Module):
         if mode == 'fused_recurrent':
             extra['checkpoint_size'] = self.chunk_size
         if self.protection_rank:
+            if cu_seqlens is not None or attention_mask is not None:
+                raise ValueError('Protected memory currently requires dense, unpadded batches.')
             o, final_state, protected_keys, protected_values, protected_count = protected_recurrent_hyperbolic_delta_rule(
                 q, k, v, beta, curvature=curvature, scale=1.0, initial_state=initial_state,
                 output_final_state=use_cache, protected_keys=protected_keys,

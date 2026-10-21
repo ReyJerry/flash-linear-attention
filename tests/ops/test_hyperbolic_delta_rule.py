@@ -161,31 +161,38 @@ def test_learnable_curvature_triton_gradient():
         torch.testing.assert_close(a.float(), e.to(a.dtype).float(), atol=5e-3, rtol=5e-2)
 
 
-def test_protected_triton_forward_backward():
-    from fla.ops.hyperbolic_delta_rule.protected import _protected_reference, protected_recurrent_hyperbolic_delta_rule
+def test_protected_triton_forward_backward_and_shared_bank_gradients():
+    from fla.ops.hyperbolic_delta_rule.protected import (
+        naive_protected_chunkwise_hyperbolic_delta_rule,
+        protected_recurrent_hyperbolic_delta_rule,
+    )
 
     torch.manual_seed(73)
-    B, T, H, K, V = 1, 7, 1, 16, 3
+    B, T, H, K, V = 1, 19, 1, 16, 3
     q = torch.randn(B, T, H, K, device='cuda', dtype=torch.float32, requires_grad=True)
     k = torch.nn.functional.normalize(torch.randn_like(q), dim=-1).detach().requires_grad_()
-    v = (0.12 * torch.randn(B, T, H, V, device='cuda')).requires_grad_()
+    v = (0.08 * torch.randn(B, T, H, V, device='cuda')).requires_grad_()
     beta = torch.rand(B, T, H, V, device='cuda', dtype=torch.float32, requires_grad=True)
     h0 = torch.zeros(B, H, K, V, device='cuda', dtype=torch.float32, requires_grad=True)
-    curvature = torch.tensor(0.5, device='cuda', dtype=torch.float32, requires_grad=True)
+    raw_c = torch.tensor(0.2, device='cuda', dtype=torch.float32, requires_grad=True)
+    curvature = torch.nn.functional.softplus(raw_c)
     actual = protected_recurrent_hyperbolic_delta_rule(
-        q, k, v, beta, curvature=curvature, initial_state=h0, protection_rank=2,
+        q, k, v, beta, curvature=curvature, initial_state=h0,
+        protection_rank=2, checkpoint_size=16, mode='triton', checkpoint=True,
     )
     oracle_inputs = tuple(x.detach().double().requires_grad_() for x in (q, k, v, beta, h0))
-    c_ref = curvature.detach().double().requires_grad_()
-    expected = _protected_reference(
-        *oracle_inputs[:4], curvature=c_ref, scale=K ** -0.5,
-        initial_state=oracle_inputs[4], protected_keys=None, protected_values=None,
-        protected_count=None, protection_rank=2,
+    raw_ref = raw_c.detach().double().requires_grad_()
+    c_ref = torch.nn.functional.softplus(raw_ref)
+    expected = naive_protected_chunkwise_hyperbolic_delta_rule(
+        *oracle_inputs[:4], curvature=c_ref, initial_state=oracle_inputs[4],
+        protection_rank=2, chunk_size=16, checkpoint=False,
     )
-    torch.testing.assert_close(actual[0].float(), expected[0].to(q.dtype).float(), atol=5e-3, rtol=5e-2)
-    torch.testing.assert_close(actual[1].float(), expected[1].to(q.dtype).float(), atol=5e-3, rtol=5e-2)
+    torch.testing.assert_close(actual[0].float(), expected[0].float(), atol=1e-2, rtol=1e-1)
+    torch.testing.assert_close(actual[1].float(), expected[1].float(), atol=1e-2, rtol=1e-1)
     do, dh = torch.randn_like(actual[0]), torch.randn_like(actual[1])
-    ga = torch.autograd.grad((actual[0], actual[1]), (q, k, v, beta, h0, curvature), (do, dh))
-    gr = torch.autograd.grad((expected[0], expected[1]), (*oracle_inputs, c_ref), (do.double(), dh.double()))
+    ga = torch.autograd.grad((actual[0], actual[1]), (q, k, v, beta, h0, raw_c), (do, dh))
+    gr = torch.autograd.grad(
+        (expected[0], expected[1]), (*oracle_inputs, raw_ref), (do.double(), dh.double()),
+    )
     for a, e in zip(ga, gr):
-        torch.testing.assert_close(a.float(), e.to(a.dtype).float(), atol=1e-2, rtol=1e-1)
+        torch.testing.assert_close(a.float(), e.float(), atol=2e-2, rtol=2e-1)

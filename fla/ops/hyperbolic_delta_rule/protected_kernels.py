@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Chunkwise Triton projection kernels for differentiable shared-key protection."""
+"""Triton chunkwise projection and VJP kernels for shared-key protection."""
 
 import triton
 import triton.language as tl
@@ -11,7 +11,6 @@ import triton.language as tl
 
 @triton.jit
 def _invert_small(A, R: tl.constexpr):
-    """Gauss-Jordan inverse for a small regularized matrix."""
     rows = tl.arange(0, R)
     inv = tl.where(rows[:, None] == rows[None, :], 1.0, 0.0)
     for pivot in tl.static_range(0, R):
@@ -34,22 +33,26 @@ def shared_key_gram_fwd_kernel(
     H: tl.constexpr, K: tl.constexpr, R: tl.constexpr,
     EPS: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr,
 ):
-    """Compute (K_bank K_bank^T + eps I)^-1 once per batch/head."""
+    """Compute the regularized key-only Gram inverse once per batch/head/chunk."""
     p = tl.program_id(0)
     b, h = p // H, p % H
     rows, cols, ik = tl.arange(0, BR), tl.arange(0, BR), tl.arange(0, BK)
-    base = (b * H + h) * R
-    scores = tl.load(BankScores + base + rows, rows < R, -1.0e6).to(tl.float32)
-    active = scores > -5.0e5
-    pk = tl.load(BankK + base[:, None] if False else BankK + ((b * H + h) * R + rows[:, None]) * K + ik[None, :],
-                 (rows[:, None] < R) & (ik[None, :] < K), 0).to(tl.float32)
+    bank_base = (b * H + h) * R
+    scores = tl.load(BankScores + bank_base + rows, rows < R, -1.0e6).to(tl.float32)
+    active = (rows < R) & (scores > -5.0e5)
+    pk = tl.load(
+        BankK + (bank_base + rows[:, None]) * K + ik[None, :],
+        (rows[:, None] < R) & (ik[None, :] < K), 0,
+    ).to(tl.float32)
     pk = tl.where(active[:, None], pk, 0.0)
     gram = tl.dot(pk, tl.trans(pk), input_precision="ieee")
     eye = tl.where(rows[:, None] == cols[None, :], 1.0, 0.0)
     gram = tl.where(active[:, None] & active[None, :], gram + EPS * eye, eye)
     inv = _invert_small(gram, BR)
-    tl.store(AInv + ((b * H + h) * R + rows[:, None]) * R + cols[None, :],
-             inv, (rows[:, None] < R) & (cols[None, :] < R))
+    tl.store(
+        AInv + ((b * H + h) * R + rows[:, None]) * R + cols[None, :],
+        inv, (rows[:, None] < R) & (cols[None, :] < R),
+    )
 
 
 @triton.jit
@@ -59,7 +62,7 @@ def protected_kv_project_fwd_kernel(
     T: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, R: tl.constexpr,
     EPS: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr,
 ):
-    """Project all tokens in a chunk; reuse one key Gram inverse across values/tokens."""
+    """Project a chunk; reuse A^-1 across every token and value channel."""
     p = tl.program_id(0)
     b, h, vi = p // (H * V), (p // V) % H, p % V
     c = tl.load(Curvature).to(tl.float32)
@@ -67,11 +70,13 @@ def protected_kv_project_fwd_kernel(
     it, ik = tl.arange(0, BT), tl.arange(0, BK)
     bank_base = (b * H + h) * R
     scores = tl.load(BankScores + bank_base + rows, rows < R, -1.0e6).to(tl.float32)
-    active = scores > -5.0e5
-    pk = tl.load(BankK + (bank_base + rows[:, None]) * K + ik[None, :],
-                 (rows[:, None] < R) & (ik[None, :] < K), 0).to(tl.float32)
+    active = (rows < R) & (scores > -5.0e5)
+    pk = tl.load(
+        BankK + (bank_base + rows[:, None]) * K + ik[None, :],
+        (rows[:, None] < R) & (ik[None, :] < K), 0,
+    ).to(tl.float32)
     pk = tl.where(active[:, None], pk, 0.0)
-    y = tl.load(BankV + (bank_base + rows) * V + vi, rows < R, 0).to(tl.float32)
+    y = tl.load(BankV + bank_base * V + rows * V + vi, rows < R, 0).to(tl.float32)
     y = tl.where(active, y, 0.0)
     a_base = ((b * H + h) * R + rows[:, None]) * R + cols[None, :]
     ainv = tl.load(AInv + a_base, (rows[:, None] < R) & (cols[None, :] < R), 0).to(tl.float32)
@@ -81,6 +86,7 @@ def protected_kv_project_fwd_kernel(
     safe_denom = tl.where(feasible, denom, 1.0)
     ginv = ainv + (c / safe_denom) * u[:, None] * u[None, :]
     ginv = tl.where(feasible, ginv, ainv)
+
     k_base = (b * T + it[:, None]) * H * K + h * K
     kt = tl.load(Kp + k_base + ik[None, :],
                  (it[:, None] < T) & (ik[None, :] < K), 0).to(tl.float32)
@@ -95,6 +101,7 @@ def protected_kv_project_fwd_kernel(
     kb = tl.where(valid[:, None], kb, kt)
     vb = tl.where(valid, vb, vt)
     alpha = tl.where(valid[None, :], alpha, 0.0)
+
     kb_base = (((b * T + it[:, None]) * H + h) * V + vi) * K
     tl.store(KBar + kb_base + ik[None, :], kb, (it[:, None] < T) & (ik[None, :] < K))
     tl.store(VBar + v_base, vb, it < T)
@@ -111,11 +118,11 @@ def protected_kv_project_fwd_kernel(
 @triton.jit
 def protected_kv_project_bwd_kernel(
     Kp, Vp, BankK, BankV, BankScores, Curvature, Alpha, GInv, Valid, DKBar, DVBar,
-    DK, DV, DBankKByValue, DBankV, DC,
+    DKByValue, DV, DBankKByValue, DBankV, DC,
     T: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, R: tl.constexpr,
     BT: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr,
 ):
-    """VJP of the Lorentz projection; shared-key gradients are reduced by the wrapper."""
+    """Analytic projection VJP; aggregate shared-bank gradients over the chunk."""
     p = tl.program_id(0)
     b, h, vi = p // (H * V), (p // V) % H, p % V
     c = tl.load(Curvature).to(tl.float32)
@@ -123,11 +130,13 @@ def protected_kv_project_bwd_kernel(
     it, ik = tl.arange(0, BT), tl.arange(0, BK)
     bank_base = (b * H + h) * R
     scores = tl.load(BankScores + bank_base + rows, rows < R, -1.0e6).to(tl.float32)
-    active = scores > -5.0e5
-    pk = tl.load(BankK + (bank_base + rows[:, None]) * K + ik[None, :],
-                 (rows[:, None] < R) & (ik[None, :] < K), 0).to(tl.float32)
+    active = (rows < R) & (scores > -5.0e5)
+    pk = tl.load(
+        BankK + (bank_base + rows[:, None]) * K + ik[None, :],
+        (rows[:, None] < R) & (ik[None, :] < K), 0,
+    ).to(tl.float32)
     pk = tl.where(active[:, None], pk, 0.0)
-    y = tl.load(BankV + (bank_base + rows) * V + vi, rows < R, 0).to(tl.float32)
+    y = tl.load(BankV + bank_base * V + rows * V + vi, rows < R, 0).to(tl.float32)
     y = tl.where(active, y, 0.0)
     k_base = (b * T + it[:, None]) * H * K + h * K
     kt = tl.load(Kp + k_base + ik[None, :],
@@ -143,37 +152,41 @@ def protected_kv_project_bwd_kernel(
                              (it[:, None] < T) & (rows[None, :] < R), 0).to(tl.float32))
     valid_base = (b * T + it) * H * V + h * V + vi
     valid = tl.load(Valid + valid_base, it < T, 0).to(tl.int1)
-    gkb_proj = tl.where(valid[:, None], gkb, 0.0)
-    gvb_proj = tl.where(valid, gvb, 0.0)
+    gkb = tl.where(valid[:, None], gkb, 0.0)
+    gvb = tl.where(valid, gvb, 0.0)
     ginv_base = ((b * H + h) * V + vi) * R * R
     ginv = tl.load(GInv + ginv_base + rows[:, None] * R + cols[None, :],
                    (rows[:, None] < R) & (cols[None, :] < R), 0).to(tl.float32)
-    galpha = -(tl.dot(pk, tl.trans(gkb_proj), input_precision="ieee") + y[:, None] * gvb_proj[None, :])
-    grhs = tl.dot(ginv, galpha, input_precision="ieee")
-    dk_proj = gkb_proj + tl.dot(tl.trans(pk), grhs, input_precision="ieee")
-    gy = tl.sum(y[:, None] * grhs, axis=0)
+
+    # z = G^-T dL/dalpha; dKbank and dVbank are reduced over tokens here.
+    galpha = -(tl.dot(pk, tl.trans(gkb), input_precision="ieee") + y[:, None] * gvb[None, :])
+    z = tl.dot(ginv, galpha, input_precision="ieee")
+    dk_projected = tl.trans(tl.dot(tl.trans(pk), z, input_precision="ieee")) + gkb
+    dy_z = tl.sum(y[:, None] * z, axis=0)
+    dv_projected = gvb - c * dy_z
+
+    alpha_tk = tl.dot(tl.trans(alpha), pk, input_precision="ieee")
+    z_tk = tl.dot(tl.trans(z), pk, input_precision="ieee")
+    dbank_k = tl.dot(z, kt, input_precision="ieee")
+    dbank_k -= tl.dot(z, alpha_tk, input_precision="ieee")
+    dbank_k -= tl.dot(alpha, z_tk, input_precision="ieee")
     alpha_y = tl.sum(y[:, None] * alpha, axis=0)
-    dv_proj = gvb_proj - c * gy
-    alpha_pk = tl.dot(tl.trans(alpha), pk, input_precision="ieee")
-    grhs_pk = tl.dot(tl.trans(grhs), pk, input_precision="ieee")
-    dpk = -tl.dot(alpha, gkb_proj, input_precision="ieee")
-    dpk += tl.dot(grhs, kt, input_precision="ieee")
-    dpk -= tl.dot(grhs, alpha_pk, input_precision="ieee")
-    dpk -= tl.dot(alpha, grhs_pk, input_precision="ieee")
-    dpv = -tl.sum(alpha * gvb_proj[None, :], axis=1)
-    dpv -= c * tl.sum(grhs * vt[None, :], axis=1)
-    dpv += c * tl.sum(grhs * alpha_y[None, :] + alpha * gy[None, :], axis=1)
-    dc = tl.sum(gy * (alpha_y - vt), axis=0)
-    dk = tl.where(valid[:, None], dk_proj, gkb)
-    dv = tl.where(valid, dv_proj, gvb)
-    dpk = tl.where(active[:, None], dpk, 0.0)
-    dpv = tl.where(active, dpv, 0.0)
+    dbank_v = -c * tl.sum(z * vt[None, :], axis=1)
+    dbank_v += c * tl.dot(z, alpha_y, input_precision="ieee")
+    dbank_v += c * tl.dot(alpha, dy_z, input_precision="ieee")
+    dc = tl.sum(dy_z * (alpha_y - vt), axis=0)
+
+    dk = tl.where(valid[:, None], dk_projected, tl.load(DKBar + gkb_base + ik[None, :],
+                    (it[:, None] < T) & (ik[None, :] < K), 0).to(tl.float32))
+    dv = tl.where(valid, dv_projected, tl.load(DVBar + v_base, it < T, 0).to(tl.float32))
+    dpk = tl.where(active[:, None], dbank_k, 0.0)
+    dpv = tl.where(active, dbank_v, 0.0)
     dk_out_base = (((b * T + it[:, None]) * H + h) * V + vi) * K
-    tl.store(DK + dk_out_base + ik[None, :], dk, (it[:, None] < T) & (ik[None, :] < K))
+    tl.store(DKByValue + dk_out_base + ik[None, :], dk, (it[:, None] < T) & (ik[None, :] < K))
     tl.store(DV + v_base, dv, it < T)
     dpk_base = (((b * H + h) * V + vi) * R + rows[:, None]) * K + ik[None, :]
     tl.store(DBankKByValue + dpk_base, dpk, (rows[:, None] < R) & (ik[None, :] < K))
-    dpv_base = ((b * H + h) * R + rows) * V + vi
+    dpv_base = ((b * H + h) * V + vi) * R + rows
     tl.store(DBankV + dpv_base, dpv, rows < R)
     tl.store(DC + (b * H + h) * V + vi, dc)
 

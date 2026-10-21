@@ -396,3 +396,27 @@ def test_shared_key_projection_vjp_is_finite_and_differentiable():
     assert all(torch.isfinite(g).all() for g in grads)
     assert grads[2].abs().sum() > 0 and grads[3].abs().sum() > 0
     assert grads[4].abs() > 0
+
+
+def test_smooth_bank_update_exact_autograd_and_gradcheck():
+    protected_path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'
+    spec = importlib.util.spec_from_file_location('hyperbolic_protected_reference', protected_path.resolve())
+    protected = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(protected)
+    torch.manual_seed(307)
+    B, H, R, K, V = 1, 2, 2, 3, 2
+    bank_k = torch.randn(B, H, R, K, dtype=torch.float64, requires_grad=True)
+    bank_v = torch.randn(B, H, R, V, dtype=torch.float64, requires_grad=True)
+    bank_scores = torch.randn(B, H, R, dtype=torch.float64, requires_grad=True)
+    cand_k = torch.randn(B, 3, H, K, dtype=torch.float64, requires_grad=True)
+    cand_v = torch.randn(B, 3, H, V, dtype=torch.float64, requires_grad=True)
+    cand_scores = torch.randn(B, 3, H, dtype=torch.float64, requires_grad=True)
+    def fn(bk, bv, bs, ck, cv, cs):
+        out = protected._select_bank_smooth(bk, bv, bs, ck, cv, cs, temperature=0.7)
+        return out[0], out[1], out[2]
+    assert torch.autograd.gradcheck(fn, (bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores), eps=1e-6, atol=1e-4, rtol=1e-3)
+    result = fn(bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores)
+    grads = torch.autograd.grad(sum(x.square().sum() for x in result),
+        (bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores))
+    assert all(torch.isfinite(g).all() for g in grads)
+    assert grads[2].abs().sum() > 0 and grads[5].abs().sum() > 0

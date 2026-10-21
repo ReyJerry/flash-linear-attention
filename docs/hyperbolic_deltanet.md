@@ -70,13 +70,15 @@ The required domain is beta in [0,1], `||k||^2-c*v^2 > 0`, and
 `c*sum_K(S*S) < 1` for c>0. The layer normalizes keys in FP32, maps zero keys to
 a basis vector, and bounds values with tanh and a default margin of 0.5. Queries
 are normalized before readout. Curvature defaults to c=1. With `learnable_curvature=True`, a positive scalar is
-parameterized by softplus and trained through the PyTorch reference recurrence;
-the current Triton kernels do not compute a curvature gradient. With
-`protection_rank>0`, the layer retains recent realized KV associations and
-projects new constraints into their Lorentz-orthogonal complement. Protection
-is also a slow reference path, supports dense unpadded batches only, and retains
-at most the configured number of recent associations. If no independent
-spacelike direction remains, that channel is left unchanged.
+parameterized by softplus. The base recurrent and chunk Triton kernels accept
+curvature as a runtime scalar and return its first-order gradient. With
+`protection_rank>0`, each value channel keeps a fixed-capacity bank of realized
+KV associations and projects new Lorentz normals away from the protected span.
+The protected path has dedicated Triton forward/backward kernels and supports
+dense, unpadded batches only. The bank is stop-gradient state; gradients flow
+through the main state, current q/k/v/beta, and curvature, but not through the
+historical decisions that admitted bank entries. If no independent spacelike
+direction remains, that channel's update is skipped.
 
 Low-level operators do not implicitly normalize or clamp arbitrary inputs.
 `check_inputs=True` validates input values but synchronizes the CUDA device.

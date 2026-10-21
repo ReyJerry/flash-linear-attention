@@ -23,6 +23,7 @@ from fla.ops.hyperbolic_delta_rule import (
     naive_recurrent_hyperbolic_delta_rule,
 )
 from fla.ops.hyperbolic_delta_rule.naive import prepare_key_value
+from fla.ops.hyperbolic_delta_rule.protected import protected_recurrent_hyperbolic_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -61,6 +62,8 @@ class HyperbolicDeltaNet(nn.Module):
         num_v_heads: int | None = None,
         mode: str = 'chunk',
         curvature: float = 1.0,
+        learnable_curvature: bool = False,
+        protection_rank: int = 0,
         value_margin: float = 0.5,
         chunk_size: int = 16,
         use_gate: bool = True,
@@ -77,7 +80,17 @@ class HyperbolicDeltaNet(nn.Module):
         self.num_v_heads = num_heads if num_v_heads is None else num_v_heads
         self.head_v_dim = int(head_dim * expand_v)
         self.key_dim, self.value_dim = num_heads * head_dim, self.num_v_heads * self.head_v_dim
-        self.mode, self.curvature, self.value_margin = mode, float(curvature), value_margin
+        self.mode, self.value_margin = mode, value_margin
+        self.learnable_curvature = learnable_curvature
+        self.protection_rank = protection_rank
+        if learnable_curvature:
+            if curvature <= 0:
+                raise ValueError('Learnable curvature requires an initial curvature > 0.')
+            self.curvature_raw = nn.Parameter(torch.tensor(math.log(math.expm1(curvature)), dtype=torch.float32))
+        else:
+            self.curvature = float(curvature)
+        if protection_rank < 0:
+            raise ValueError('protection_rank must be nonnegative.')
         self.chunk_size, self.layer_idx = chunk_size, layer_idx
         self.use_gate, self.use_short_conv, self.fuse_norm = use_gate, use_short_conv, fuse_norm
         if min(hidden_size, head_dim, num_heads, self.num_v_heads, self.head_v_dim) <= 0 or head_dim > 256:
@@ -120,13 +133,24 @@ class HyperbolicDeltaNet(nn.Module):
             if attention_mask.ndim != 2 or attention_mask.shape[0] != batch_size or attention_mask.shape[1] < q_len:
                 raise ValueError('attention_mask must be a [B,L>=T] padding mask; dense attention masks are unsupported.')
         last_state = get_layer_cache(self, past_key_values)
-        initial_state = None if last_state is None else last_state['recurrent_state']
+        cached_recurrent = None if last_state is None else last_state['recurrent_state']
+        if isinstance(cached_recurrent, dict):
+            initial_state = cached_recurrent['state']
+            protected_keys = cached_recurrent['protected_keys']
+            protected_values = cached_recurrent['protected_values']
+        else:
+            initial_state = cached_recurrent
+            protected_keys = protected_values = None
+        curvature = F.softplus(self.curvature_raw) if self.learnable_curvature else self.curvature
+        curvature_value = float(curvature.detach().item()) if isinstance(curvature, torch.Tensor) else curvature
         conv_states = (None, None, None)
         if last_state is not None and last_state.get('conv_state') is not None:
             conv_states = last_state['conv_state']
         hidden_states, indices, cu_seqlens = unpad_hidden_states(
             hidden_states, kwargs.get('cu_seqlens'), attention_mask if q_len else None, q_len,
         )
+        if self.protection_rank and (cu_seqlens is not None or attention_mask is not None):
+            raise ValueError('Explicit protection currently supports dense, unpadded batches only.')
         projections = (self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states))
         if self.use_short_conv and hidden_states.shape[1] > 0:
             convolved = [
@@ -141,9 +165,9 @@ class HyperbolicDeltaNet(nn.Module):
         if self.num_v_heads != self.num_heads:
             q, k = (repeat(x, 'b t h d -> b t (h g) d', g=self.num_v_heads // self.num_heads) for x in (q, k))
         q = F.normalize(q.float(), dim=-1, eps=1e-6).to(hidden_states.dtype)
-        k, v = prepare_key_value(k, raw_v, self.curvature, self.value_margin)
+        k, v = prepare_key_value(k, raw_v, curvature_value, self.value_margin)
         beta = self.b_proj(hidden_states).float().sigmoid()
-        mode = self.mode
+        mode = 'naive' if (self.learnable_curvature or self.protection_rank) else self.mode
         if mode != 'naive' and not self.training and q_len <= 64:
             mode = 'fused_recurrent'
         op = {
@@ -154,13 +178,22 @@ class HyperbolicDeltaNet(nn.Module):
         extra = {'chunk_size': self.chunk_size} if mode == 'chunk' else {}
         if mode == 'fused_recurrent':
             extra['checkpoint_size'] = self.chunk_size
-        o, final_state = op(
-            q, k, v, beta, curvature=self.curvature, scale=1.0,
-            initial_state=initial_state, output_final_state=use_cache, cu_seqlens=cu_seqlens, **extra,
-        )
+        if self.protection_rank:
+            o, final_state, protected_keys, protected_values = protected_recurrent_hyperbolic_delta_rule(
+                q, k, v, beta, curvature=curvature, scale=1.0, initial_state=initial_state,
+                protected_keys=protected_keys, protected_values=protected_values,
+                protection_rank=self.protection_rank,
+            )
+            recurrent_state = {'state': final_state, 'protected_keys': protected_keys, 'protected_values': protected_values}
+        else:
+            o, final_state = op(
+                q, k, v, beta, curvature=curvature, scale=1.0,
+                initial_state=initial_state, output_final_state=use_cache, cu_seqlens=cu_seqlens, **extra,
+            )
+            recurrent_state = final_state
         if use_cache:
             update_layer_cache(
-                self, past_key_values, recurrent_state=final_state,
+                self, past_key_values, recurrent_state=recurrent_state,
                 conv_state=conv_states if self.use_short_conv else None, offset=q_len,
             )
         if o.numel():

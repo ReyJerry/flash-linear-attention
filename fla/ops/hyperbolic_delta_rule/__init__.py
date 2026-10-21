@@ -8,10 +8,12 @@
 from .chunk import chunk_hyperbolic_delta_rule
 from .fused_recurrent import fused_recurrent_hyperbolic_delta_rule
 from .naive import naive_chunk_hyperbolic_delta_rule, naive_recurrent_hyperbolic_delta_rule
+from .protected import protected_recurrent_hyperbolic_delta_rule
 
 __all__ = [
     'chunk_hyperbolic_delta_rule',
     'fused_recurrent_hyperbolic_delta_rule',
     'naive_chunk_hyperbolic_delta_rule',
     'naive_recurrent_hyperbolic_delta_rule',
+    'protected_recurrent_hyperbolic_delta_rule',
 ]

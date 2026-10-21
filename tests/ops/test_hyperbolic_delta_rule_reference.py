@@ -269,3 +269,12 @@ def test_packed_checkpoint_addresses_do_not_overlap(size):
                 assert index not in used and index < allocation
                 used.add(index)
             bos += length
+
+
+def test_learnable_curvature_reference_gradient():
+    q, k, v, beta, state = make_case(T=4, K=4, V=2, B=1, H=1, dtype=torch.float64)
+    raw = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)
+    curvature = torch.nn.functional.softplus(raw)
+    out, final = recurrent(q, k, v, beta, curvature=curvature, initial_state=state, output_final_state=True)
+    grad = torch.autograd.grad(out.square().sum() + final.square().sum(), raw)[0]
+    assert torch.isfinite(grad) and grad.abs() > 0

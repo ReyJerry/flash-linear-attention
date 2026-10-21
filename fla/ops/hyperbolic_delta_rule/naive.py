@@ -20,8 +20,11 @@ import torch
 
 
 def check_inputs(q, k, v, beta, initial_state, cu_seqlens, curvature, scale, check_values=True):
-    if not isinstance(curvature, (int, float)) or not math.isfinite(curvature) or curvature < 0:
-        raise ValueError('curvature must be a finite, nonnegative Python scalar; learned curvature is not supported.')
+    c_value = float(curvature.detach().item()) if isinstance(curvature, torch.Tensor) else float(curvature)
+    if not math.isfinite(c_value) or c_value < 0:
+        raise ValueError('curvature must be a finite, nonnegative scalar.')
+    if isinstance(curvature, torch.Tensor) and curvature.numel() != 1:
+        raise ValueError('curvature tensor must be scalar.')
     if q.ndim != 4 or q.shape != k.shape or v.ndim != 4 or q.shape[:3] != v.shape[:3]:
         raise ValueError('Expected q/k [B,T,H,K] and v [B,T,H,V] with identical B,T,H.')
     B, T, H, K = q.shape
@@ -57,10 +60,10 @@ def check_inputs(q, k, v, beta, initial_state, cu_seqlens, curvature, scale, che
             raise ValueError('beta must lie in [0, 1].')
         # No denominator clamp: invalid geometry must not silently become a different rule.
         norm2 = k.double().square().sum(-1, keepdim=True)
-        if not (norm2 - curvature * v.double().square() > 0).all().item():
+        if not (norm2 - c_value * v.double().square() > 0).all().item():
             raise ValueError('Require ||k||^2 - curvature * v^2 > 0 for every token and value channel.')
-        if initial_state is not None and curvature > 0:
-            if not (curvature * initial_state.double().square().sum(-2) < 1).all().item():
+        if initial_state is not None and c_value > 0:
+            if not (c_value * initial_state.double().square().sum(-2) < 1).all().item():
                 raise ValueError('Each initial-state column must lie strictly inside the Klein ball.')
     return N, (K ** -0.5 if scale is None else float(scale))
 

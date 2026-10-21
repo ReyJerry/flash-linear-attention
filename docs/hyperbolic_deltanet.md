@@ -1,7 +1,7 @@
 # HyperbolicDeltaNet (experimental)
 
-This implements the base hyperbolic KV projection rule, not the optional
-protected-old-association subspace variant. The name is provisional. The
+This implements the base hyperbolic KV projection rule and a slow explicit
+protected-association reference mode. The name is provisional. The
 construction uses established Lorentz hyperplane projection mathematics; this
 implementation does not claim that the underlying projection is novel or that
 hyperbolic geometry universally reduces interference. The reference tests include
@@ -69,7 +69,14 @@ arithmetic, subject to the feasible domain.
 The required domain is beta in [0,1], `||k||^2-c*v^2 > 0`, and
 `c*sum_K(S*S) < 1` for c>0. The layer normalizes keys in FP32, maps zero keys to
 a basis vector, and bounds values with tanh and a default margin of 0.5. Queries
-are normalized before readout. Curvature defaults to the fixed scalar c=1.
+are normalized before readout. Curvature defaults to c=1. With `learnable_curvature=True`, a positive scalar is
+parameterized by softplus and trained through the PyTorch reference recurrence;
+the current Triton kernels do not compute a curvature gradient. With
+`protection_rank>0`, the layer retains recent realized KV associations and
+projects new constraints into their Lorentz-orthogonal complement. Protection
+is also a slow reference path, supports dense unpadded batches only, and retains
+at most the configured number of recent associations. If no independent
+spacelike direction remains, that channel is left unchanged.
 
 Low-level operators do not implicitly normalize or clamp arbitrary inputs.
 `check_inputs=True` validates input values but synchronizes the CUDA device.

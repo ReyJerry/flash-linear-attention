@@ -28,6 +28,8 @@ class HyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         num_heads: int = 16,
         num_v_heads: int | None = None,
         curvature: float = 1.0,
+        learnable_curvature: bool = False,
+        protection_rank: int = 0,
         value_margin: float = 0.5,
         chunk_size: int = 16,
         use_gate: bool = True,
@@ -63,6 +65,8 @@ class HyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         self.num_heads = num_heads
         self.num_v_heads = num_v_heads
         self.curvature = curvature
+        self.learnable_curvature = learnable_curvature
+        self.protection_rank = protection_rank
         self.value_margin = value_margin
         self.chunk_size = chunk_size
         self.use_gate = use_gate

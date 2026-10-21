@@ -302,9 +302,13 @@ def soft_bank_update_bwd_kernel(
             d_cand_k = tl.sum(gate[:, None] * d_k, axis=0)
             d_cand_v = tl.sum(gate[:, None] * d_v, axis=0)
             d_cand_s = tl.sum(gate * d_s, axis=0)
-            hgate = d_gate * p_replace * sigma / TEMP
-            d_cand_s += tl.sum(hgate * (1.0 - sigma), axis=0)
-            d_s = (1.0 - gate) * d_s + p_replace * tl.sum(hgate, axis=0) - hgate * (2.0 - sigma)
+            d_cand_s += tl.sum(d_gate * p_replace * sigma * (1.0 - sigma) / TEMP, axis=0)
+            dgate_ds = -(p_replace[:, None] * sigma[:, None] / TEMP) * (
+                tl.where(rows[:, None] == rows[None, :], 1.0, 0.0) - p_replace[None, :]
+            )
+            dgate_ds -= tl.where(rows[:, None] == rows[None, :],
+                p_replace[:, None] * sigma[:, None] * (1.0 - sigma[:, None]) / TEMP, 0.0)
+            d_s = (1.0 - gate) * d_s + tl.sum(d_gate[:, None] * dgate_ds, axis=0)
             d_k = (1.0 - gate[:, None]) * d_k
             d_v = (1.0 - gate[:, None]) * d_v
         tl.store(DCandK + ((b * T + t) * H + h) * K + ik, d_cand_k, ik < K)

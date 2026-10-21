@@ -112,6 +112,43 @@ def _select_bank(
     return next_k, next_v, next_scores, count
 
 
+def _select_bank_smooth(
+    bank_k, bank_v, bank_scores, candidate_k, candidate_v, candidate_scores, temperature=0.25,
+):
+    """Continuously update a bounded bank; ordinary autograd is the exact VJP.
+
+    Empty slots are filled in order. Once full, each slot receives a smooth
+    score-weighted convex update. No hard top-k, straight-through estimator,
+    detach, or discrete ranking is used for replacement.
+    """
+    R = bank_k.shape[-2]
+    next_k, next_v, next_scores = bank_k, bank_v, bank_scores
+    for t in range(candidate_k.shape[1]):
+        ck = candidate_k[:, t]
+        cv = candidate_v[:, t]
+        cs = candidate_scores[:, t]
+        active = next_scores.detach() > (_EMPTY_SCORE / 2)
+        count = int(active[0, 0].sum().item())
+        if count < R:
+            slot = F.one_hot(
+                torch.full((bank_k.shape[0], bank_k.shape[1]), count, device=bank_k.device, dtype=torch.long),
+                num_classes=R,
+            ).to(bank_k.dtype)
+            slot_k, slot_v, slot_s = slot.unsqueeze(-1), slot.unsqueeze(-1), slot
+            next_k = next_k * (1.0 - slot_k) + ck.unsqueeze(2) * slot_k
+            next_v = next_v * (1.0 - slot_v) + cv.unsqueeze(2) * slot_v
+            next_scores = next_scores * (1.0 - slot_s) + cs.unsqueeze(-1) * slot_s
+        else:
+            p_replace = torch.softmax(-next_scores / max(float(temperature), 1.0e-3), dim=-1)
+            sigma = torch.sigmoid((cs.unsqueeze(-1) - next_scores) / max(float(temperature), 1.0e-3))
+            gate = p_replace * sigma
+            next_k = (1.0 - gate.unsqueeze(-1)) * next_k + gate.unsqueeze(-1) * ck.unsqueeze(2)
+            next_v = (1.0 - gate.unsqueeze(-1)) * next_v + gate.unsqueeze(-1) * cv.unsqueeze(2)
+            next_scores = (1.0 - gate) * next_scores + gate * cs.unsqueeze(-1)
+    count = (next_scores.detach() > (_EMPTY_SCORE / 2)).sum(dim=-1).to(torch.int32)
+    return next_k, next_v, next_scores, count
+
+
 def _initial_bank(q, k, v, protection_rank, protected_keys, protected_values, protected_scores, protected_count):
     B, T, H, K = q.shape
     V = v.shape[-1]
@@ -187,9 +224,8 @@ def naive_protected_chunkwise_hyperbolic_delta_rule(
             out, next_state, realized = _recurrent_chunk_torch(
                 qc, kbar, vbar, bc, state, c, out_scale, readout_k=kc,
             )
-            next_bank_k, next_bank_v, next_scores, _ = _select_bank(
-                bank_k, bank_v, bank_scores, kc, realized, sc,
-                temperature=temperature, novelty_weight=novelty_weight,
+            next_bank_k, next_bank_v, next_scores, _ = _select_bank_smooth(
+                bank_k, bank_v, bank_scores, kc, realized, sc, temperature=temperature,
             )
             return out, next_state, next_bank_k, next_bank_v, next_scores
 

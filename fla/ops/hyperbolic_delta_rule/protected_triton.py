@@ -89,6 +89,9 @@ def protected_recurrent_hyperbolic_delta_rule_triton(
     if not torch.isfinite(torch.tensor(cval)) or cval <= 0:
         raise ValueError("Protected updates require finite curvature > 0.")
     validate_inputs(q, k, v, beta, initial_state, None, curvature, scale, check_inputs)
+    tensors = (q, k, v, beta) + (() if initial_state is None else (initial_state,))
+    if any(x.dtype not in (torch.float16, torch.bfloat16, torch.float32) for x in tensors):
+        raise ValueError("Protected Triton inputs must use float16, bfloat16, or float32.")
     if beta.ndim == 3:
         beta = beta.unsqueeze(-1).expand_as(v)
     q, k, v, beta = (x.contiguous() for x in (q, k, v, beta))

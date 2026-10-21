@@ -3,128 +3,210 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""PyTorch oracle and Triton dispatch for explicit protected KV associations."""
+"""Differentiable chunkwise hyperbolic protection reference and dispatch."""
 
 from __future__ import annotations
 
+import math
+
 import torch
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 
 
-def _project(k, v, keys, values, curvature):
-    if keys.shape[0] == 0:
-        return k, v
-    gram = keys @ keys.T - curvature * values[:, None] * values[None, :]
-    rhs = keys @ k - curvature * values * v
-    alpha = torch.linalg.solve(gram, rhs)
-    return k - keys.T @ alpha, v - values @ alpha
+_EPS = 1.0e-5
+_EMPTY_SCORE = -1.0e6
 
 
-def _protected_reference(q, k, v, beta, curvature, scale, initial_state,
-                         protected_keys, protected_values, protected_count, protection_rank):
+def _project_chunk_torch(k, v, bank_k, bank_v, bank_scores, curvature, eps=_EPS):
+    """Project a whole chunk using one shared key Gram inverse and Sherman-Morrison.
+
+    k: [B,T,H,K], v: [B,T,H,V], bank_k: [B,H,R,K], bank_v: [B,H,R,V].
+    The key-only Gram inverse is computed once per chunk, then reused for every
+    value channel and token while the protection bank remains unchanged.
+    """
+    B, T, H, K = k.shape
+    V, R = v.shape[-1], bank_k.shape[-2]
+    active = bank_scores > (_EMPTY_SCORE / 2)
+    mask = active.to(k.dtype)
+    pk = bank_k * mask.unsqueeze(-1)
+    pv = bank_v * mask.unsqueeze(-1)
+    eye = torch.eye(R, device=k.device, dtype=k.dtype).view(1, 1, R, R)
+    inactive_eye = torch.diag_embed((~active).to(k.dtype))
+    gram_k = pk @ pk.transpose(-1, -2) + eps * eye + inactive_eye
+    inv_k = torch.linalg.inv(gram_k)
+    u = torch.einsum('bhij,bhjv->bhiv', inv_k, pv)
+    denom = 1.0 - curvature * (pv * u).sum(dim=2)
+    feasible = denom > eps
+    safe_denom = denom.clamp_min(eps)
+    u_v = u.permute(0, 1, 3, 2)
+    ginv = inv_k.unsqueeze(2) + (
+        curvature / safe_denom
+    )[..., None, None] * u_v.unsqueeze(-1) * u_v.unsqueeze(-2)
+    ginv = torch.where(feasible[..., None, None], ginv, inv_k.unsqueeze(2))
+    rhs_k = torch.einsum('bhrk,bthk->bthr', pk, k)
+    rhs = rhs_k.unsqueeze(3) - curvature * pv.permute(0, 1, 3, 2).unsqueeze(1) * v.unsqueeze(-1)
+    alpha = torch.einsum('bhvij,bthvj->bthvi', ginv, rhs)
+    kbar = k.unsqueeze(3) - torch.einsum('bhrk,bthvr->bthvk', pk, alpha)
+    vbar = v - torch.einsum('bhrv,bthvr->bthv', pv, alpha)
+    norm = kbar.square().sum(dim=-1) - curvature * vbar.square()
+    valid = feasible.permute(0, 1, 2).unsqueeze(1) & (norm > eps)
+    kbar = torch.where(valid.unsqueeze(-1), kbar, k.unsqueeze(3).expand_as(kbar))
+    vbar = torch.where(valid, vbar, v)
+    return kbar, vbar
+
+
+def _recurrent_chunk_torch(q, k, v, beta, state, curvature, scale):
+    """Sequential PyTorch oracle for one chunk; differentiable through every update."""
+    outputs, realized = [], []
+    for t in range(q.shape[1]):
+        kt, qt, vt, bt = k[:, t], q[:, t], v[:, t], beta[:, t]
+        # [B,H,V,K] and [B,H,K,V]
+        residual = vt - torch.einsum('bhvk,bhkv->bhv', kt, state.permute(0, 1, 3, 2))
+        a = kt.square().sum(dim=-1) - curvature * vt.square()
+        valid = a > _EPS
+        safe_a = torch.where(valid, a, torch.ones_like(a))
+        u = torch.where(valid, bt * residual / safe_a, torch.zeros_like(residual))
+        den = torch.where(valid, 1.0 + curvature * vt * u, torch.ones_like(u))
+        candidate = (state + kt.permute(0, 1, 3, 2) * u.unsqueeze(-2)) / den.unsqueeze(-2)
+        state = torch.where(valid.unsqueeze(-2), candidate, state)
+        outputs.append(scale * torch.einsum('bhk,bhkv->bhv', qt, state))
+        realized.append(torch.einsum('bhk,bhkv->bhv', k[:, t], state))
+    if outputs:
+        return torch.stack(outputs, dim=1), state, torch.stack(realized, dim=1)
+    return v, state, v
+
+
+def _select_bank(bank_k, bank_v, bank_scores, candidate_k, candidate_v, candidate_scores,
+                 temperature=0.25, novelty_weight=0.5):
+    """Hard top-k forward with a straight-through soft selection gradient.
+
+    The selected forward bank contains exact candidate associations. The soft
+    surrogate supplies gradients to candidate scores and association contents.
+    """
+    R = bank_k.shape[-2]
+    active = bank_scores > (_EMPTY_SCORE / 2)
+    if bank_k.shape[-2]:
+        similarity = torch.einsum('bthk,bhrk->bthr', candidate_k, bank_k).abs()
+        similarity = similarity.masked_fill(~active[:, None], 0.0)
+        novelty = 1.0 - similarity.amax(dim=-1).clamp(0.0, 1.0)
+    else:
+        novelty = candidate_scores.new_ones(candidate_scores.shape)
+    new_scores = torch.tanh(candidate_scores) + novelty_weight * novelty
+    all_k = torch.cat((bank_k, candidate_k.permute(0, 2, 1, 3)), dim=2)
+    all_v = torch.cat((bank_v, candidate_v.permute(0, 2, 1, 3)), dim=2)
+    all_scores = torch.cat((bank_scores, new_scores.permute(0, 2, 1)), dim=-1)
+    indices = all_scores.topk(R, dim=-1).indices
+    hard = F.one_hot(indices, num_classes=all_scores.shape[-1]).to(all_scores.dtype)
+    logits = all_scores.unsqueeze(-2) / max(float(temperature), 1.0e-3) + 12.0 * hard
+    soft = torch.softmax(logits, dim=-1)
+    weights = hard + soft - soft.detach()
+    next_k = torch.einsum('bhrn,bhnk->bhrk', weights, all_k)
+    next_v = torch.einsum('bhrn,bhnv->bhrv', weights, all_v)
+    next_scores = (weights * all_scores.unsqueeze(-2)).sum(dim=-1)
+    count = (next_scores > (_EMPTY_SCORE / 2)).sum(dim=-1).to(torch.int32)
+    return next_k, next_v, next_scores, count
+
+
+def naive_protected_chunkwise_hyperbolic_delta_rule(
+    q, k, v, beta, curvature=1.0, scale=None, initial_state=None,
+    protected_keys=None, protected_values=None, protected_scores=None,
+    protected_count=None, selection_scores=None, protection_rank=4,
+    chunk_size=16, checkpoint=True, temperature=0.25, novelty_weight=0.5,
+):
+    """Pure PyTorch reference with chunkwise Gram reuse and differentiable bank replacement."""
     if q.ndim != 4 or k.shape != q.shape or v.shape[:3] != q.shape[:3]:
-        raise ValueError("Expected q/k [B,T,H,K] and v [B,T,H,V].")
+        raise ValueError('Expected q/k [B,T,H,K] and v [B,T,H,V].')
+    if chunk_size not in (16, 32):
+        raise ValueError('chunk_size must be 16 or 32.')
+    if not isinstance(protection_rank, int) or not 1 <= protection_rank <= 16:
+        raise ValueError('protection_rank must be in [1, 16].')
     B, T, H, K = q.shape
     V = v.shape[-1]
-    if not isinstance(protection_rank, int) or not 1 <= protection_rank <= 16:
-        raise ValueError("protection_rank must be in [1, 16].")
-    c = torch.as_tensor(curvature, device=q.device, dtype=torch.float64 if q.dtype == torch.float64 else torch.float32)
-    if c.numel() != 1 or not torch.isfinite(c).all() or c.detach().item() <= 0:
-        raise ValueError("Protected updates require finite curvature > 0.")
-    if beta.ndim == 3:
-        beta = beta.unsqueeze(-1).expand_as(v)
-    if beta.shape != v.shape:
-        raise ValueError("beta must have shape [B,T,H] or [B,T,H,V].")
     dtype = torch.float64 if q.dtype == torch.float64 else torch.float32
-    q, k, v, beta, c = q.to(dtype), k.to(dtype), v.to(dtype), beta.to(dtype), c.to(dtype)
-    state = q.new_zeros(B, H, K, V) if initial_state is None else initial_state.to(dtype)
+    c = torch.as_tensor(curvature, device=q.device, dtype=dtype).reshape(())
+    state = q.new_zeros(B, H, K, V, dtype=dtype) if initial_state is None else initial_state.to(dtype)
+    qf, kf, vf = q.to(dtype), k.to(dtype), v.to(dtype)
+    bf = beta.to(dtype)
+    if bf.ndim == 3:
+        bf = bf.unsqueeze(-1).expand_as(vf)
+    if selection_scores is None:
+        selection_scores = kf.norm(dim=-1)
     if protected_keys is None:
-        pk = q.new_zeros(B, H, V, protection_rank, K)
-        pv = q.new_zeros(B, H, V, protection_rank)
-        pc = torch.zeros(B, H, V, dtype=torch.int32, device=q.device)
+        bank_k = kf.new_zeros(B, H, protection_rank, K)
+        bank_v = vf.new_zeros(B, H, protection_rank, V)
+        bank_scores = kf.new_full((B, H, protection_rank), _EMPTY_SCORE)
     else:
-        if protected_values is None:
-            raise ValueError("protected_values is required with protected_keys.")
-        pk, pv = protected_keys.to(dtype), protected_values.to(dtype)
-        if protected_count is None:
-            pc = (pk.square().sum(-1) > 0).sum(-1).to(torch.int32)
+        bank_k, bank_v = protected_keys.to(dtype), protected_values.to(dtype)
+        if protected_scores is not None:
+            bank_scores = protected_scores.to(dtype)
         else:
-            pc = protected_count.to(device=q.device, dtype=torch.int32)
-    if pk.shape != (B, H, V, protection_rank, K) or pv.shape != (B, H, V, protection_rank) or pc.shape != (B, H, V):
-        raise ValueError("Protected bank shape mismatch.")
-    if bool(((pc < 0) | (pc > protection_rank)).any().item()):
-        raise ValueError("protected_count must be in [0, protection_rank].")
-    outputs, states, keys_out, values_out, counts_out = [], [], [], [], []
-    out_scale = K ** -0.5 if scale is None else scale
-    for b in range(B):
-        batch_out, batch_state, batch_pk, batch_pv, batch_pc = [], [], [], [], []
-        for h in range(H):
-            head_out, head_state, head_pk, head_pv, head_pc = [], [], [], [], []
-            for vi in range(V):
-                s = state[b, h, :, vi]
-                count = int(pc[b, h, vi].detach().item())
-                keys = [x.detach() for x in pk[b, h, vi, :count]]
-                vals = [x.detach() for x in pv[b, h, vi, :count]]
-                y = []
-                for t in range(T):
-                    kt, vt, bt = k[b, t, h], v[b, t, h, vi], beta[b, t, h, vi]
-                    key_bank = torch.stack(keys) if keys else kt.new_zeros((0, K))
-                    val_bank = torch.stack(vals) if vals else vt.new_zeros((0,))
-                    kb, vb = _project(kt, vt, key_bank, val_bank, c)
-                    a = kb.square().sum() - c * vb.square()
-                    valid = a > 1e-8
-                    u = torch.where(valid, bt * (vb - kb @ s) / torch.where(valid, a, 1.0), torch.zeros_like(vb))
-                    den = torch.where(valid, 1 + c * vb * u, torch.ones_like(u))
-                    s = torch.where(valid, (s + kb * u) / den, s)
-                    y.append(out_scale * (q[b, t, h] @ s))
-                    realized = kt @ s
-                    if count < protection_rank:
-                        nk, nv = _project(kt, realized, key_bank, val_bank, c)
-                        if bool((nk.square().sum() - c * nv.square() > 1e-5).detach().item()):
-                            keys.append(kt.detach())
-                            vals.append(realized.detach())
-                            count += 1
-                head_out.append(torch.stack(y) if y else v.new_zeros(0))
-                head_state.append(s)
-                head_pk.append(torch.stack(keys + [q.new_zeros(K)] * (protection_rank - len(keys))))
-                head_pv.append(torch.stack(vals + [q.new_zeros(())] * (protection_rank - len(vals))))
-                head_pc.append(count)
-            batch_out.append(torch.stack(head_out, dim=-1))
-            batch_state.append(torch.stack(head_state, dim=-1))
-            batch_pk.append(torch.stack(head_pk))
-            batch_pv.append(torch.stack(head_pv))
-            batch_pc.append(torch.tensor(head_pc, device=q.device, dtype=torch.int32))
-        outputs.append(torch.stack(batch_out, dim=1))
-        states.append(torch.stack(batch_state))
-        keys_out.append(torch.stack(batch_pk))
-        values_out.append(torch.stack(batch_pv))
-        counts_out.append(torch.stack(batch_pc))
-    out = torch.stack(outputs) if outputs else v
-    ht = torch.stack(states)
-    return out.to(q.dtype), ht, torch.stack(keys_out), torch.stack(values_out), torch.stack(counts_out)
+            count = protected_count
+            if count is None:
+                count = (bank_k.square().sum(-1) > 0).sum(-1)
+            slots = torch.arange(protection_rank, device=q.device).view(1, 1, -1)
+            bank_scores = torch.where(slots < count[..., None], kf.new_zeros(()), kf.new_full((), _EMPTY_SCORE))
+    if bank_k.shape != (B, H, protection_rank, K) or bank_v.shape != (B, H, protection_rank, V):
+        raise ValueError('Protected bank shape mismatch.')
+    scale = K ** -0.5 if scale is None else float(scale)
+    outputs = []
+    for start in range(0, T, chunk_size):
+        end = min(start + chunk_size, T)
+        qc, kc, vc, bc = qf[:, start:end], kf[:, start:end], vf[:, start:end], bf[:, start:end]
+        sc = selection_scores[:, start:end].to(dtype)
+
+        def run_chunk(qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c):
+            kbar, vbar = _project_chunk_torch(kc, vc, bank_k, bank_v, bank_scores, c)
+            out, next_state, realized = _recurrent_chunk_torch(qc, kbar, vbar, bc, state, c, scale)
+            next_bank_k, next_bank_v, next_scores, next_count = _select_bank(
+                bank_k, bank_v, bank_scores, kc, realized, sc,
+                temperature=temperature, novelty_weight=novelty_weight,
+            )
+            return out, next_state, next_bank_k, next_bank_v, next_scores, next_count
+
+        args = (qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c)
+        if checkpoint and torch.is_grad_enabled() and any(x.requires_grad for x in args):
+            result = activation_checkpoint(run_chunk, *args, use_reentrant=False)
+        else:
+            result = run_chunk(*args)
+        out, state, bank_k, bank_v, bank_scores, bank_count = result
+        outputs.append(out)
+    output = torch.cat(outputs, dim=1).to(q.dtype) if outputs else q.new_zeros(B, 0, H, V)
+    return output, state, bank_k, bank_v, bank_scores, bank_count
 
 
 def protected_recurrent_hyperbolic_delta_rule(
     q, k, v, beta, curvature=1.0, scale=None, initial_state=None,
     output_final_state=False, protected_keys=None, protected_values=None,
     protected_count=None, protection_rank=4, checkpoint_size=16, check_inputs=False,
+    protected_scores=None, selection_scores=None, mode='auto', checkpoint=True,
+    temperature=0.25, novelty_weight=0.5,
 ):
-    """Update KV memory while preserving a bounded bank of realized associations.
+    """Dispatch the differentiable chunkwise protected rule.
 
-    The bank is stop-gradient state. Dense, unpadded batches are supported.
-    CUDA uses a Triton forward/backward; CPU uses the PyTorch oracle.
+    mode='naive' selects the PyTorch oracle; mode='triton' selects the Triton
+    projection plus the existing WY/triangular-solve chunk operator.
     """
-    if q.device.type == "cuda":
-        from .protected_triton import protected_recurrent_hyperbolic_delta_rule_triton
-        result = protected_recurrent_hyperbolic_delta_rule_triton(
+    if mode not in ('auto', 'naive', 'triton'):
+        raise ValueError("mode must be 'auto', 'naive', or 'triton'.")
+    use_triton = q.device.type == 'cuda' and mode != 'naive'
+    if use_triton:
+        from .protected_triton import triton_protected_chunkwise_hyperbolic_delta_rule
+        result = triton_protected_chunkwise_hyperbolic_delta_rule(
             q, k, v, beta, curvature, scale, initial_state, protected_keys,
-            protected_values, protected_count, protection_rank, checkpoint_size, check_inputs,
+            protected_values, protected_scores, protected_count, selection_scores,
+            protection_rank, checkpoint_size, check_inputs, checkpoint, temperature, novelty_weight,
         )
     else:
-        result = _protected_reference(
-            q, k, v, beta, curvature, scale, initial_state,
-            protected_keys, protected_values, protected_count, protection_rank,
+        result = naive_protected_chunkwise_hyperbolic_delta_rule(
+            q, k, v, beta, curvature, scale, initial_state, protected_keys,
+            protected_values, protected_scores, protected_count, selection_scores,
+            protection_rank, checkpoint_size, checkpoint, temperature, novelty_weight,
         )
     return result
 
 
-__all__ = ["protected_recurrent_hyperbolic_delta_rule"]
+__all__ = [
+    'naive_protected_chunkwise_hyperbolic_delta_rule',
+    'protected_recurrent_hyperbolic_delta_rule',
+]

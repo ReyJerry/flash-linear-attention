@@ -21,9 +21,7 @@ from fla.ops.hyperbolic_delta_rule.protected import protected_recurrent_hyperbol
 
 def measure(fn, warmup, repeats):
     for _ in range(warmup):
-        out = fn()
-        if isinstance(out, tuple) and out[0].requires_grad:
-            out[0].sum().backward()
+        fn()
     torch.cuda.synchronize()
     samples = []
     peak = 0

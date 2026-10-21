@@ -77,19 +77,39 @@ class _ProtectedProjection(torch.autograd.Function):
 
 
 def _run_chunk(q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, scale):
-    kb, vb = _ProtectedProjection.apply(k, v, bank_k, bank_v, bank_scores, curvature, 1.0e-5)
-    outs, states = [], []
-    # The projected Key can differ by Value channel. Reuse the repository's
-    # Triton WY/Chunk recurrence per channel; gradients are concatenated back.
-    for vi in range(v.shape[-1]):
-        oi, si = chunk_hyperbolic_delta_rule(
-            q, kb[:, :, :, vi, :], vb[:, :, :, vi:vi + 1], beta[:, :, :, vi:vi + 1],
-            curvature=curvature, scale=scale, initial_state=state[:, :, :, vi:vi + 1],
-            output_final_state=True, chunk_size=16, check_inputs=False,
-        )
-        outs.append(oi)
-        states.append(si)
-    return torch.cat(outs, -1), torch.cat(states, -1)
+    """Fuse all value channels into one flattened-head WY/Chunk invocation.
+
+    A projected key is channel-specific, so flatten (head, value-channel) into
+    the head dimension. One Chunk call computes all channels in parallel. A
+    second call uses the raw key as query to obtain the exact realized association
+    k_t^T S_t needed by the next chunk's protection-bank selector.
+    """
+    B, T, H, K = q.shape
+    V = v.shape[-1]
+    kbar, vbar = _ProtectedProjection.apply(
+        k.contiguous(), v.contiguous(), bank_k.contiguous(), bank_v.contiguous(),
+        bank_scores.contiguous(), curvature, 1.0e-5,
+    )
+    q_flat = q.unsqueeze(3).expand(B, T, H, V, K).reshape(B, T, H * V, K).contiguous()
+    k_flat = kbar.reshape(B, T, H * V, K).contiguous()
+    v_flat = vbar.reshape(B, T, H * V, 1).contiguous()
+    beta_flat = beta.reshape(B, T, H * V, 1).contiguous()
+    state_flat = state.permute(0, 1, 3, 2).reshape(B, H * V, K, 1).contiguous()
+    out_flat, state_flat_out = chunk_hyperbolic_delta_rule(
+        q_flat, k_flat, v_flat, beta_flat, curvature=curvature, scale=scale,
+        initial_state=state_flat, output_final_state=True, chunk_size=16, check_inputs=False,
+    )
+    # Read the post-update memory using the same raw key, without materializing
+    # every S_t. This extra fused Chunk call is differentiable and batch-safe.
+    readout_q = k.unsqueeze(3).expand(B, T, H, V, K).reshape(B, T, H * V, K).contiguous()
+    realized_flat, _ = chunk_hyperbolic_delta_rule(
+        readout_q, k_flat, v_flat, beta_flat, curvature=curvature, scale=scale,
+        initial_state=state_flat, output_final_state=True, chunk_size=16, check_inputs=False,
+    )
+    out = out_flat.reshape(B, T, H, V)
+    realized = realized_flat.reshape(B, T, H, V)
+    next_state = state_flat_out.squeeze(-1).reshape(B, H, V, K).permute(0, 1, 3, 2).contiguous()
+    return out, next_state, realized
 
 
 def triton_protected_chunkwise_hyperbolic_delta_rule(
@@ -141,14 +161,19 @@ def triton_protected_chunkwise_hyperbolic_delta_rule(
     outputs = []
     for start in range(0, T, checkpoint_size):
         end = min(start + checkpoint_size, T)
-        qc, kc, vc, bc, sc = q[:, start:end], k[:, start:end], v[:, start:end], beta[:, start:end], scores[:, start:end]
+        # Triton projection kernels use packed [B,T,...] layouts; slices along
+        # time are non-contiguous when B > 1, so materialize each chunk explicitly.
+        qc, kc, vc, bc, sc = (
+            x.contiguous() for x in
+            (q[:, start:end], k[:, start:end], v[:, start:end], beta[:, start:end], scores[:, start:end])
+        )
 
         def run(qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c):
-            out, next_state = _run_chunk(qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, c, scale)
-            # Hard top-k forward, straight-through soft gradients across chunk boundaries.
+            out, next_state, realized = _run_chunk(qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, c, scale)
+            # Protect the actual post-update readout k_t^T S_t, matching PyTorch.
             from .protected import _select_bank
             next_k, next_v, next_scores, _ = _select_bank(
-                bank_k, bank_v, bank_scores, kc, vc, sc,
+                bank_k, bank_v, bank_scores, kc, realized, sc,
                 temperature=temperature, novelty_weight=novelty_weight,
             )
             return out, next_state, next_k, next_v, next_scores

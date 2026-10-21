@@ -232,3 +232,28 @@ def test_protected_triton_checkpoint_peak_memory_and_parity():
     # Memory reduction is hardware / allocator dependent. Record both peaks;
     # avoid a brittle universal threshold in CI.
     print(f'protected peak allocated: no_checkpoint={peak_plain}, checkpoint={peak_ckpt}')
+
+
+def test_triton_smooth_bank_update_matches_exact_reference_vjp():
+    from fla.ops.hyperbolic_delta_rule.protected import _select_bank_smooth
+    from fla.ops.hyperbolic_delta_rule.protected_triton import _TritonSmoothBankUpdate
+
+    torch.manual_seed(401)
+    B, T, H, K, V, R = 1, 5, 2, 16, 4, 2
+    inputs = (
+        torch.randn(B, H, R, K, device='cuda', dtype=torch.float32, requires_grad=True),
+        torch.randn(B, H, R, V, device='cuda', dtype=torch.float32, requires_grad=True),
+        torch.randn(B, H, R, device='cuda', dtype=torch.float32, requires_grad=True),
+        torch.randn(B, T, H, K, device='cuda', dtype=torch.float32, requires_grad=True),
+        torch.randn(B, T, H, V, device='cuda', dtype=torch.float32, requires_grad=True),
+        torch.randn(B, T, H, device='cuda', dtype=torch.float32, requires_grad=True),
+    )
+    actual = _TritonSmoothBankUpdate.apply(*inputs, 0.7)
+    expected = _select_bank_smooth(*inputs, temperature=0.7)
+    for a, e in zip(actual[:3], expected[:3]):
+        torch.testing.assert_close(a, e, atol=2e-4, rtol=2e-4)
+    weights = tuple(torch.randn_like(x) for x in actual[:3])
+    ga = torch.autograd.grad(actual[:3], inputs, weights)
+    ge = torch.autograd.grad(expected[:3], inputs, weights)
+    for a, e in zip(ga, ge):
+        torch.testing.assert_close(a, e, atol=3e-3, rtol=3e-3)

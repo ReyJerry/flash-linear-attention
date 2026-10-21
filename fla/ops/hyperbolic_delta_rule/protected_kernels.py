@@ -172,8 +172,8 @@ def protected_kv_project_bwd_kernel(
     dbank_k -= tl.dot(alpha, z_tk, input_precision="ieee")
     alpha_y = tl.sum(y[:, None] * alpha, axis=0)
     dbank_v = -c * tl.sum(z * vt[None, :], axis=1)
-    dbank_v += c * tl.dot(z, alpha_y, input_precision="ieee")
-    dbank_v += c * tl.dot(alpha, dy_z, input_precision="ieee")
+    dbank_v += c * tl.sum(z * alpha_y[None, :], axis=1)
+    dbank_v += c * tl.sum(alpha * dy_z[None, :], axis=1)
     dc = tl.sum(dy_z * (alpha_y - vt), axis=0)
 
     dk = tl.where(valid[:, None], dk_projected, tl.load(DKBar + gkb_base + ik[None, :],

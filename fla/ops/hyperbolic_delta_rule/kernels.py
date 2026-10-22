@@ -85,8 +85,10 @@ def hyperbolic_delta_rule_chunk_fwd_kernel(
         vo = (token * H + h) * V + value
         vv = tl.load(Vp + vo, valid, 0).to(tl.float32)
         beta = tl.load(Beta + vo, valid, 0).to(tl.float32)
-        a = tl.where(valid, tl.sum(kk * kk, 1) - C * vv * vv, 1.0)
-        alpha = beta / a
+        a_raw = tl.sum(kk * kk, 1) - C * vv * vv
+        update_valid = valid & (a_raw > 1.0e-5)
+        a = tl.where(update_valid, a_raw, 1.0)
+        alpha = tl.where(update_valid, beta / a, 0.0)
         gram = tl.dot(kk, tl.trans(kk), input_precision='ieee') - C * vv[:, None] * vv[None, :]
         lower = tl.where(rows[:, None] > rows[None, :], alpha[:, None] * gram, 0.0)
         b = alpha * (vv - tl.sum(kk * s[None, :], 1))
@@ -148,9 +150,11 @@ def hyperbolic_delta_rule_bwd_kernel(
             vo = (t * H + h) * V + iv
             vt = tl.load(Vp + vo, iv < V, 0).to(tl.float32)
             beta = tl.load(Beta + vo, iv < V, 0).to(tl.float32)
-            a = tl.sum(kt * kt, 0) - C * vt * vt
+            a_raw = tl.sum(kt * kt, 0) - C * vt * vt
+            update_valid = a_raw > 1.0e-5
+            a = tl.where(update_valid, a_raw, 1.0)
             r = vt - tl.sum(kt[:, None] * s, 0)
-            u = beta * r / a
+            u = tl.where(update_valid, beta * r / a, 0.0)
             den = 1.0 + C * vt * u
             s = (s + kt[:, None] * u[None, :]) / den[None, :]
         tl.debug_barrier()
@@ -172,9 +176,11 @@ def hyperbolic_delta_rule_bwd_kernel(
             else:
                 dreadout = tl.full((BV,), 0.0, tl.float32)
                 kr = tl.full((BK,), 0.0, tl.float32)
-            a = tl.sum(kt * kt, 0) - C * vt * vt
+            a_raw = tl.sum(kt * kt, 0) - C * vt * vt
+            update_valid = a_raw > 1.0e-5
+            a = tl.where(update_valid, a_raw, 1.0)
             r = vt - tl.sum(kt[:, None] * prev, 0)
-            u = beta * r / a
+            u = tl.where(update_valid, beta * r / a, 0.0)
             den = 1.0 + C * vt * u
             cur = (prev + kt[:, None] * u[None, :]) / den[None, :]
             dq = SCALE * tl.sum(cur * dout[None, :], 1)
@@ -182,10 +188,10 @@ def hyperbolic_delta_rule_bwd_kernel(
             gnum = ds / den[None, :]
             gden = -tl.sum(ds * cur, 0) / den
             gu = tl.sum(gnum * kt[:, None], 0) + C * vt * gden
-            gr = gu * beta / a
-            ga = -gu * u / a
+            gr = tl.where(update_valid, gu * beta / a, 0.0)
+            ga = tl.where(update_valid, -gu * u / a, 0.0)
             dv = C * u * gden + gr - 2.0 * C * vt * ga
-            db = gu * r / a
+            db = tl.where(update_valid, gu * r / a, 0.0)
             dk = tl.sum(gnum * u[None, :] - prev * gr[None, :], 1) + 2.0 * kt * tl.sum(ga, 0)
             dc = tl.sum(vt * u * gden - vt * vt * ga, 0)
             ds = gnum - kt[:, None] * gr[None, :]

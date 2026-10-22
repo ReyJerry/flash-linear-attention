@@ -150,16 +150,11 @@ def _run_chunk(q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, sca
     v_flat = vbar.reshape(B, T, H * V, 1).contiguous()
     beta_flat = beta.reshape(B, T, H * V, 1).contiguous()
     state_flat = state.permute(0, 1, 3, 2).reshape(B, H * V, K, 1).contiguous()
-    out_flat, state_flat_out = chunk_hyperbolic_delta_rule(
+    raw_readout_q = k.unsqueeze(3).expand(B, T, H, V, K).reshape(B, T, H * V, K).contiguous()
+    out_flat, state_flat_out, realized_flat = chunk_hyperbolic_delta_rule(
         q_flat, k_flat, v_flat, beta_flat, curvature=curvature, scale=scale,
-        initial_state=state_flat, output_final_state=True, chunk_size=16, check_inputs=False,
-    )
-    # Read the post-update memory using the same raw key, without materializing
-    # every S_t. This extra fused Chunk call is differentiable and batch-safe.
-    readout_q = k.unsqueeze(3).expand(B, T, H, V, K).reshape(B, T, H * V, K).contiguous()
-    realized_flat, _ = chunk_hyperbolic_delta_rule(
-        readout_q, k_flat, v_flat, beta_flat, curvature=curvature, scale=1.0,
-        initial_state=state_flat, output_final_state=True, chunk_size=16, check_inputs=False,
+        initial_state=state_flat, output_final_state=True, chunk_size=16,
+        check_inputs=False, readout_q=raw_readout_q,
     )
     out = out_flat.reshape(B, T, H, V)
     realized = realized_flat.reshape(B, T, H, V)
@@ -226,10 +221,8 @@ def triton_protected_chunkwise_hyperbolic_delta_rule(
         def run(qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c):
             out, next_state, realized = _run_chunk(qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, c, scale)
             # Protect the actual post-update readout k_t^T S_t, matching PyTorch.
-            from .protected import _select_bank
-            next_k, next_v, next_scores, _ = _select_bank(
-                bank_k, bank_v, bank_scores, kc, realized, sc,
-                temperature=temperature, novelty_weight=novelty_weight,
+            next_k, next_v, next_scores, _ = _TritonSmoothBankUpdate.apply(
+                bank_k, bank_v, bank_scores, kc, realized, sc, temperature,
             )
             return out, next_state, next_k, next_v, next_scores
 

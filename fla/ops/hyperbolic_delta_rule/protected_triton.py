@@ -202,32 +202,49 @@ class _FusedProtectedChunkFunction(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, dout, dstate, dnext_k, dnext_v, dnext_scores):
-        saved = ctx.saved_tensors
-        # In autograd.Function.forward, operations do not record a graph.
-        # Recompute only this block with existing analytic Triton VJPs.
-        with torch.enable_grad():
-            args = tuple(x.detach().requires_grad_(True) for x in saved)
-            q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, curvature = args
-            out, next_state, realized = _run_chunk(
-                q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, ctx.scale,
-            )
-            new_k, new_v, new_scores, _ = _TritonSmoothBankUpdate.apply(
-                bank_k, bank_v, bank_scores, k, realized, scores, ctx.temperature,
-            )
-            outputs = out, next_state, new_k, new_v, new_scores
-            upstream = (dout, dstate, dnext_k, dnext_v, dnext_scores)
-            grad_outputs = tuple(
-                torch.zeros_like(y) if d is None else d for y, d in zip(outputs, upstream)
-            )
-            grads = torch.autograd.grad(
-                outputs, args, grad_outputs=grad_outputs,
-                allow_unused=True, retain_graph=False, create_graph=False,
-            )
-        result = tuple(
-            g.to(x.dtype) if g is not None else None for g, x in zip(grads, saved)
-        )
-        return (*result, None, None)
+        import triton
+        from .protected_fused_backward import protected_fused_chunk_bwd_kernel
 
+        q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, curvature = ctx.saved_tensors
+        B, T, H, K = q.shape
+        V, R = v.shape[-1], bank_k.shape[-2]
+        dout = torch.zeros_like(v) if dout is None else dout.contiguous()
+        dstate = torch.zeros_like(state) if dstate is None else dstate.contiguous()
+        dnext_k = torch.zeros_like(bank_k) if dnext_k is None else dnext_k.contiguous()
+        dnext_v = torch.zeros_like(bank_v) if dnext_v is None else dnext_v.contiguous()
+        dnext_scores = torch.zeros_like(bank_scores) if dnext_scores is None else dnext_scores.contiguous()
+        device = q.device
+        scratch_s = torch.empty((B, H, T, K, V), device=device, dtype=torch.float32)
+        scratch_realized = torch.empty((B, H, T, V), device=device, dtype=torch.float32)
+        scratch_bk = torch.empty((B, H, T, R, K), device=device, dtype=torch.float32)
+        scratch_bv = torch.empty((B, H, T, R, V), device=device, dtype=torch.float32)
+        scratch_bs = torch.empty((B, H, T, R), device=device, dtype=torch.float32)
+        scratch_dk = torch.empty((B, H, T, K), device=device, dtype=torch.float32)
+        scratch_dreal = torch.empty((B, H, T, V), device=device, dtype=torch.float32)
+        dq, dk, dv, db = (torch.empty_like(x, dtype=torch.float32) for x in (q, k, v, beta))
+        dh0 = torch.empty_like(state, dtype=torch.float32)
+        dbk, dbv, dbs = (torch.empty_like(x, dtype=torch.float32) for x in (bank_k, bank_v, bank_scores))
+        dselect = torch.empty_like(scores, dtype=torch.float32)
+        dc_part = torch.empty((B, H), device=device, dtype=torch.float32)
+        protected_fused_chunk_bwd_kernel[(B * H,)](
+            q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, curvature,
+            dout, dstate, dnext_k, dnext_v, dnext_scores,
+            scratch_s, scratch_realized, scratch_bk, scratch_bv, scratch_bs,
+            scratch_dk, scratch_dreal,
+            dq, dk, dv, db, dh0, dbk, dbv, dbs, dselect, dc_part,
+            T=T, H=H, K=K, V=V, R=R, SCALE=ctx.scale, TEMP=ctx.temperature,
+            EPS=1.0e-5,
+            BK=max(16, triton.next_power_of_2(K)),
+            BV=max(16, triton.next_power_of_2(V)),
+            BR=max(16, triton.next_power_of_2(R)),
+            num_warps=8, enable_fp_fusion=False,
+        )
+        return (
+            dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype),
+            dh0.to(state.dtype), dbk.to(bank_k.dtype), dbv.to(bank_v.dtype),
+            dbs.to(bank_scores.dtype), dselect.to(scores.dtype),
+            dc_part.sum().reshape_as(curvature).to(curvature.dtype), None, None,
+        )
 
 def triton_protected_chunkwise_hyperbolic_delta_rule(
     q, k, v, beta, curvature=1.0, scale=None, initial_state=None,

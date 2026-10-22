@@ -289,3 +289,43 @@ def test_chunk_optional_readout_matches_single_query_recurrence():
     ref_gr = torch.autograd.grad(ref_loss, (q, k, v, beta, h0))
     for a, b in zip(gr, ref_gr):
         torch.testing.assert_close(a, b, atol=3e-3, rtol=3e-2)
+
+
+def test_single_launch_fused_protected_chunk_vjp():
+    """Fused forward must agree with separately compiled Triton VJP replay."""
+    from fla.ops.hyperbolic_delta_rule.protected_triton import (
+        _FusedProtectedChunkFunction, _TritonSmoothBankUpdate, _run_chunk,
+    )
+
+    torch.manual_seed(547)
+    B, T, H, K, V, R = 2, 16, 2, 16, 3, 2
+    q = torch.randn(B, T, H, K, device='cuda', requires_grad=True)
+    k = torch.nn.functional.normalize(
+        torch.randn(B, T, H, K, device='cuda'), dim=-1,
+    ).detach().requires_grad_()
+    v = (torch.randn(B, T, H, V, device='cuda') * 0.03).requires_grad_()
+    beta = torch.sigmoid(torch.randn(B, T, H, V, device='cuda')).detach().requires_grad_()
+    h0 = torch.zeros(B, H, K, V, device='cuda', requires_grad=True)
+    bk = torch.zeros(B, H, R, K, device='cuda')
+    bv = torch.zeros(B, H, R, V, device='cuda')
+    bs = torch.full((B, H, R), -1e6, device='cuda')
+    scores = torch.randn(B, T, H, device='cuda', requires_grad=True)
+    curvature = torch.tensor(0.2, device='cuda', requires_grad=True)
+    actual = _FusedProtectedChunkFunction.apply(
+        q, k, v, beta, h0, bk, bv, bs, scores, curvature, K**-0.5, 0.7,
+    )
+    ref_out, ref_state, realized = _run_chunk(
+        q, k, v, beta, h0, bk, bv, bs, curvature, K**-0.5,
+    )
+    ref_bk, ref_bv, ref_bs, _ = _TritonSmoothBankUpdate.apply(
+        bk, bv, bs, k, realized, scores, 0.7,
+    )
+    reference = (ref_out, ref_state, ref_bk, ref_bv, ref_bs)
+    for a, e in zip(actual, reference):
+        torch.testing.assert_close(a.float(), e.float(), atol=3e-3, rtol=3e-2)
+    upstream = tuple(torch.randn_like(x) for x in actual)
+    targets = (q, k, v, beta, h0, scores, curvature)
+    actual_grad = torch.autograd.grad(actual, targets, upstream, allow_unused=False)
+    ref_grad = torch.autograd.grad(reference, targets, upstream, allow_unused=False)
+    for a, e in zip(actual_grad, ref_grad):
+        torch.testing.assert_close(a.float(), e.float(), atol=3e-3, rtol=3e-2)

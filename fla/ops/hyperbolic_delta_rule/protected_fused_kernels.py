@@ -68,8 +68,10 @@ def protected_fused_chunk_fwd_kernel(
         kp = tl.where(valid_projection[:, None], kp, raw_k)
         vp = tl.where(valid_projection, vp, raw_v)
         state = tl.load(H0 + ((b * H + h) * K + ik) * V + value, valid_k, 0).to(tl.float32)
-        a = tl.where(valid_t, tl.sum(kp * kp, 1) - c * vp * vp, 1.0)
-        coeff = beta / a
+        a_raw = tl.sum(kp * kp, 1) - c * vp * vp
+        update_valid = valid_t & (a_raw > EPS)
+        a = tl.where(update_valid, a_raw, 1.0)
+        coeff = tl.where(update_valid, beta / a, 0.0)
         gram = tl.dot(kp, tl.trans(kp), input_precision="ieee") - c * vp[:, None] * vp[None, :]
         lower = tl.where(it[:, None] > it[None, :], coeff[:, None] * gram, 0.0)
         recurrence = coeff * (vp - tl.sum(kp * state[None, :], 1))

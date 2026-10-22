@@ -218,3 +218,34 @@ loss.backward()
 `attn_mode="naive"` selects the slow reference operator for debugging. It does not
 remove the other FLA runtime dependencies. No pretrained checkpoint or task-quality
 improvement is provided by the architecture code alone.
+
+
+## Fused protected backward (experimental, 2026-10-22)
+
+`protected_fused_backward.py` now contains a one-launch-per-(batch, head,
+chunk) analytic first-order backward. It replays projection and state updates,
+reconstructs the continuous bank snapshots, backpropagates the bank transitions,
+and accumulates projection/curvature gradients. The scratch tensors are
+chunk-local, not full-sequence; the wrapper sums per-head curvature gradients.
+The fused path no longer re-enters Python autograd to run a decomposed chain
+during backward.
+
+The CPU mathematical VJP used to design this kernel passed an independent
+float64 comparison against PyTorch autograd (all 10 tested input families,
+maximum reported mismatch below 1e-14). This is **not** a test of Triton JIT
+compilation, GPU numeric behavior, hardware efficiency, or the complete
+repository test suite. There is no GPU on the development host and the
+GitHub repository cannot be cloned from its shell due to DNS restrictions.
+Treat the fused CUDA kernels as experimental until the dedicated GPU parity,
+mixed-precision, memory, race, and throughput suites pass. The code is NOT
+yet a validated high-throughput substitute for GDN/KDA/GDN2. A single-CTA,
+multi-value kernel can have poor occupancy for large head/value dimensions;
+tune or tile after profiling instead of assuming fusion is always faster.
+
+To check the fused path on an actual GPU:
+
+```bash
+python -m pytest -xvv tests/ops/test_hyperbolic_delta_rule.py -k 'single_launch_fused or chunk_optional_readout or triton_smooth_bank'
+python -m pytest -xvv tests/ops/test_hyperbolic_delta_rule.py -k 'protected_triton'
+python benchmarks/benchmark_protected_hyperbolic_delta_rule.py --batch 2 --seq-len 256 --heads 2 --key-dim 32 --value-dim 8 --rank 2 --include-staged --backward
+```

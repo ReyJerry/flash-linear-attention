@@ -257,3 +257,35 @@ def test_triton_smooth_bank_update_matches_exact_reference_vjp():
     ge = torch.autograd.grad(expected[:3], inputs, weights)
     for a, e in zip(ga, ge):
         torch.testing.assert_close(a, e, atol=3e-3, rtol=3e-3)
+
+
+def test_chunk_optional_readout_matches_single_query_recurrence():
+    torch.manual_seed(433)
+    B, T, H, K, V = 2, 16, 2, 16, 3
+    q = torch.randn(B, T, H, K, device='cuda', requires_grad=True)
+    k = torch.nn.functional.normalize(torch.randn(B, T, H, K, device='cuda'), dim=-1).detach().requires_grad_()
+    v = (0.04 * torch.randn(B, T, H, V, device='cuda')).requires_grad_()
+    beta = torch.rand(B, T, H, V, device='cuda', requires_grad=True)
+    h0 = torch.zeros(B, H, K, V, device='cuda', requires_grad=True)
+    from fla.ops.hyperbolic_delta_rule.chunk import chunk_hyperbolic_delta_rule
+    y, state, readout = chunk_hyperbolic_delta_rule(
+        q, k, v, beta, curvature=0.5, initial_state=h0,
+        output_final_state=True, chunk_size=16, readout_q=k,
+    )
+    y_ref, state_ref = chunk_hyperbolic_delta_rule(
+        q, k, v, beta, curvature=0.5, initial_state=h0,
+        output_final_state=True, chunk_size=16,
+    )
+    readout_ref, _ = chunk_hyperbolic_delta_rule(
+        k, k, v, beta, curvature=0.5, initial_state=h0,
+        output_final_state=True, chunk_size=16, scale=1.,
+    )
+    torch.testing.assert_close(y, y_ref, atol=1e-4, rtol=1e-3)
+    torch.testing.assert_close(state, state_ref, atol=1e-4, rtol=1e-3)
+    torch.testing.assert_close(readout, readout_ref, atol=1e-4, rtol=1e-3)
+    loss = y.square().mean() + state.square().mean() + readout.square().mean()
+    gr = torch.autograd.grad(loss, (q, k, v, beta, h0))
+    ref_loss = y_ref.square().mean() + state_ref.square().mean() + readout_ref.square().mean()
+    ref_gr = torch.autograd.grad(ref_loss, (q, k, v, beta, h0))
+    for a, b in zip(gr, ref_gr):
+        torch.testing.assert_close(a, b, atol=3e-3, rtol=3e-2)

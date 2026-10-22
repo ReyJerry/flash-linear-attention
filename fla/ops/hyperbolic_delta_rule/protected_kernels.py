@@ -237,8 +237,8 @@ def soft_bank_update_fwd_kernel(
             bank_v = tl.where(slot[:, None], cand_v[None, :], bank_v)
             scores = tl.where(slot, cand_s, scores)
         else:
-            safe_scores = tl.where(rows < R, scores, 0.0)
-            p_replace = tl.softmax(-safe_scores / TEMP, axis=0)
+            logits = tl.where(rows < R, -scores / TEMP, -1.0e9)
+            p_replace = tl.softmax(logits, axis=0)
             sigma = 1.0 / (1.0 + tl.exp(-(cand_s - scores) / TEMP))
             gate = p_replace * sigma
             bank_k = (1.0 - gate[:, None]) * bank_k + gate[:, None] * cand_k[None, :]
@@ -293,7 +293,8 @@ def soft_bank_update_bwd_kernel(
             d_v = tl.where(slot[:, None], 0.0, d_v)
             d_s = tl.where(slot, 0.0, d_s)
         else:
-            p_replace = tl.softmax(-old_s / TEMP, axis=0)
+            logits = tl.where(rows < R, -old_s / TEMP, -1.0e9)
+            p_replace = tl.softmax(logits, axis=0)
             sigma = 1.0 / (1.0 + tl.exp(-(cand_s - old_s) / TEMP))
             gate = p_replace * sigma
             d_gate = tl.sum(d_k * (cand_k[None, :] - old_k), axis=1)

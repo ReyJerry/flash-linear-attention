@@ -72,13 +72,16 @@ a basis vector, and bounds values with tanh and a default margin of 0.5. Queries
 are normalized before readout. Curvature defaults to c=1. With `learnable_curvature=True`, a positive scalar is
 parameterized by softplus. The base recurrent and chunk Triton kernels accept
 curvature as a runtime scalar and return its first-order gradient. With
-`protection_rank>0`, each value channel keeps a fixed-capacity bank of realized
-KV associations and projects new Lorentz normals away from the protected span.
-The protected path has dedicated Triton forward/backward kernels and supports
-dense, unpadded batches only. The bank is stop-gradient state; gradients flow
-through the main state, current q/k/v/beta, and curvature, but not through the
-historical decisions that admitted bank entries. If no independent spacelike
-direction remains, that channel's update is skipped.
+`protection_rank>0`, heads share a bounded Key bank and keep per-Value
+association targets. Within each chunk, the same bank projects all token
+constraints; at chunk end it is updated using continuous, score-weighted
+replacement. The bank has differentiable state/association trajectories
+(subject to fixed discrete empty-slot occupancy transitions), not the previous
+stop-gradient and hard Top-K surrogate. The new fused Triton forward runs
+projection, WY/Chunk update, readout, and bank update in a single launch per
+batch/head/chunk. Its backward recomputes the equivalent decomposed Triton
+operators to obtain first-order gradients; it is not a single fused backward
+kernel. Both paths are experimental and CUDA compiler/numerical tests are required.
 
 Low-level operators do not implicitly normalize or clamp arbitrary inputs.
 `check_inputs=True` validates input values but synchronizes the CUDA device.
@@ -172,6 +175,24 @@ compute-sanitizer --tool racecheck python -m pytest -xq tests/ops/test_hyperboli
 python benchmarks/benchmark_hyperbolic_delta_rule.py
 python benchmarks/benchmark_hyperbolic_delta_rule.py --backward
 ```
+
+
+## Experimental single-launch protected fusion
+
+The protected mode now attempts one Triton CTA per (batch, head) chunk through
+`protected_fused_kernels.py`. Each CTA reuses the Key Gram inverse, performs
+per-Value WY triangular solves, computes normal and realized-key readouts, and
+updates the shared bank through a continuous rule. This eliminates the second
+full WY/Chunk forward invocation. The exact first-order autograd path replays
+an algebraically equivalent *decomposed* chain of Triton projection, WY, and
+bank-update kernels in reverse, with chunk checkpointing.
+
+**Important:** a single fused launch is not a claim of high throughput. The
+CTA loops across Value channels, and high V can have substantial register,
+occupancy, and instruction costs. Its compilation and numeric comparison have
+not been validated on a GPU here. Treat as a correctness-first prototype, not
+a mature alternative to tuned GDN/KDA/GDN2 kernels. CPU mathematical reference
+and GPU parity tests must pass first, then run the CUDA benchmark.
 
 ## Small model example
 

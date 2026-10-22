@@ -11,7 +11,6 @@ Example:
 
 import argparse
 import statistics
-import time
 
 import torch
 
@@ -51,6 +50,7 @@ def main():
     parser.add_argument('--warmup', type=int, default=5)
     parser.add_argument('--repeats', type=int, default=20)
     parser.add_argument('--backward', action='store_true')
+    parser.add_argument('--include-staged', action='store_true', help='Compare fused and staged Triton implementations')
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit('CUDA is required for this benchmark.')
@@ -83,7 +83,38 @@ def main():
             (out[0].float().square().mean() + out[1].square().mean()).backward()
         return out[0], out[1]
 
-    for name, fn in (('unprotected_chunk', baseline), ('protected_chunk', protected)):
+
+    def staged_protected():
+        from fla.ops.hyperbolic_delta_rule.protected_triton import _run_chunk, _TritonSmoothBankUpdate
+
+        qi, ki, vi, bi, si = [
+            x.detach().requires_grad_(args.backward) for x in (q, k, v, beta, state)
+        ]
+        bkey = torch.zeros((B, H, args.rank, K), device=device, dtype=torch.float32)
+        bvalue = torch.zeros((B, H, args.rank, V), device=device, dtype=torch.float32)
+        bscore = torch.full((B, H, args.rank), -1e6, device=device)
+        selection_scores = ki.float().norm(dim=-1)
+        curvature = torch.tensor(0.5, device=device)
+        outs = []
+        for start in range(0, T, args.chunk_size):
+            sl = slice(start, start + args.chunk_size)
+            qc, kc, vc, bc, sc = [x[:, sl].contiguous() for x in (qi, ki, vi, bi, selection_scores)]
+            y, si, realized = _run_chunk(
+                qc, kc, vc, bc, si, bkey, bvalue, bscore, curvature, K ** -0.5,
+            )
+            bkey, bvalue, bscore, _ = _TritonSmoothBankUpdate.apply(
+                bkey, bvalue, bscore, kc, realized, sc, 0.25,
+            )
+            outs.append(y)
+        output = torch.cat(outs, dim=1)
+        if args.backward:
+            (output.float().square().mean() + si.square().mean()).backward()
+        return output, si
+
+    methods = [('unprotected_chunk', baseline), ('protected_single_launch', protected)]
+    if args.include_staged:
+        methods.append(('protected_staged_triton', staged_protected))
+    for name, fn in methods:
         ms, peak = measure(fn, args.warmup, args.repeats)
         tokens_s = B * T * 1000.0 / ms
         print(f'{name}: {ms:.3f} ms, {tokens_s:.0f} tokens/s, peak={peak / 2**30:.3f} GiB')

@@ -24,6 +24,7 @@ def chunk_hyperbolic_delta_rule(
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 16,
     check_inputs: bool = False,
+    readout_q: torch.Tensor | None = None,
 ):
     """Triton chunk forward with the same input/state contract as fused_recurrent.
 
@@ -34,5 +35,5 @@ def chunk_hyperbolic_delta_rule(
     """
     return _apply_hyperbolic_delta_rule(
         q, k, v, beta, curvature, scale, initial_state, output_final_state,
-        cu_seqlens, chunk_size, check_inputs, 'chunk',
+        cu_seqlens, chunk_size, check_inputs, 'chunk', readout_q=readout_q,
     )

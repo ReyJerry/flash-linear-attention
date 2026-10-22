@@ -162,6 +162,73 @@ def _run_chunk(q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, sca
     return out, next_state, realized
 
 
+class _FusedProtectedChunkFunction(torch.autograd.Function):
+    """One fused Triton forward and decomposed, Triton-backed exact VJP replay.
+
+    The backward recomputes the same differentiable chunk using the Triton
+    projection, WY and smooth bank kernels. It saves block boundaries rather
+    than O(T*R*K*V) per-token activation tapes across the full sequence.
+    """
+
+    @staticmethod
+    def forward(ctx, q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, curvature, scale, temperature):
+        import triton
+        from .protected_fused_kernels import protected_fused_chunk_fwd_kernel
+
+        B, T, H, K = q.shape
+        V, R = v.shape[-1], bank_k.shape[-2]
+        out = torch.empty_like(v, dtype=q.dtype)
+        state_out = torch.empty_like(state)
+        next_k = torch.empty_like(bank_k)
+        next_v = torch.empty_like(bank_v)
+        next_scores = torch.empty_like(bank_scores)
+        count = torch.empty((B, H), device=q.device, dtype=torch.int32)
+        protected_fused_chunk_fwd_kernel[(B * H,)](
+            q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, curvature,
+            out, state_out, next_k, next_v, next_scores, count,
+            T=T, H=H, K=K, V=V, R=R,
+            SCALE=scale, TEMP=temperature, EPS=1.0e-5,
+            BT=max(16, triton.next_power_of_2(T)),
+            BK=max(16, triton.next_power_of_2(K)),
+            BV=max(16, triton.next_power_of_2(V)),
+            BR=max(16, triton.next_power_of_2(R)),
+            num_warps=8, enable_fp_fusion=False,
+        )
+        ctx.save_for_backward(q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, curvature)
+        ctx.scale, ctx.temperature = scale, temperature
+        ctx.set_materialize_grads(False)
+        return out, state_out, next_k, next_v, next_scores
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dout, dstate, dnext_k, dnext_v, dnext_scores):
+        saved = ctx.saved_tensors
+        # In autograd.Function.forward, operations do not record a graph.
+        # Recompute only this block with existing analytic Triton VJPs.
+        with torch.enable_grad():
+            args = tuple(x.detach().requires_grad_(True) for x in saved)
+            q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, curvature = args
+            out, next_state, realized = _run_chunk(
+                q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, ctx.scale,
+            )
+            new_k, new_v, new_scores, _ = _TritonSmoothBankUpdate.apply(
+                bank_k, bank_v, bank_scores, k, realized, scores, ctx.temperature,
+            )
+            outputs = out, next_state, new_k, new_v, new_scores
+            upstream = (dout, dstate, dnext_k, dnext_v, dnext_scores)
+            grad_outputs = tuple(
+                torch.zeros_like(y) if d is None else d for y, d in zip(outputs, upstream)
+            )
+            grads = torch.autograd.grad(
+                outputs, args, grad_outputs=grad_outputs,
+                allow_unused=True, retain_graph=False, create_graph=False,
+            )
+        result = tuple(
+            g.to(x.dtype) if g is not None else None for g, x in zip(grads, saved)
+        )
+        return (*result, None, None)
+
+
 def triton_protected_chunkwise_hyperbolic_delta_rule(
     q, k, v, beta, curvature=1.0, scale=None, initial_state=None,
     protected_keys=None, protected_values=None, protected_scores=None,
@@ -219,12 +286,9 @@ def triton_protected_chunkwise_hyperbolic_delta_rule(
         )
 
         def run(qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c):
-            out, next_state, realized = _run_chunk(qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, c, scale)
-            # Protect the actual post-update readout k_t^T S_t, matching PyTorch.
-            next_k, next_v, next_scores, _ = _TritonSmoothBankUpdate.apply(
-                bank_k, bank_v, bank_scores, kc, realized, sc, temperature,
+            return _FusedProtectedChunkFunction.apply(
+                qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, sc, c, scale, temperature,
             )
-            return out, next_state, next_k, next_v, next_scores
 
         args = (qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c)
         needs_grad = torch.is_grad_enabled() and any(x.requires_grad for x in args)

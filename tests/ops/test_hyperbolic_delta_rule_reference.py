@@ -420,3 +420,47 @@ def test_smooth_bank_update_exact_autograd_and_gradcheck():
         (bank_k, bank_v, bank_scores, cand_k, cand_v, cand_scores))
     assert all(torch.isfinite(g).all() for g in grads)
     assert grads[2].abs().sum() > 0 and grads[5].abs().sum() > 0
+
+
+def test_protected_wy_realized_readout_algebra_cpu():
+    """Prove the fused WY readout formula against the PyTorch recurrence."""
+    import torch
+    path = Path(__file__).resolve().parents[2] / 'fla/ops/hyperbolic_delta_rule/protected.py'
+    spec = importlib.util.spec_from_file_location('hyperbolic_protected_wy', path.resolve())
+    protected = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(protected)
+    torch.manual_seed(555)
+    B, T, H, K, V, R = 1, 4, 1, 6, 2, 2
+    q = torch.randn(B, T, H, K, dtype=torch.float64)
+    k = torch.nn.functional.normalize(torch.randn(B, T, H, K, dtype=torch.float64), dim=-1)
+    v = 0.03 * torch.randn(B, T, H, V, dtype=torch.float64)
+    beta = torch.sigmoid(torch.randn(B, T, H, V, dtype=torch.float64))
+    state = torch.zeros(B, H, K, V, dtype=torch.float64)
+    bank_k = torch.zeros(B, H, R, K, dtype=torch.float64)
+    bank_v = torch.zeros(B, H, R, V, dtype=torch.float64)
+    bank_s = torch.full((B, H, R), -1e6, dtype=torch.float64)
+    curvature = torch.tensor(0.2, dtype=torch.float64)
+    kp, vp = protected._project_chunk_torch(k, v, bank_k, bank_v, bank_s, curvature)
+    ref_out, ref_state, ref_realized = protected._recurrent_chunk_torch(
+        q, kp, vp, beta, state, curvature, K ** -0.5, readout_k=k,
+    )
+    out_by_channel, state_by_channel, realized_by_channel = [], [], []
+    for vi in range(V):
+        kk = kp[0, :, 0, vi, :]
+        vv = vp[0, :, 0, vi]
+        bb = beta[0, :, 0, vi]
+        qv = q[0, :, 0, :]
+        a = kk.square().sum(-1) - curvature * vv.square()
+        alpha = bb / a
+        gram = kk @ kk.T - curvature * vv[:, None] * vv[None, :]
+        mat = torch.eye(T, dtype=kk.dtype) + torch.tril(alpha[:, None] * gram, -1)
+        rhs = alpha * (vv - kk @ state[0, 0, :, vi])
+        coef = torch.linalg.solve_triangular(mat, rhs[:, None], upper=False).squeeze(-1)
+        den = 1 + curvature * torch.cumsum(vv * coef, dim=0)
+        rows = (state[0, 0, :, vi] + torch.cumsum(kk * coef[:, None], dim=0)) / den[:, None]
+        out_by_channel.append(K ** -0.5 * (qv * rows).sum(-1))
+        realized_by_channel.append((k[0, :, 0, :] * rows).sum(-1))
+        state_by_channel.append(rows[-1])
+    torch.testing.assert_close(ref_out[0, :, 0], torch.stack(out_by_channel, dim=-1))
+    torch.testing.assert_close(ref_realized[0, :, 0], torch.stack(realized_by_channel, dim=-1))
+    torch.testing.assert_close(ref_state[0, 0], torch.stack(state_by_channel, dim=-1))

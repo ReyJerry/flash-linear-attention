@@ -55,10 +55,10 @@ def hyperbolic_delta_rule_fwd_kernel(
 
 @triton.jit
 def hyperbolic_delta_rule_chunk_fwd_kernel(
-    Q, Kp, Vp, Beta, H0, Cu, O, HT, CP, Curvature,
+    Q, Kp, Vp, Beta, H0, Cu, O, HT, CP, Curvature, ReadoutQ, Readout,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
     SCALE: tl.constexpr, BT: tl.constexpr,
-    BK: tl.constexpr, SAVE: tl.constexpr,
+    BK: tl.constexpr, SAVE: tl.constexpr, READOUT: tl.constexpr,
 ):
     # One (sequence, head, value) per program. No cross-value atomics.
     nh, value = tl.program_id(0), tl.program_id(1)
@@ -96,6 +96,14 @@ def hyperbolic_delta_rule_chunk_fwd_kernel(
             column = tl.sum(tl.where(rows[None, :] == j, lower, 0.0), 1)
             b = b - column * bj
         den = 1.0 + C * tl.cumsum(vv * b, 0)
+        if READOUT:
+            rkk = tl.load(
+                ReadoutQ + (token[:, None] * H + h) * K + ik[None, :],
+                valid[:, None] & (ik[None, :] < K), 0,
+            ).to(tl.float32)
+            state_rows = (s[None, :] + tl.cumsum(kk * b[:, None], 0)) / den[:, None]
+            readout = tl.sum(rkk * state_rows, 1)
+            tl.store(Readout + vo, readout, valid)
         qk = tl.dot(qq, tl.trans(kk), input_precision='ieee')
         causal_qk = tl.where(rows[:, None] >= rows[None, :], qk, 0.0)
         num = tl.sum(qq * s[None, :], 1) + tl.sum(causal_qk * b[None, :], 1)
@@ -109,9 +117,10 @@ def hyperbolic_delta_rule_chunk_fwd_kernel(
 @triton.jit
 def hyperbolic_delta_rule_bwd_kernel(
     Q, Kp, Vp, Beta, Cu, CP, DO, DHT, Scratch,
-    DQ, DK, DV, DBeta, DH0, DC, Curvature,
+    DQ, DK, DV, DBeta, DH0, DC, Curvature, ReadoutQ, DReadout, DReadoutQ,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, TOTAL: tl.constexpr,
     SCALE: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
+    READOUT: tl.constexpr,
 ):
     nh, tile_v = tl.program_id(0), tl.program_id(1)
     n, h = nh // H, nh % H
@@ -157,13 +166,19 @@ def hyperbolic_delta_rule_bwd_kernel(
             vt = tl.load(Vp + vo, iv < V, 0).to(tl.float32)
             beta = tl.load(Beta + vo, iv < V, 0).to(tl.float32)
             dout = tl.load(DO + vo, iv < V, 0).to(tl.float32)
+            if READOUT:
+                dreadout = tl.load(DReadout + vo, iv < V, 0).to(tl.float32)
+                kr = tl.load(ReadoutQ + ko, ik < K, 0).to(tl.float32)
+            else:
+                dreadout = tl.full((BV,), 0.0, tl.float32)
+                kr = tl.full((BK,), 0.0, tl.float32)
             a = tl.sum(kt * kt, 0) - C * vt * vt
             r = vt - tl.sum(kt[:, None] * prev, 0)
             u = beta * r / a
             den = 1.0 + C * vt * u
             cur = (prev + kt[:, None] * u[None, :]) / den[None, :]
             dq = SCALE * tl.sum(cur * dout[None, :], 1)
-            ds = ds + SCALE * qt[:, None] * dout[None, :]
+            ds = ds + SCALE * qt[:, None] * dout[None, :] + kr[:, None] * dreadout[None, :]
             gnum = ds / den[None, :]
             gden = -tl.sum(ds * cur, 0) / den
             gu = tl.sum(gnum * kt[:, None], 0) + C * vt * gden
@@ -178,6 +193,9 @@ def hyperbolic_delta_rule_bwd_kernel(
             partial = tile_v * TOTAL * H * K + ko
             tl.store(DQ + partial, dq, ik < K)
             tl.store(DK + partial, dk, ik < K)
+            if READOUT:
+                d_readout_q = tl.sum(cur * dreadout[None, :], 1)
+                tl.store(DReadoutQ + partial, d_readout_q, ik < K)
             tl.store(DV + vo, dv, iv < V)
             tl.store(DBeta + vo, db, iv < V)
             tl.store(DC + (tile_v * TOTAL + t) * H + h, dc)

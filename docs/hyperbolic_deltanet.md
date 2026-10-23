@@ -249,3 +249,32 @@ python -m pytest -xvv tests/ops/test_hyperbolic_delta_rule.py -k 'single_launch_
 python -m pytest -xvv tests/ops/test_hyperbolic_delta_rule.py -k 'protected_triton'
 python benchmarks/benchmark_protected_hyperbolic_delta_rule.py --batch 2 --seq-len 256 --heads 2 --key-dim 32 --value-dim 8 --rank 2 --include-staged --backward
 ```
+
+
+## Value-parallel alternative (2026-10-23)
+
+The experimental `protected_value_tile_kernels.py` adds CTA-per-Value-channel
+forward and backward for large V. This bounds register usage around O(R*K+K)
+per CTA rather than O(K*V+R*V+T*V) in the head-wide fused implementation,
+exposing B*H*V independent CTA programs. The fixed chunk projection is reused
+across time. Backward replays only one chunk and stores its per-channel
+pre-update state, projected key/value and alpha in chunk-local scratch; it
+does not recompute the forward state separately for every reverse token.
+
+`kernel_strategy` may be `auto` (Value-parallel for V>=8), `fused`
+(original head-wide one-CTA fusion), or `value_parallel`. The
+Value-parallel strategy deliberately uses a *separate* Triton bank-update
+stage, because the shared bank requires synchronization across Value CTAs.
+The two-stage strategy is not one kernel; performance and correctness take
+priority over an artificial one-kernel target.
+
+The first-order VJP returns per-channel q/k and protection-key partials,
+reduced by PyTorch across Value; the bank-update's own first-order VJP is
+already in Triton. Benchmarks and GPU parity tests have been added but could
+not run in the development CPU-only environment. No throughput equivalence
+to unprotected GDN/KDA/GDN2 is claimed.
+
+```bash
+python -m pytest -xvv tests/ops/test_hyperbolic_delta_rule.py -k 'value_parallel'
+python benchmarks/benchmark_protected_hyperbolic_delta_rule.py --batch 2 --seq-len 1024 --heads 8 --key-dim 64 --value-dim 64 --rank 4 --backward --compare-strategies
+```

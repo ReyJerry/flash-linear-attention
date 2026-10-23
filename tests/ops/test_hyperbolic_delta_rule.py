@@ -329,3 +329,60 @@ def test_single_launch_fused_protected_chunk_vjp():
     ref_grad = torch.autograd.grad(reference, targets, upstream, allow_unused=False)
     for a, e in zip(actual_grad, ref_grad):
         torch.testing.assert_close(a.float(), e.float(), atol=3e-3, rtol=3e-2)
+
+
+def test_value_parallel_protected_chunk_parity():
+    """Multi-batch/multi-value regression including gradient into shared Key bank."""
+    from fla.ops.hyperbolic_delta_rule.protected_triton import (
+        _FusedProtectedChunkFunction, _run_value_parallel_chunk,
+    )
+    torch.manual_seed(641)
+    B, T, H, K, V, R = 2, 16, 2, 16, 16, 2
+    q = torch.randn(B, T, H, K, device='cuda', requires_grad=True)
+    k = torch.nn.functional.normalize(torch.randn_like(q), dim=-1).detach().requires_grad_()
+    v = (torch.randn(B, T, H, V, device='cuda') * 0.03).requires_grad_()
+    beta = torch.rand(B, T, H, V, device='cuda', requires_grad=True)
+    state = torch.zeros(B, H, K, V, device='cuda', requires_grad=True)
+    bk = torch.nn.functional.normalize(torch.randn(B, H, R, K, device='cuda'), dim=-1).detach().requires_grad_()
+    bv = (0.03 * torch.randn(B, H, R, V, device='cuda')).requires_grad_()
+    bs = torch.zeros(B, H, R, device='cuda', requires_grad=True)
+    score = torch.randn(B, T, H, device='cuda', requires_grad=True)
+    c = torch.tensor(0.15, device='cuda', requires_grad=True)
+    args = (q, k, v, beta, state, bk, bv, bs, score, c)
+    slow = _FusedProtectedChunkFunction.apply(*args, K**-0.5, 0.7)
+    fast = _run_value_parallel_chunk(*args, K**-0.5, 0.7)
+    for a, b in zip(fast, slow):
+        torch.testing.assert_close(a, b, atol=5e-3, rtol=5e-2)
+    grad_outputs = tuple(torch.randn_like(x) for x in slow)
+    gt = torch.autograd.grad(slow, args, grad_outputs)
+    gp = torch.autograd.grad(fast, args, grad_outputs)
+    for a, b in zip(gp, gt):
+        torch.testing.assert_close(a, b, atol=8e-3, rtol=8e-2)
+
+
+def test_value_parallel_multi_chunk_checkpoint_parity():
+    from fla.ops.hyperbolic_delta_rule.protected_triton import triton_protected_chunkwise_hyperbolic_delta_rule
+    torch.manual_seed(642)
+    B, T, H, K, V = 2, 33, 1, 16, 16
+    base = (
+        torch.randn(B, T, H, K, device='cuda'),
+        torch.nn.functional.normalize(torch.randn(B, T, H, K, device='cuda'), dim=-1),
+        0.02 * torch.randn(B, T, H, V, device='cuda'),
+        torch.rand(B, T, H, V, device='cuda'),
+        torch.zeros(B, H, K, V, device='cuda'),
+    )
+    def run(checkpoint):
+        args = tuple(x.detach().requires_grad_(True) for x in base)
+        out = triton_protected_chunkwise_hyperbolic_delta_rule(
+            *args[:4], initial_state=args[4], curvature=0.2, protection_rank=2,
+            checkpoint_size=16, kernel_strategy='value_parallel',
+            checkpoint=checkpoint,
+        )
+        loss = sum(z.float().square().mean() for z in out[:5])
+        return out, torch.autograd.grad(loss, args)
+    a, ga = run(False)
+    b, gb = run(True)
+    for x, y in zip(a, b):
+        torch.testing.assert_close(x.float(), y.float(), atol=2e-4, rtol=2e-3)
+    for x, y in zip(ga, gb):
+        torch.testing.assert_close(x, y, atol=3e-3, rtol=3e-2)

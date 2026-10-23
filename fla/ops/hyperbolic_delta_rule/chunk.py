@@ -25,15 +25,16 @@ def chunk_hyperbolic_delta_rule(
     chunk_size: int = 16,
     check_inputs: bool = False,
     readout_q: torch.Tensor | None = None,
+    tensor_core: bool = False,
 ):
     """Triton chunk forward with the same input/state contract as fused_recurrent.
 
-    Computes a distinct (KK^T-c*vv^T) triangular solve for each value channel.
+    With tensor_core=True, computes shared key Gram and query-key GEMMs using\n    Tensor Core-capable tl.dot across 16 Value channels, with an analytic WY backward.\n    Defaults to the original correctness-first kernel until CUDA validation.\n    Computes a distinct (KK^T-c*vv^T) triangular solve for each value channel.
     Checkpointed backward differentiates the equivalent rational recurrence.
     This is a correctness-first chunk implementation, not a tuned tensor-core
     kernel. In particular, key/query Gram computations are repeated per value.
     """
     return _apply_hyperbolic_delta_rule(
         q, k, v, beta, curvature, scale, initial_state, output_final_state,
-        cu_seqlens, chunk_size, check_inputs, 'chunk', readout_q=readout_q,
+        cu_seqlens, chunk_size, check_inputs, 'chunk_tc' if tensor_core else 'chunk', readout_q=readout_q,
     )

@@ -82,7 +82,7 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
         dv = torch.empty_like(v, dtype=torch.float32)
         db = torch.empty_like(beta, dtype=torch.float32)
         dh0 = torch.empty_like(h0)
-        dc = torch.empty((nv, B, T, H), device=q.device, dtype=torch.float32)
+        dc = torch.empty((nv, N * H), device=q.device, dtype=torch.float32) if ctx.mode == 'chunk_tc' else torch.empty((nv, B, T, H), device=q.device, dtype=torch.float32)
         scratch = torch.empty((N, H, ctx.chunk_size, K, V), device=q.device, dtype=torch.float32)
         d_readout = torch.zeros_like(v, dtype=torch.float32) if d_readout is None else d_readout.contiguous().float()
         d_readout_q = torch.empty_like(dq)
@@ -91,7 +91,7 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
             hyperbolic_delta_tc_chunk_bwd[(N * H, nv)](
                 q, k, v, beta, cu, cp, torch.empty((0,), device=q.device), do, dht, curvature,
                 dq, dk, dv, db, dh0, dc,
-                H=H, K=K, V=V, TOTAL=B * T, SCALE=ctx.scale,
+                H=H, K=K, V=V, TOTAL=B * T, N=N, SCALE=ctx.scale,
                 BT=ctx.chunk_size, BK=max(16, triton.next_power_of_2(K)), BV=16,
                 FAST=ctx.tc_fast, HALF=q.dtype == torch.float16, BF16=q.dtype == torch.bfloat16,
                 num_warps=4, enable_fp_fusion=False,

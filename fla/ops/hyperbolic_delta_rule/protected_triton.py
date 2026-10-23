@@ -246,15 +246,94 @@ class _FusedProtectedChunkFunction(torch.autograd.Function):
             dc_part.sum().reshape_as(curvature).to(curvature.dtype), None, None,
         )
 
+
+class _ValueParallelChunk(torch.autograd.Function):
+    """One CTA per Value channel: bounded registers, single replay+reverse VJP."""
+
+    @staticmethod
+    def forward(ctx, q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, scale):
+        from .protected_value_tile_kernels import protected_value_tile_fwd_kernel
+        B, T, H, K = q.shape
+        V, R = v.shape[-1], bank_k.shape[-2]
+        out = torch.empty_like(v)
+        realized = torch.empty_like(v, dtype=torch.float32)
+        final = torch.empty_like(state)
+        protected_value_tile_fwd_kernel[(B * H * V,)](
+            q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature,
+            out, realized, final, T=T, H=H, K=K, V=V, R=R, SCALE=scale,
+            EPS=1e-5, BR=max(16, __import__('triton').next_power_of_2(R)),
+            BK=max(16, __import__('triton').next_power_of_2(K)),
+            num_warps=4, enable_fp_fusion=False,
+        )
+        ctx.save_for_backward(q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature)
+        ctx.scale = scale
+        return out, final, realized
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dout, dfinal, drealized):
+        import triton
+        from .protected_value_tile_kernels import protected_value_tile_bwd_kernel
+        q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature = ctx.saved_tensors
+        B, T, H, K = q.shape
+        V, R = v.shape[-1], bank_k.shape[-2]
+        device = q.device
+        dout = torch.zeros_like(v) if dout is None else dout.contiguous()
+        dfinal = torch.zeros_like(state) if dfinal is None else dfinal.contiguous()
+        drealized = torch.zeros_like(v) if drealized is None else drealized.contiguous()
+        scratch_s = torch.empty((B, T, H, V, K), device=device, dtype=torch.float32)
+        scratch_pk = torch.empty_like(scratch_s)
+        scratch_pv = torch.empty((B, T, H, V), device=device, dtype=torch.float32)
+        scratch_alpha = torch.empty((B, T, H, V, R), device=device, dtype=torch.float32)
+        scratch_valid = torch.empty((B, T, H, V), device=device, dtype=torch.uint8)
+        dqparts = torch.empty_like(scratch_s)
+        dkparts = torch.empty_like(scratch_s)
+        dv = torch.empty_like(v, dtype=torch.float32)
+        dbeta = torch.empty_like(beta, dtype=torch.float32)
+        dh0 = torch.empty_like(state, dtype=torch.float32)
+        dpkparts = torch.empty((B, H, V, R, K), device=device, dtype=torch.float32)
+        dpv = torch.empty_like(bank_v, dtype=torch.float32)
+        dcparts = torch.empty((B, H, V), device=device, dtype=torch.float32)
+        protected_value_tile_bwd_kernel[(B * H * V,)](
+            q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature,
+            dout, dfinal, drealized,
+            scratch_s, scratch_pk, scratch_pv, scratch_alpha, scratch_valid,
+            dqparts, dkparts, dv, dbeta, dh0, dpkparts, dpv, dcparts,
+            T=T, H=H, K=K, V=V, R=R, SCALE=ctx.scale,
+            EPS=1e-5, BR=max(16, triton.next_power_of_2(R)),
+            BK=max(16, triton.next_power_of_2(K)),
+            num_warps=4, enable_fp_fusion=False,
+        )
+        return (dqparts.sum(3).to(q.dtype), dkparts.sum(3).to(k.dtype),
+                dv.to(v.dtype), dbeta.to(beta.dtype), dh0.to(state.dtype),
+                dpkparts.sum(2).to(bank_k.dtype), dpv.to(bank_v.dtype),
+                None, dcparts.sum().reshape_as(curvature).to(curvature.dtype), None)
+
+
+def _run_value_parallel_chunk(q, k, v, beta, state, bank_k, bank_v,
+                              bank_scores, selection_scores, curvature, scale, temperature):
+    output, final, realized = _ValueParallelChunk.apply(
+        q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, scale,
+    )
+    # Shared bank updates are sequential between tokens, so one per-head CTA
+    # processes them after all Value-channel CTAs have produced the readouts.
+    next_k, next_v, next_scores, _ = _TritonSmoothBankUpdate.apply(
+        bank_k, bank_v, bank_scores, k, realized, selection_scores, temperature,
+    )
+    return output, final, next_k, next_v, next_scores
+
+
 def triton_protected_chunkwise_hyperbolic_delta_rule(
     q, k, v, beta, curvature=1.0, scale=None, initial_state=None,
     protected_keys=None, protected_values=None, protected_scores=None,
     protected_count=None, selection_scores=None, protection_rank=4,
     checkpoint_size=16, check_inputs=False, checkpoint=True,
-    temperature=0.25, novelty_weight=0.5,
+    temperature=0.25, novelty_weight=0.5, kernel_strategy='auto',
 ):
     if q.device.type != 'cuda':
         raise ValueError("Triton protected mode requires CUDA.")
+    if kernel_strategy not in ('auto', 'fused', 'value_parallel'):
+        raise ValueError("kernel_strategy must be auto, fused, or value_parallel.")
     if checkpoint_size not in (16, 32):
         raise ValueError("checkpoint_size must be 16 or 32.")
     if not isinstance(protection_rank, int) or not 1 <= protection_rank <= 16:
@@ -303,6 +382,10 @@ def triton_protected_chunkwise_hyperbolic_delta_rule(
         )
 
         def run(qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c):
+            if kernel_strategy == 'value_parallel' or (kernel_strategy == 'auto' and V >= 8):
+                return _run_value_parallel_chunk(
+                    qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, sc, c, scale, temperature,
+                )
             return _FusedProtectedChunkFunction.apply(
                 qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, sc, c, scale, temperature,
             )

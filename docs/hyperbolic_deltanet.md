@@ -278,3 +278,40 @@ to unprotected GDN/KDA/GDN2 is claimed.
 python -m pytest -xvv tests/ops/test_hyperbolic_delta_rule.py -k 'value_parallel'
 python benchmarks/benchmark_protected_hyperbolic_delta_rule.py --batch 2 --seq-len 1024 --heads 8 --key-dim 64 --value-dim 64 --rank 4 --backward --compare-strategies
 ```
+
+
+## Experimental Tensor Core unprotected WY path (2026-10-23)
+
+`chunk_hyperbolic_delta_rule(..., tensor_core=True)` selects the new
+`tensor_core_kernels.py` path. It tiles 16 Value channels per CTA, reuses
+the per-chunk Key Gram and Query-Key products, and uses Tensor-Core-capable
+`tl.dot` for matrices in WY forward and in its analytic reverse-mode
+transposed triangular solve. The new backward does **not** replay the
+single-token recurrent state: its gradients follow the homogeneous WY
+linear system and normalization. The original Chunk remains the **default**
+while Tensor Core JIT/gradients/throughput are unverified.
+
+FP32 computations use `input_precision='tf32x3'` on supported NVIDIA
+Tensor Core GPUs. For FP16/BF16, the opt-in environment variable
+`FLA_HYPERBOLIC_TC_FAST=1` enables native low-precision Tensor Core
+GEMMs, trading precision for speed. Without the flag, FP32 accumulation
+and conservative conversions are used for correctness validation. Packed
+and dense sequences with chunk sizes 16/32 are supported. Optional
+readout-Q and larger K fall back to the existing Chunk implementation.
+
+The analytic WY VJP was independently compared with PyTorch autograd on
+CPU in float64 for T=4/16/32, K=8/16/64, V=3/16; the six gradient
+families (q/k/v/beta/initial state/curvature) agreed to about 1e-15 or
+better. This **does not** verify actual Triton compilation or floating
+point error on GPU.
+
+Validate before enabling for production:
+
+```bash
+python -m pytest -xvv tests/ops/test_hyperbolic_delta_rule.py -k 'tensor_core_hyperbolic'
+python benchmarks/benchmark_hyperbolic_tensor_core.py --seq-len 4096 --heads 8 --key-dim 64 --value-dim 64 --dtype bf16 --backward
+```
+
+No claim is made that the new path matches optimized GDN throughput
+until the benchmark runs on representative H20 hardware with measured
+latency, register usage, occupancy, peak memory, and correctness.

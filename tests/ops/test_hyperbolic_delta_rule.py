@@ -386,3 +386,48 @@ def test_value_parallel_multi_chunk_checkpoint_parity():
         torch.testing.assert_close(x.float(), y.float(), atol=2e-4, rtol=2e-3)
     for x, y in zip(ga, gb):
         torch.testing.assert_close(x, y, atol=3e-3, rtol=3e-2)
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize('K,V', [(16, 16), (64, 48)])
+@pytest.mark.parametrize('T', [1, 16, 35])
+def test_tensor_core_hyperbolic_chunk_forward_backward(dtype, K, V, T):
+    args = make_case(T, K, V, dtype, vector=True, N=2, c=0.5)
+    q, k, v, beta, h0 = args
+    a, sa = chunk_hyperbolic_delta_rule(
+        q, k, v, beta, curvature=0.5, initial_state=h0,
+        output_final_state=True, chunk_size=16, tensor_core=True,
+    )
+    q2, k2, v2, b2, s2 = (x.detach().clone().requires_grad_() for x in args)
+    b, sb = naive_recurrent_hyperbolic_delta_rule(
+        q2, k2, v2, b2, curvature=0.5, initial_state=s2,
+        output_final_state=True,
+    )
+    atol, rtol = {torch.float32:(8e-4, 8e-3),torch.float16:(1e-2,3e-2),
+                  torch.bfloat16:(3e-2,8e-2)}[dtype]
+    torch.testing.assert_close(a.float(), b.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(sa, sb, atol=atol, rtol=rtol)
+    do, dh = torch.randn_like(a), torch.randn_like(sa)
+    ga = torch.autograd.grad((a,sa), args, (do,dh))
+    gr = torch.autograd.grad((b,sb), (q2,k2,v2,b2,s2), (do,dh))
+    for x,y in zip(ga,gr):
+        torch.testing.assert_close(x.float(),y.float(),atol=atol*3,rtol=rtol*3)
+
+
+def test_tensor_core_hyperbolic_chunk_curvature_grad():
+    args = make_case(33, 64, 32, torch.float32, vector=True, N=2, c=0.5)
+    c = torch.tensor(0.5,device='cuda',requires_grad=True)
+    out, h = chunk_hyperbolic_delta_rule(
+        *args[:4], curvature=c, initial_state=args[4],
+        output_final_state=True, tensor_core=True,
+    )
+    grads = torch.autograd.grad(out.square().mean()+h.square().mean(),(*args,c))
+    assert all(torch.isfinite(g).all() for g in grads)
+    qr = tuple(x.detach().clone().requires_grad_() for x in args)
+    cr = c.detach().clone().requires_grad_()
+    ref, href = naive_recurrent_hyperbolic_delta_rule(
+        *qr[:4], curvature=cr, initial_state=qr[4], output_final_state=True,
+    )
+    gre = torch.autograd.grad(ref.square().mean()+href.square().mean(),(*qr,cr))
+    for g,gg in zip(grads,gre):
+        torch.testing.assert_close(g,gg,atol=5e-3,rtol=5e-2)

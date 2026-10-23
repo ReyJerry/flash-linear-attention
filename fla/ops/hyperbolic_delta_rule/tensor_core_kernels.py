@@ -108,7 +108,7 @@ def hyperbolic_delta_tc_chunk_bwd(
     Q, Key, Val, Beta, Cu, Checkpoints, Out, DOut, DHT, Curvature,
     DQPart, DKPart, DV, DBeta, DH0, DCPart,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
-    TOTAL: tl.constexpr, SCALE: tl.constexpr,
+    TOTAL: tl.constexpr, N: tl.constexpr, SCALE: tl.constexpr,
     BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
     FAST: tl.constexpr, HALF: tl.constexpr, BF16: tl.constexpr,
 ):
@@ -207,7 +207,7 @@ def hyperbolic_delta_tc_chunk_bwd(
         tl.store(DV + vptr, dv, mv)
         tl.store(DBeta + vptr, db, mv)
     tl.store(DH0 + hs, ds, ms)
-    tl.store(DCPart + tile_v * (TOTAL * H) + nh, dc_accum)
+    tl.store(DCPart + tile_v * (N * H) + nh, dc_accum)
 
 
 __all__ = ["hyperbolic_delta_tc_chunk_fwd", "hyperbolic_delta_tc_chunk_bwd"]

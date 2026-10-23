@@ -207,7 +207,7 @@ def hyperbolic_delta_tc_chunk_bwd(
         tl.store(DV + vptr, dv, mv)
         tl.store(DBeta + vptr, db, mv)
     tl.store(DH0 + hs, ds, ms)
-    tl.store(DCPart + tile_v * (triton.cdiv(TOTAL, 1) * H) + nh, dc_accum)
+    tl.store(DCPart + tile_v * (TOTAL * H) + nh, dc_accum)
 
 
 __all__ = ["hyperbolic_delta_tc_chunk_fwd", "hyperbolic_delta_tc_chunk_bwd"]

@@ -169,7 +169,7 @@ def hyperbolic_delta_tc_chunk_bwd(
         dz_suffix -= tl.sum(ds * send, axis=0)[None, :] / zend[None, :]
         dw = dwq + _mm(kk, ds / zend[None, :], FAST, HALF, BF16) + c * vv * dz_suffix
         dv = c * w * dz_suffix
-        dc_accum += tl.sum(vv * w * dz_suffix, axis=(0, 1))
+        dc_accum += tl.sum(tl.sum(vv * w * dz_suffix, axis=0), axis=0)
         # Backward of L W = alpha * (v - K S): solve L^T Z = dW.
         zz = dw
         for j in range(BT):
@@ -190,7 +190,7 @@ def hyperbolic_delta_tc_chunk_bwd(
         suf_adj = wz * vv
         vw_suffix_adj = tl.sum(suf_adj, axis=0)[None, :] - tl.cumsum(suf_adj, axis=0)
         dv += c * (wz * vw_prefix + w * vw_suffix_adj)
-        dc_accum += tl.sum(wz * vv * vw_prefix, axis=(0, 1))
+        dc_accum += tl.sum(tl.sum(wz * vv * vw_prefix, axis=0), axis=0)
         kg_lower = tl.where(rows[:, None] > cols[None, :], kg, 0.0)
         gram_w = _mm(kg_lower, w, FAST, HALF, BF16) - c * vv * vw_prefix
         d_alpha = zz * (residual - gram_w)
@@ -199,7 +199,7 @@ def hyperbolic_delta_tc_chunk_bwd(
         dk -= _mm(wz, tl.trans(s), FAST, HALF, BF16)
         dk += 2.0 * kk * tl.sum(da, axis=1)[:, None]
         dv += wz - 2.0 * c * vv * da
-        dc_accum -= tl.sum(da * vv * vv, axis=(0, 1))
+        dc_accum -= tl.sum(tl.sum(da * vv * vv, axis=0), axis=0)
         db = tl.where(active, d_alpha / a, 0.0)
         partial_k = (tile_v * TOTAL * H * K) + ((idx[:, None] * H + h) * K + ik[None, :])
         tl.store(DQPart + partial_k, dq, mt[:, None] & (ik[None, :] < K))

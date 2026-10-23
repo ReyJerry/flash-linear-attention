@@ -35,6 +35,10 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
         readout = torch.empty_like(v, dtype=torch.float32) if has_readout else torch.empty((0,), device=q.device)
         dummy_readout_q = readout_q if has_readout else q
         common = dict(H=H, K=K, V=V, SCALE=scale, BT=chunk_size, SAVE=save_checkpoints)
+        ctx.tc_fast = (
+            mode == 'chunk_tc' and q.dtype in (torch.float16, torch.bfloat16)
+            and os.environ.get('FLA_HYPERBOLIC_TC_FAST', '0') == '1'
+        )
         if mode == 'chunk_tc':
             from .tensor_core_kernels import hyperbolic_delta_tc_chunk_fwd
             fast = ctx.tc_fast
@@ -59,7 +63,6 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, beta, h0, cu, cp, curvature, dummy_readout_q)
         ctx.has_readout = has_readout
         ctx.mode = mode
-        ctx.tc_fast = mode == 'chunk_tc' and q.dtype in (torch.float16, torch.bfloat16) and os.environ.get('FLA_HYPERBOLIC_TC_FAST', '0') == '1'
         ctx.scale, ctx.chunk_size = scale, chunk_size
         ctx.set_materialize_grads(False)
         return o, ht, readout
@@ -89,7 +92,7 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
         if ctx.mode == 'chunk_tc':
             from .tensor_core_kernels import hyperbolic_delta_tc_chunk_bwd
             hyperbolic_delta_tc_chunk_bwd[(N * H, nv)](
-                q, k, v, beta, cu, cp, torch.empty((0,), device=q.device), do, dht, curvature,
+                q, k, v, beta, cu, cp, do, dht, curvature,
                 dq, dk, dv, db, dh0, dc,
                 H=H, K=K, V=V, TOTAL=B * T, N=N, SCALE=ctx.scale,
                 BT=ctx.chunk_size, BK=max(16, triton.next_power_of_2(K)), BV=16,

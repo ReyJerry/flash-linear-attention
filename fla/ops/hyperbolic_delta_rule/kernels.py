@@ -86,7 +86,7 @@ def hyperbolic_delta_rule_chunk_fwd_kernel(
         vv = tl.load(Vp + vo, valid, 0).to(tl.float32)
         beta = tl.load(Beta + vo, valid, 0).to(tl.float32)
         a_raw = tl.sum(kk * kk, 1) - C * vv * vv
-        update_valid = valid & (a_raw > 1.0e-5)
+        update_valid = valid & (a_raw > 0.0)
         a = tl.where(update_valid, a_raw, 1.0)
         alpha = tl.where(update_valid, beta / a, 0.0)
         gram = tl.dot(kk, tl.trans(kk), input_precision='ieee') - C * vv[:, None] * vv[None, :]
@@ -151,7 +151,7 @@ def hyperbolic_delta_rule_bwd_kernel(
             vt = tl.load(Vp + vo, iv < V, 0).to(tl.float32)
             beta = tl.load(Beta + vo, iv < V, 0).to(tl.float32)
             a_raw = tl.sum(kt * kt, 0) - C * vt * vt
-            update_valid = a_raw > 1.0e-5
+            update_valid = a_raw > 0.0
             a = tl.where(update_valid, a_raw, 1.0)
             r = vt - tl.sum(kt[:, None] * s, 0)
             u = tl.where(update_valid, beta * r / a, 0.0)
@@ -177,7 +177,7 @@ def hyperbolic_delta_rule_bwd_kernel(
                 dreadout = tl.full((BV,), 0.0, tl.float32)
                 kr = tl.full((BK,), 0.0, tl.float32)
             a_raw = tl.sum(kt * kt, 0) - C * vt * vt
-            update_valid = a_raw > 1.0e-5
+            update_valid = a_raw > 0.0
             a = tl.where(update_valid, a_raw, 1.0)
             r = vt - tl.sum(kt[:, None] * prev, 0)
             u = tl.where(update_valid, beta * r / a, 0.0)

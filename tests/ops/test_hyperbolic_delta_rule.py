@@ -431,3 +431,48 @@ def test_tensor_core_hyperbolic_chunk_curvature_grad():
     gre = torch.autograd.grad(ref.square().mean()+href.square().mean(),(*qr,cr))
     for g,gg in zip(grads,gre):
         torch.testing.assert_close(g,gg,atol=5e-3,rtol=5e-2)
+
+
+@pytest.mark.parametrize('mode', ['fused_recurrent', 'chunk', 'tensor_core'])
+@pytest.mark.parametrize('T', [1, 17], ids=['single_token', 'partial_second_chunk'])
+@pytest.mark.parametrize('key_scale', [2**-10, 2**-8], ids=['below_old_cutoff', 'above_old_cutoff'])
+@pytest.mark.parametrize('final_only', [False, True], ids=['output_and_state', 'state_only'])
+def test_small_positive_norm_forward_backward(mode, T, key_scale, final_only):
+    args = list(make_case(T, 16, 17, torch.float32, vector=True, N=2, c=0.5))
+    args[1] = (args[1].detach() * key_scale).requires_grad_()
+    args[2] = (args[2].detach() * key_scale).requires_grad_()
+    c = torch.tensor(0.5, device='cuda', requires_grad=True)
+    norm = args[1].square().sum(-1, keepdim=True) - c * args[2].square()
+    assert (norm > 0).all()
+    assert ((norm < 1e-5) if key_scale == 2**-10 else (norm > 1e-5)).all()
+    if mode == 'fused_recurrent':
+        op, extra = fused_recurrent_hyperbolic_delta_rule, {'checkpoint_size': 16}
+    else:
+        op, extra = chunk_hyperbolic_delta_rule, {'chunk_size': 16, 'tensor_core': mode == 'tensor_core'}
+    actual, final = op(
+        *args[:4], curvature=c, scale=0.37, initial_state=args[4],
+        output_final_state=True, check_inputs=True, **extra,
+    )
+    oracle_args = tuple(x.detach().double().requires_grad_() for x in args)
+    oracle_c = c.detach().double().requires_grad_()
+    expected, expected_final = naive_recurrent_hyperbolic_delta_rule(
+        *oracle_args[:4], curvature=oracle_c, scale=0.37,
+        initial_state=oracle_args[4], output_final_state=True,
+    )
+    atol, rtol = (8e-4, 8e-3) if mode == 'tensor_core' else (2e-4, 2e-3)
+    torch.testing.assert_close(actual, expected.float(), atol=atol, rtol=rtol)
+    torch.testing.assert_close(final, expected_final.float(), atol=atol, rtol=rtol)
+    do, dh = torch.randn_like(actual), torch.randn_like(final)
+    if final_only:
+        actual_gradients = torch.autograd.grad(final, (*args, c), dh)
+        expected_gradients = torch.autograd.grad(expected_final, (*oracle_args, oracle_c), dh.double(), allow_unused=True)
+    else:
+        actual_gradients = torch.autograd.grad((actual, final), (*args, c), (do, dh))
+        expected_gradients = torch.autograd.grad(
+            (expected, expected_final), (*oracle_args, oracle_c), (do.double(), dh.double()),
+        )
+    for original, actual_gradient, expected_gradient in zip((*args, c), actual_gradients, expected_gradients):
+        if expected_gradient is None:
+            expected_gradient = torch.zeros_like(original)
+        assert torch.isfinite(actual_gradient).all()
+        torch.testing.assert_close(actual_gradient, expected_gradient.float(), atol=atol * 3, rtol=rtol * 3)

@@ -2,6 +2,8 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """Tensor-Core-backed, Value-tiled WY forward and analytic WY backward.
 
@@ -39,7 +41,7 @@ def _wy_weights(kg, key, val, beta, s, c, valid_t,
     rows = tl.arange(0, BT)
     cols = tl.arange(0, BT)
     a_raw = tl.sum(key * key, axis=1)[:, None] - c * val * val
-    active = valid_t[:, None] & (a_raw > 1.0e-5)
+    active = valid_t[:, None] & (a_raw > 0.0)
     a = tl.where(active, a_raw, 1.0)
     alpha = tl.where(active, beta / a, 0.0)
     residual = val - _mm(key, s, FAST, HALF, BF16)
@@ -105,7 +107,7 @@ def hyperbolic_delta_tc_chunk_fwd(
 
 @triton.jit
 def hyperbolic_delta_tc_chunk_bwd(
-    Q, Key, Val, Beta, Cu, Checkpoints, Out, DOut, DHT, Curvature,
+    Q, Key, Val, Beta, Cu, Checkpoints, DOut, DHT, Curvature,
     DQPart, DKPart, DV, DBeta, DH0, DCPart,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
     TOTAL: tl.constexpr, N: tl.constexpr, SCALE: tl.constexpr,
@@ -139,7 +141,6 @@ def hyperbolic_delta_tc_chunk_bwd(
         vptr = (idx[:, None] * H + h) * V + iv[None, :]
         vv = tl.load(Val + vptr, mv, 0).to(tl.float32)
         be = tl.load(Beta + vptr, mv, 0).to(tl.float32)
-        o = tl.load(Out + vptr, mv, 0).to(tl.float32)
         do = tl.load(DOut + vptr, mv, 0).to(tl.float32)
         kg = _mm(kk, tl.trans(kk), FAST, HALF, BF16)
         w, alpha, a, residual, active = _wy_weights(
@@ -151,6 +152,9 @@ def hyperbolic_delta_tc_chunk_bwd(
         send = (s + _mm(tl.trans(kk), w, FAST, HALF, BF16)) / zend[None, :]
         qk = _mm(qq, tl.trans(kk), FAST, HALF, BF16)
         cqk = tl.where(rows[:, None] >= cols[None, :], qk, 0.0)
+        # recompute before the output dtype cast so normalization gradients retain FP32 precision
+        num = _mm(qq, s, FAST, HALF, BF16) + _mm(cqk, w, FAST, HALF, BF16)
+        o = SCALE * num / z
         # Reverse-mode through the homogeneous state and its normalization.
         d = SCALE * do / z
         dwq = _mm(tl.trans(cqk), d, FAST, HALF, BF16)

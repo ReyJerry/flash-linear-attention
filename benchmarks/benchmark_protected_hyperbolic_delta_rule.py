@@ -51,6 +51,7 @@ def main():
     parser.add_argument('--repeats', type=int, default=20)
     parser.add_argument('--backward', action='store_true')
     parser.add_argument('--include-staged', action='store_true', help='Compare fused and staged Triton implementations')
+    parser.add_argument('--compare-strategies', action='store_true', help='Compare fused and Value-parallel protected paths')
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit('CUDA is required for this benchmark.')
@@ -72,12 +73,12 @@ def main():
             (out.float().square().mean() + final.square().mean()).backward()
         return out, final
 
-    def protected():
+    def protected(strategy='auto'):
         args_in = [x.detach().requires_grad_(args.backward) for x in (q, k, v, beta, state)]
         out = protected_recurrent_hyperbolic_delta_rule(
             *args_in[:4], curvature=0.5, initial_state=args_in[4],
             protection_rank=args.rank, checkpoint_size=args.chunk_size,
-            mode='triton', checkpoint=True,
+            mode='triton', checkpoint=True, kernel_strategy=strategy,
         )
         if args.backward:
             (out[0].float().square().mean() + out[1].square().mean()).backward()
@@ -111,7 +112,10 @@ def main():
             (output.float().square().mean() + si.square().mean()).backward()
         return output, si
 
-    methods = [('unprotected_chunk', baseline), ('protected_single_launch', protected)]
+    methods = [('unprotected_chunk', baseline), ('protected_auto', protected)]
+    if args.compare_strategies:
+        methods.extend([('protected_fused', lambda: protected('fused')),
+                        ('protected_value_parallel', lambda: protected('value_parallel'))])
     if args.include_staged:
         methods.append(('protected_staged_triton', staged_protected))
     for name, fn in methods:

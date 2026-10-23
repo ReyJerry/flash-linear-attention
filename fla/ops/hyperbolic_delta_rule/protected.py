@@ -244,7 +244,7 @@ def protected_recurrent_hyperbolic_delta_rule(
     output_final_state=False, protected_keys=None, protected_values=None,
     protected_count=None, protection_rank=4, checkpoint_size=16, check_inputs=False,
     protected_scores=None, selection_scores=None, mode='auto', checkpoint=True,
-    temperature=0.25, novelty_weight=0.5,
+    temperature=0.25, novelty_weight=0.5, kernel_strategy='auto',
 ):
     """Dispatch to the PyTorch reference or the Triton chunkwise projection + WY path."""
     if mode not in ('auto', 'naive', 'triton'):
@@ -257,6 +257,7 @@ def protected_recurrent_hyperbolic_delta_rule(
             q, k, v, beta, curvature, scale, initial_state, protected_keys,
             protected_values, protected_scores, protected_count, selection_scores,
             protection_rank, checkpoint_size, check_inputs, checkpoint, temperature, novelty_weight,
+            kernel_strategy=kernel_strategy,
         )
     else:
         result = naive_protected_chunkwise_hyperbolic_delta_rule(

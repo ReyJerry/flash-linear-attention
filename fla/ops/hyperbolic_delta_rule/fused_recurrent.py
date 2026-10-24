@@ -86,9 +86,9 @@ class HyperbolicDeltaRuleFunction(torch.autograd.Function):
         db = torch.empty_like(beta, dtype=torch.float32)
         dh0 = torch.empty_like(h0)
         dc = torch.empty((nv, N * H), device=q.device, dtype=torch.float32) if ctx.mode == 'chunk_tc' else torch.empty((nv, B, T, H), device=q.device, dtype=torch.float32)
-        scratch = torch.empty((N, H, ctx.chunk_size, K, V), device=q.device, dtype=torch.float32)
-        d_readout = torch.zeros_like(v, dtype=torch.float32) if d_readout is None else d_readout.contiguous().float()
-        d_readout_q = torch.empty_like(dq)
+        scratch = torch.empty((0,) if ctx.mode == 'chunk_tc' else (N, H, ctx.chunk_size, K, V), device=q.device, dtype=torch.float32)
+        d_readout = (torch.zeros_like(v, dtype=torch.float32) if d_readout is None else d_readout.contiguous().float()) if ctx.has_readout else torch.empty((0,), device=q.device)
+        d_readout_q = torch.empty_like(dq) if ctx.has_readout else torch.empty((0,), device=q.device)
         if ctx.mode == 'chunk_tc':
             from .tensor_core_kernels import hyperbolic_delta_tc_chunk_bwd
             hyperbolic_delta_tc_chunk_bwd[(N * H, nv)](

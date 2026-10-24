@@ -40,5 +40,5 @@ def protected_streaming(q, k, v, beta, cache=None, checkpoint_size=16, **kwargs)
         else:
             carry = result_cache
     if not outputs:
-        return v[:, :0], result_cache
+        return v[:, :0].to(q.dtype), result_cache
     return torch.cat(outputs, dim=1)[:, skip:], result_cache

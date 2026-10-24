@@ -23,7 +23,7 @@ def test_protected_segmentation(device,chunk,conv):
         expected=model(x,use_cache=False)[0]
         full=Cache(); full_out,_,full=model(x,past_key_values=full,use_cache=True)
         torch.testing.assert_close(full_out,expected,rtol=3e-4,atol=3e-5)
-        for widths in ([1]*37,[3,14,2,18]):
+        for widths in ([1]*37,[3,14,2,18],[0,3,14,0,2,18]):
             cache=Cache();outputs=[];start=0
             for width in widths:
                 out,_,cache=model(x[:,start:start+width],past_key_values=cache,use_cache=True)

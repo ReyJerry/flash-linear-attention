@@ -140,7 +140,7 @@ class HyperbolicDeltaNet(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
         cached_recurrent = None if last_state is None else last_state['recurrent_state']
         if isinstance(cached_recurrent, dict):
-            initial_state = cached_recurrent['state']
+            initial_state = cached_recurrent.get('state')
             protected_keys = cached_recurrent.get('protected_keys')
             protected_values = cached_recurrent.get('protected_values')
             protected_count = cached_recurrent.get('protected_count')

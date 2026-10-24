@@ -22,6 +22,7 @@ class HyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
     def __init__(
         self,
         attn_mode: str = 'chunk',
+        tensor_core: bool = False,
         hidden_size: int = 2048,
         expand_v: float = 1.0,
         head_dim: int = 128,
@@ -59,6 +60,7 @@ class HyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         **kwargs,
     ):
         self.attn_mode = attn_mode
+        self.tensor_core = tensor_core
         self.hidden_size = hidden_size
         self.expand_v = expand_v
         self.head_dim = head_dim

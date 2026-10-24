@@ -24,6 +24,7 @@ from fla.ops.hyperbolic_delta_rule import (
 )
 from fla.ops.hyperbolic_delta_rule.naive import prepare_key_value
 from fla.ops.hyperbolic_delta_rule.protected import protected_recurrent_hyperbolic_delta_rule
+from fla.ops.hyperbolic_delta_rule.streaming import protected_streaming
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -61,6 +62,7 @@ class HyperbolicDeltaNet(nn.Module):
         num_heads: int = 16,
         num_v_heads: int | None = None,
         mode: str = 'chunk',
+        tensor_core: bool = False,
         curvature: float = 1.0,
         learnable_curvature: bool = False,
         protection_rank: int = 0,
@@ -81,6 +83,7 @@ class HyperbolicDeltaNet(nn.Module):
         self.head_v_dim = int(head_dim * expand_v)
         self.key_dim, self.value_dim = num_heads * head_dim, self.num_v_heads * self.head_v_dim
         self.mode, self.value_margin = mode, value_margin
+        self.tensor_core = tensor_core
         self.learnable_curvature = learnable_curvature
         self.protection_rank = protection_rank
         if learnable_curvature:
@@ -174,26 +177,28 @@ class HyperbolicDeltaNet(nn.Module):
             'fused_recurrent': fused_recurrent_hyperbolic_delta_rule,
             'naive': naive_recurrent_hyperbolic_delta_rule,
         }[mode]
-        extra = {'chunk_size': self.chunk_size} if mode == 'chunk' else {}
+        extra = {'chunk_size': self.chunk_size, 'tensor_core': self.tensor_core} if mode == 'chunk' else {}
         if mode == 'fused_recurrent':
             extra['checkpoint_size'] = self.chunk_size
         if self.protection_rank:
             if cu_seqlens is not None or attention_mask is not None:
                 raise ValueError('Protected memory currently requires dense, unpadded batches.')
-            o, final_state, protected_keys, protected_values, protected_scores, protected_count = protected_recurrent_hyperbolic_delta_rule(
-                q, k, v, beta, curvature=curvature, scale=1.0, initial_state=initial_state,
-                output_final_state=use_cache, protected_keys=protected_keys,
-                protected_values=protected_values, protected_count=protected_count,
-                protected_scores=protected_scores, mode='triton' if q.is_cuda else 'naive',
-                protection_rank=self.protection_rank, checkpoint_size=self.chunk_size,
-            )
-            recurrent_state = {
-                'state': final_state,
-                'protected_keys': protected_keys,
-                'protected_values': protected_values,
-                'protected_scores': protected_scores,
-                'protected_count': protected_count,
-            }
+            protected_args = dict(curvature=curvature, scale=1.0,
+                                  protection_rank=self.protection_rank, checkpoint_size=self.chunk_size,
+                                  mode='naive' if self.mode == 'naive' or not q.is_cuda else 'triton')
+            if use_cache:
+                o, recurrent_state = protected_streaming(
+                    q, k, v, beta, cache=cached_recurrent, **protected_args,
+                )
+            else:
+                o, final_state, protected_keys, protected_values, protected_scores, protected_count = protected_recurrent_hyperbolic_delta_rule(
+                    q, k, v, beta, initial_state=initial_state,
+                    protected_keys=protected_keys, protected_values=protected_values,
+                    protected_count=protected_count, protected_scores=protected_scores,
+                    output_final_state=True, **protected_args,
+                )
+                recurrent_state = final_state
+
         else:
             o, final_state = op(
                 q, k, v, beta, curvature=curvature, scale=1.0,

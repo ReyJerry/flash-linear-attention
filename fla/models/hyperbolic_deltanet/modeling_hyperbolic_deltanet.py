@@ -39,7 +39,7 @@ class HyperbolicDeltaNetBlock(GradientCheckpointingLayer):
         self.attn = get_attention(config=config, layer_idx=layer_idx)
         if self.attn is None:
             self.attn = HyperbolicDeltaNet(
-                mode=config.attn_mode, hidden_size=config.hidden_size,
+                mode=config.attn_mode, tensor_core=config.tensor_core, hidden_size=config.hidden_size,
                 expand_v=config.expand_v, head_dim=config.head_dim,
                 num_heads=config.num_heads, num_v_heads=config.num_v_heads,
                 curvature=config.curvature, learnable_curvature=config.learnable_curvature,

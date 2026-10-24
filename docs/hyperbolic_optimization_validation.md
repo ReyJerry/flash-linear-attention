@@ -41,5 +41,18 @@ Scheduling candidates require mathematical forward/VJP equivalence, actual CPU r
 Detailed equations, memory/performance models, supported domains and validation commands are maintained with each candidate:
 
 - [Shared Bank-Key inverse](hyperbolic_shared_inverse.md).
+- [Per-GEMM precision RFC draft and CPU error study](hyperbolic_precision.md): production policy blocked by the required RFC issue being unavailable, not an implemented optimization.
 
 Raw local XML/JSON outputs and compiler caches are under ignored `profile/hyperbolic-opt/`. Model/kernel performance tables must use `GPU NOT RUN` until actual measurements exist. Existing numerical thresholds and tests are retained. Pre-existing Ruff findings in untouched portions of legacy protected files are distinguished from new-file or changed-line findings rather than hidden by repository-wide formatting.
+
+## Submitted evidence: B2 and A2
+
+B2 was independently published as [`7e2a09e52590aede18ab08735129ef29aa8ac834`](https://github.com/ReyJerry/flash-linear-attention/commit/7e2a09e52590aede18ab08735129ef29aa8ac834). The submission gate ran 210 CPU algebra/reference/host tests (zero failures/skips), 3 separately selected actual-source Triton CPU interpreter cases (zero failures/skips), and 10 benchmark host tests (zero failures/skips). Fifteen offline CUDA compilation cases covered three storage dtypes and the shared preparation plus old/shared forward/backward variants. Thirteen CUDA test cases were defined but not executed. The benchmark's no-CUDA invocation returned exit code 2 and wrote `GPU NOT RUN`, rather than emitting timings.
+
+A2's independent evidence-only submission contains a full GEMM inventory, separate-edge analytic VJP, 103 passing CPU mathematical tests (zero failures/skips; final run 1.52 s), a deterministic feasible-domain counterexample, and an error-study script. The 16-row operand-rounding study rejected three BF16 candidates under the unchanged budgets. Its ordinary completion exit code means the study finished; `--require-all-pass` returns nonzero for rejected candidates. No production selective-precision kernel, GPU selective-precision test, or performance result is claimed. The existing global FAST route remains unchanged. This is a recorded blocker and numerical finding, not completion of A2.
+
+```bash
+FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q -o log_cli=false tests/ops/test_hyperbolic_delta_rule_precision.py
+# 103 passed, 0 failed, 0 skipped.
+python scripts/analyze_hyperbolic_precision.py --json profile/hyperbolic-opt/precision-cpu.json
+```

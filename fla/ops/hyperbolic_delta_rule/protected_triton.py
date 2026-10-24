@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 from torch.autograd.function import once_differentiable
 from torch.utils.checkpoint import checkpoint as activation_checkpoint
@@ -251,30 +253,41 @@ class _ValueParallelChunk(torch.autograd.Function):
     """One CTA per Value channel: bounded registers, single replay+reverse VJP."""
 
     @staticmethod
-    def forward(ctx, q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, scale):
+    def forward(ctx, q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, scale, shared_inverse):
+        import triton
+
+        from .protected_kernels import shared_key_gram_fwd_kernel
         from .protected_value_tile_kernels import protected_value_tile_fwd_kernel
         B, T, H, K = q.shape
         V, R = v.shape[-1], bank_k.shape[-2]
+        br, bk = max(16, triton.next_power_of_2(R)), max(16, triton.next_power_of_2(K))
+        ainv = torch.empty((B, H, R, R) if shared_inverse else (0,), device=q.device, dtype=torch.float32)
+        if shared_inverse:
+            shared_key_gram_fwd_kernel[(B * H,)](
+                bank_k, bank_scores, ainv, H=H, K=K, R=R, EPS=1e-5,
+                BK=bk, BR=br, num_warps=4, enable_fp_fusion=False,
+            )
         out = torch.empty_like(v)
         realized = torch.empty_like(v, dtype=torch.float32)
         final = torch.empty_like(state)
         protected_value_tile_fwd_kernel[(B * H * V,)](
-            q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature,
+            q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, ainv,
             out, realized, final, T=T, H=H, K=K, V=V, R=R, SCALE=scale,
-            EPS=1e-5, BR=max(16, __import__('triton').next_power_of_2(R)),
-            BK=max(16, __import__('triton').next_power_of_2(K)),
+            EPS=1e-5, BR=br, BK=bk, SHARED_INVERSE=shared_inverse,
             num_warps=4, enable_fp_fusion=False,
         )
-        ctx.save_for_backward(q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature)
+        ctx.save_for_backward(q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, ainv)
         ctx.scale = scale
+        ctx.shared_inverse = shared_inverse
         return out, final, realized
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dout, dfinal, drealized):
         import triton
+
         from .protected_value_tile_kernels import protected_value_tile_bwd_kernel
-        q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature = ctx.saved_tensors
+        q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, ainv = ctx.saved_tensors
         B, T, H, K = q.shape
         V, R = v.shape[-1], bank_k.shape[-2]
         device = q.device
@@ -295,25 +308,28 @@ class _ValueParallelChunk(torch.autograd.Function):
         dpv = torch.empty_like(bank_v, dtype=torch.float32)
         dcparts = torch.empty((B, H, V), device=device, dtype=torch.float32)
         protected_value_tile_bwd_kernel[(B * H * V,)](
-            q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature,
+            q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, ainv,
             dout, dfinal, drealized,
             scratch_s, scratch_pk, scratch_pv, scratch_alpha, scratch_valid,
             dqparts, dkparts, dv, dbeta, dh0, dpkparts, dpv, dcparts,
             T=T, H=H, K=K, V=V, R=R, SCALE=ctx.scale,
             EPS=1e-5, BR=max(16, triton.next_power_of_2(R)),
             BK=max(16, triton.next_power_of_2(K)),
+            SHARED_INVERSE=ctx.shared_inverse,
             num_warps=4, enable_fp_fusion=False,
         )
         return (dqparts.sum(3).to(q.dtype), dkparts.sum(3).to(k.dtype),
                 dv.to(v.dtype), dbeta.to(beta.dtype), dh0.to(state.dtype),
                 dpkparts.sum(2).to(bank_k.dtype), dpv.to(bank_v.dtype),
-                None, dcparts.sum().reshape_as(curvature).to(curvature.dtype), None)
+                None, dcparts.sum().reshape_as(curvature).to(curvature.dtype), None, None)
 
 
 def _run_value_parallel_chunk(q, k, v, beta, state, bank_k, bank_v,
-                              bank_scores, selection_scores, curvature, scale, temperature):
+                              bank_scores, selection_scores, curvature, scale, temperature, shared_inverse=None):
+    if shared_inverse is None:
+        shared_inverse = os.environ.get('FLA_HYPERBOLIC_SHARED_INVERSE', '0') == '1'
     output, final, realized = _ValueParallelChunk.apply(
-        q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, scale,
+        q, k, v, beta, state, bank_k, bank_v, bank_scores, curvature, scale, shared_inverse,
     )
     # Shared bank updates are sequential between tokens, so one per-head CTA
     # processes them after all Value-channel CTAs have produced the readouts.
@@ -371,6 +387,7 @@ def triton_protected_chunkwise_hyperbolic_delta_rule(
     if scores.shape != (B, T, H):
         raise ValueError("selection_scores must have shape [B,T,H].")
     scale = K ** -0.5 if scale is None else float(scale)
+    shared_inverse = os.environ.get('FLA_HYPERBOLIC_SHARED_INVERSE', '0') == '1'
     outputs = []
     for start in range(0, T, checkpoint_size):
         end = min(start + checkpoint_size, T)
@@ -385,6 +402,7 @@ def triton_protected_chunkwise_hyperbolic_delta_rule(
             if kernel_strategy == 'value_parallel' or (kernel_strategy == 'auto' and V >= 8):
                 return _run_value_parallel_chunk(
                     qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, sc, c, scale, temperature,
+                    shared_inverse=shared_inverse,
                 )
             return _FusedProtectedChunkFunction.apply(
                 qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, sc, c, scale, temperature,

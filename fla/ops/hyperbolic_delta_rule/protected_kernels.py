@@ -34,9 +34,9 @@ def shared_key_gram_fwd_kernel(
     EPS: tl.constexpr, BK: tl.constexpr, BR: tl.constexpr,
 ):
     """Compute the regularized key-only Gram inverse once per batch/head/chunk."""
-    p = tl.program_id(0)
+    p = tl.program_id(0).to(tl.int64)
     b, h = p // H, p % H
-    rows, cols, ik = tl.arange(0, BR), tl.arange(0, BR), tl.arange(0, BK)
+    rows, cols, ik = tl.arange(0, BR).to(tl.int64), tl.arange(0, BR).to(tl.int64), tl.arange(0, BK).to(tl.int64)
     bank_base = (b * H + h) * R
     scores = tl.load(BankScores + bank_base + rows, rows < R, -1.0e6).to(tl.float32)
     active = (rows < R) & (scores > -5.0e5)

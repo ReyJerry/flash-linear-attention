@@ -4,11 +4,12 @@
 """Register-bounded, Value-parallel protected HyperbolicDeltaNet kernels.
 
 One CTA per (batch, head, value-channel) instead of one CTA per head.
-The protection Gram is frozen during each chunk and inverted once per CTA.
+The protection Gram is frozen during each chunk. An optional shared inverse
+avoids rebuilding the key-only Gram in each Value CTA and backward replay.
 The forward uses a short fused recurrent tile (T<=32); it avoids materializing
 T-by-T WY Grams and the enormous [K,V] per-head state in registers.
 The backward performs one replay pass and one reverse pass in the same CTA.
-This trades a small amount of redundant R-by-R work for V-fold CTA parallelism.
+Both inverse strategies retain V-fold CTA parallelism.
 """
 
 import triton
@@ -18,12 +19,13 @@ from .protected_kernels import _invert_small
 
 
 @triton.jit
-def _load_projector(BankK, BankV, BankScores, Curvature,
+def _load_projector(BankK, BankV, BankScores, Curvature, AInv,
                     b, h, vi, H: tl.constexpr, K: tl.constexpr,
                     V: tl.constexpr, R: tl.constexpr,
-                    BR: tl.constexpr, BK: tl.constexpr, EPS: tl.constexpr):
-    ir = tl.arange(0, BR)
-    ik = tl.arange(0, BK)
+                    BR: tl.constexpr, BK: tl.constexpr, EPS: tl.constexpr,
+                    SHARED_INVERSE: tl.constexpr = False):
+    ir = tl.arange(0, BR).to(tl.int64)
+    ik = tl.arange(0, BK).to(tl.int64)
     base = (b * H + h) * R
     scores = tl.load(BankScores + base + ir, ir < R, -1e6).to(tl.float32)
     active = (ir < R) & (scores > -5e5)
@@ -32,11 +34,16 @@ def _load_projector(BankK, BankV, BankScores, Curvature,
     y = tl.load(BankV + (base + ir) * V + vi, ir < R, 0).to(tl.float32)
     pk = tl.where(active[:, None], pk, 0.0)
     y = tl.where(active, y, 0.0)
-    # Inactive padding has identity Gram to avoid singular pivots.
     eye = tl.where(ir[:, None] == ir[None, :], 1.0, 0.0)
-    a = tl.dot(pk, tl.trans(pk), input_precision="ieee")
-    a = tl.where(active[:, None] & active[None, :], a + EPS * eye, eye)
-    ainv = _invert_small(a, BR)
+    if SHARED_INVERSE:
+        ainv = tl.load(AInv + (base + ir[:, None]) * R + ir[None, :],
+                       (ir[:, None] < R) & (ir[None, :] < R), 0).to(tl.float32)
+        ainv = tl.where((ir[:, None] < R) & (ir[None, :] < R), ainv, eye)
+    else:
+        # inactive padding has identity Gram to avoid singular pivots
+        a = tl.dot(pk, tl.trans(pk), input_precision="ieee")
+        a = tl.where(active[:, None] & active[None, :], a + EPS * eye, eye)
+        ainv = _invert_small(a, BR)
     curvature = tl.load(Curvature).to(tl.float32)
     u = tl.sum(ainv * y[None, :], axis=1)
     denom = 1.0 - curvature * tl.sum(y * u, axis=0)
@@ -61,19 +68,20 @@ def _project_one(pk, y, ginv, feasible, curvature, key, value, EPS: tl.constexpr
 
 @triton.jit
 def protected_value_tile_fwd_kernel(
-    Q, Keys, Values, Beta, H0, BankK, BankV, BankScores, Curvature,
+    Q, Keys, Values, Beta, H0, BankK, BankV, BankScores, Curvature, AInv,
     O, Realized, HT,
     T: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, R: tl.constexpr,
     SCALE: tl.constexpr, EPS: tl.constexpr, BR: tl.constexpr, BK: tl.constexpr,
+    SHARED_INVERSE: tl.constexpr = False,
 ):
-    p = tl.program_id(0)
+    p = tl.program_id(0).to(tl.int64)
     vi = p % V
     h = (p // V) % H
     b = p // (H * V)
-    ik = tl.arange(0, BK)
+    ik = tl.arange(0, BK).to(tl.int64)
     pk, y, ginv, active, feasible, c = _load_projector(
-        BankK, BankV, BankScores, Curvature, b, h, vi,
-        H, K, V, R, BR, BK, EPS,
+        BankK, BankV, BankScores, Curvature, AInv, b, h, vi,
+        H, K, V, R, BR, BK, EPS, SHARED_INVERSE,
     )
     state_offset = ((b * H + h) * K + ik) * V + vi
     state = tl.load(H0 + state_offset, ik < K, 0).to(tl.float32)
@@ -99,21 +107,22 @@ def protected_value_tile_fwd_kernel(
 
 @triton.jit
 def protected_value_tile_bwd_kernel(
-    Q, Keys, Values, Beta, H0, BankK, BankV, BankScores, Curvature,
+    Q, Keys, Values, Beta, H0, BankK, BankV, BankScores, Curvature, AInv,
     DO, DHT, DRealized,
     ScratchState, ScratchProjK, ScratchProjV, ScratchAlpha, ScratchValid,
     DQPart, DKPart, DV, DBeta, DH0, DBankKPart, DBankV, DCurvPart,
     T: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr, R: tl.constexpr,
     SCALE: tl.constexpr, EPS: tl.constexpr, BR: tl.constexpr, BK: tl.constexpr,
+    SHARED_INVERSE: tl.constexpr = False,
 ):
-    p = tl.program_id(0)
+    p = tl.program_id(0).to(tl.int64)
     vi = p % V
     h = (p // V) % H
     b = p // (H * V)
-    ik, ir = tl.arange(0, BK), tl.arange(0, BR)
+    ik, ir = tl.arange(0, BK).to(tl.int64), tl.arange(0, BR).to(tl.int64)
     pk, y, ginv, active, feasible, c = _load_projector(
-        BankK, BankV, BankScores, Curvature, b, h, vi,
-        H, K, V, R, BR, BK, EPS,
+        BankK, BankV, BankScores, Curvature, AInv, b, h, vi,
+        H, K, V, R, BR, BK, EPS, SHARED_INVERSE,
     )
     state_offset = ((b * H + h) * K + ik) * V + vi
     state = tl.load(H0 + state_offset, ik < K, 0).to(tl.float32)

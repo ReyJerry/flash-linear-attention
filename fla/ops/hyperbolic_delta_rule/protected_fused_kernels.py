@@ -102,7 +102,7 @@ def protected_fused_chunk_fwd_kernel(
             scores = tl.where(slot, cand_s, scores)
         else:
             logits = tl.where(valid_r, -scores / TEMP, -1.0e9)
-            weights = tl.softmax(logits, 0)
+            weights = tl.softmax(logits, dim=0)
             sigma = 1.0 / (1.0 + tl.exp(-(cand_s - scores) / TEMP))
             gate = weights * sigma
             pk = (1.0 - gate[:, None]) * pk + gate[:, None] * cand_k[None, :]

@@ -97,7 +97,7 @@ def protected_fused_chunk_bwd_kernel(
             current_ps = tl.where(slot, cs, current_ps)
         else:
             logits = tl.where(mr, -current_ps / TEMP, -1.0e9)
-            pr = tl.softmax(logits, 0)
+            pr = tl.softmax(logits, dim=0)
             sig = 1.0 / (1.0 + tl.exp(-(cs - current_ps) / TEMP))
             gate = pr * sig
             current_pk = (1.0 - gate[:, None]) * current_pk + gate[:, None] * ck[None, :]
@@ -128,7 +128,7 @@ def protected_fused_chunk_bwd_kernel(
             dps = tl.where(slot, 0.0, dps)
         else:
             logits = tl.where(mr, -old_ps / TEMP, -1.0e9)
-            pr = tl.softmax(logits, 0)
+            pr = tl.softmax(logits, dim=0)
             sig = 1.0 / (1.0 + tl.exp(-(cs - old_ps) / TEMP))
             gate = pr * sig
             dgate = tl.sum(dpk * (ck[None, :] - old_pk), 1)

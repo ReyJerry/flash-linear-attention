@@ -41,6 +41,7 @@ Scheduling candidates require mathematical forward/VJP equivalence, actual CPU r
 Detailed equations, memory/performance models, supported domains and validation commands are maintained with each candidate:
 
 - [Shared Bank-Key inverse](hyperbolic_shared_inverse.md).
+- [Unprotected staged forward/backward](hyperbolic_staged.md).
 - [Protected shared Key/Score and Value trajectories](hyperbolic_protected_staged.md).
 - [Per-GEMM precision RFC draft and CPU error study](hyperbolic_precision.md): production policy blocked by the required RFC issue being unavailable, not an implemented optimization.
 
@@ -79,3 +80,27 @@ python benchmarks/benchmark_protected_hyperbolic_delta_rule.py --batch 1 --seq-l
 ```
 
 The benchmark was actually invoked on this CPU host and exited 2 with `GPU NOT RUN: CUDA device unavailable`; it wrote no correctness or performance result. GPU commands above are instructions for the next hardware gate, not evidence that it ran. Profile the same candidate and baseline on the same hardware before interpreting launch reduction or register counts as acceleration.
+
+B1 was published independently as [`d4320de6bbca107b91b585ed90fcc6c74c41f56d`](https://github.com/ReyJerry/flash-linear-attention/commit/d4320de6bbca107b91b585ed90fcc6c74c41f56d). A2's evidence-only commit is [`5838aac1c2280586c6b5addb751ed3b28948ce63`](https://github.com/ReyJerry/flash-linear-attention/commit/5838aac1c2280586c6b5addb751ed3b28948ce63).
+
+## A1 submission gate
+
+The selected implementation has three forward launches and four backward launches. It shares chunk Gram/readout preparation, retains only the necessary forward/reverse state dependencies, and performs local parameter VJPs across chunks. A full-Key local-gradient prototype was rejected after offline compilation exposed large spills. The final local VJP separates Value gradients from Q/Key gradients, reuses the dead solve-result buffer for `da`, and writes disjoint Key tiles without expanded whole-sequence `dq/dk` partials. The squared Key norm keeps the original full-Key reduction to preserve the forward/backward feasibility decision; only `KS` is contracted in smaller tiles. The unchanged numerical thresholds caught and guard the near-boundary case.
+
+Actual final gates:
+
+- **250 CPU mathematical/reference/host tests passed**, zero failures/skips: 173 existing reference/host cases plus 77 A1 algebra tests. These do not establish CUDA correctness.
+- **29 actual-source Triton CPU interpreter/host-routing cases passed**, zero failures/skips, in 37.89 s, after the final norm fix. These include two near-boundary old/new kernel comparisons and explicitly labeled logical-device mocks for public dispatch. CPU tensors remained on CPU throughout.
+- **11 TC benchmark host tests passed**, including strict/FAST/fallback attestation, all seven staged entry kernels, no-CUDA status and the unchanged fixed FP32 final-state tolerance for old chunk/recurrent comparisons.
+- **59 CUDA cases collected, GPU NOT RUN**, including mixed storage, packed/empty sequences, 16K length, supported gradients, cache segments and fallbacks.
+- **28 final staged offline compilation cases passed**: seven entry kernels in FP32 C16/C32 with int64 offsets and fixed curvature; BF16 Query with FP32 Key/Value and int32 offsets with curvature gradient; and FP16 asymmetric K17/V19, C32 with int32 offsets and curvature gradient. Four additional unchanged-TC compilation/resource cases establish the same-environment baseline.
+
+```bash
+FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q -o log_cli=false tests/ops/test_hyperbolic_delta_rule_reference.py tests/ops/test_hyperbolic_delta_rule_host.py tests/ops/test_hyperbolic_delta_rule_staged.py -k 'not cuda and not interpreter'
+TRITON_INTERPRET=1 FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q tests/ops/test_hyperbolic_delta_rule_staged.py -k interpreter
+FLA_CI_ENV=0 python -m pytest --noconftest -q tests/benchmarks/test_hyperbolic_tensor_core_benchmark.py
+FLA_CI_ENV=0 python -m pytest -q tests/ops/test_hyperbolic_delta_rule_staged.py -k cuda
+python benchmarks/benchmark_hyperbolic_tensor_core.py --batch 1 --seq-len 16384 --heads 16 --key-dim 128 --value-dim 128 --dtype fp32 --layer-inputs --modes fwd bwd fwd_bwd --warmup 20 --repeats 50 --output profile/hyperbolic-opt/unprotected-16k.json
+```
+
+The benchmark's CPU-host invocation was actually executed and returned exit 2 with `GPU NOT RUN: CUDA device unavailable`, writing `profile/hyperbolic-opt/a1-gpu-status-final.json` without timings. The CUDA command and timing command still require hardware execution. The final offline audit explicitly records high register counts and remaining state-scan spills; the absence of huge local-VJP spills is not a GPU acceleration result. The staged path remains opt-in and the original TC/recurrent/readout/large-Key fallbacks remain available.

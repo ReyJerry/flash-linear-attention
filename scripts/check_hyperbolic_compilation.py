@@ -19,7 +19,8 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--component', choices=('shared-inverse', 'protected-staged'), default='shared-inverse')
+    parser.add_argument('--component', choices=('shared-inverse', 'protected-staged', 'staged', 'tensor-core'),
+                        default='shared-inverse')
     parser.add_argument('--arch', type=int, choices=(80, 90, 100), default=90)
     parser.add_argument('--dtype', choices=('fp32', 'fp16', 'bf16'), default='fp32')
     parser.add_argument('--key-dim', type=int, default=128)
@@ -30,6 +31,8 @@ def main():
     parser.add_argument('--batch', type=int, default=1)
     parser.add_argument('--heads', type=int, default=16)
     parser.add_argument('--seq-len', type=int, default=16384)
+    parser.add_argument('--cu-dtype', choices=('int32', 'int64'), default='int64', help='dense public calls use int64')
+    parser.add_argument('--constant-curvature', action='store_true', help='compile staged NEED_DC=False')
     parser.add_argument('--resources', action='store_true',
                         help='record offline ptxas registers/spills; does not measure occupancy')
     parser.add_argument('--output', type=Path)
@@ -53,20 +56,35 @@ def main():
             protected_value_tile_fwd_kernel,
         )
         kernels = (shared_key_gram_fwd_kernel, protected_value_tile_fwd_kernel, protected_value_tile_bwd_kernel)
-    else:
+    elif args.component == 'protected-staged':
         from fla.ops.hyperbolic_delta_rule import protected_staged_kernels
         from fla.ops.hyperbolic_delta_rule.protected_kernels import shared_key_gram_fwd_kernel
         kernels = (shared_key_gram_fwd_kernel,) + tuple(getattr(protected_staged_kernels, f'protected_{name}_kernel') for name in (
             'shared_trajectory_fwd', 'value_trajectory_fwd', 'value_trajectory_bwd',
             'value_partials_bwd', 'bank_partials_bwd', 'shared_trajectory_bwd',
         ))
+    elif args.component == 'staged':
+        from fla.ops.hyperbolic_delta_rule import staged_kernels
+        kernels = tuple(getattr(staged_kernels, f'hyperbolic_staged_{name}_kernel') for name in (
+            'prepare_fwd', 'state_fwd', 'output_fwd', 'output_bwd', 'state_bwd', 'values_bwd', 'parameters_bwd',
+        ))
+    else:
+        from fla.ops.hyperbolic_delta_rule.tensor_core_kernels import (
+            hyperbolic_delta_tc_chunk_bwd,
+            hyperbolic_delta_tc_chunk_fwd,
+        )
+        kernels = (hyperbolic_delta_tc_chunk_fwd, hyperbolic_delta_tc_chunk_bwd)
     constants = dict(
         T=args.chunk_size, H=args.heads, K=args.key_dim, V=args.value_dim, R=args.rank,
         SCALE=args.key_dim ** -0.5, EPS=1e-5,
         BR=max(16, triton.next_power_of_2(args.rank)), BK=max(16, triton.next_power_of_2(args.key_dim)),
         NC=triton.cdiv(args.seq_len, args.chunk_size), C=args.chunk_size, TEMP=0.25,
         P=args.batch * args.heads * args.value_dim, BV=triton.next_power_of_2(args.value_dim), BLOCK=32,
+        N=args.batch, BT=args.chunk_size, NEED_DC=not args.constant_curvature,
+        TOTAL=args.batch * args.seq_len, SAVE=True, FAST=False, HALF=args.dtype == 'fp16', BF16=args.dtype == 'bf16',
     )
+    if args.component in ('staged', 'tensor-core'):
+        constants['BV'] = 16
     records = []
     for kernel in kernels:
         strategies = (False, True) if 'SHARED_INVERSE' in kernel.arg_names else (None,)
@@ -81,7 +99,16 @@ def main():
             for param in kernel.params:
                 if param.is_constexpr:
                     continue
-                if param.name in ('T', 'START', 'STOP'):
+                if param.name == 'Cu':
+                    signature[param.name] = '*i32' if args.cu_dtype == 'int32' else '*i64'
+                elif (
+                    args.component in ('staged', 'tensor-core') and param.name in ('Key', 'Val')
+                    or args.component == 'staged' and param.name in ('DK', 'DV')
+                ):
+                    signature[param.name] = '*fp32' if args.layer_inputs else f'*{args.dtype}'
+                elif args.component in ('staged', 'tensor-core') and param.name in ('DQ', 'Out', 'DOut'):
+                    signature[param.name] = f'*{args.dtype}'
+                elif param.name in ('T', 'START', 'STOP'):
                     signature[param.name] = 'i32'
                 elif param.name == 'ScratchValid':
                     signature[param.name] = '*u8'
@@ -101,6 +128,8 @@ def main():
                 layer_inputs=args.layer_inputs, chunk_size=args.chunk_size,
                 key_dim=args.key_dim, value_dim=args.value_dim, rank=args.rank,
                 batch=args.batch, heads=args.heads, seq_len=args.seq_len,
+                cu_dtype=args.cu_dtype if args.component in ('staged', 'tensor-core') else None,
+                need_dc=not args.constant_curvature if args.component == 'staged' else None,
                 arch=args.arch, status='COMPILED_ONLY_GPU_NOT_RUN',
                 shared_memory_bytes=compiled.metadata.shared,
                 cubin_bytes=len(compiled.asm.get('cubin', b'')),

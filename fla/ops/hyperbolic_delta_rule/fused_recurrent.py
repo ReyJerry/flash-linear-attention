@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+
 import torch
 from torch.autograd.function import once_differentiable
 
@@ -147,9 +148,16 @@ def _apply_hyperbolic_delta_rule(
         readout_q = readout_q.contiguous()
     if mode == 'chunk_tc' and (readout_q is not None or (q.shape[-1] > 128)):
         mode = 'chunk'
-    o, ht, realized = HyperbolicDeltaRuleFunction.apply(
-        q, k, v, beta, h0, cu, curvature_tensor, scale, chunk_size, mode, save, readout_q,
-    )
+    legacy_fast = q.dtype in (torch.float16, torch.bfloat16) and os.environ.get('FLA_HYPERBOLIC_TC_FAST', '0') == '1'
+    staged = mode == 'chunk_tc' and os.environ.get('FLA_HYPERBOLIC_STAGED', '0') == '1' and not legacy_fast
+    if staged:
+        from .staged import StagedHyperbolicDeltaRuleFunction
+
+        o, ht = StagedHyperbolicDeltaRuleFunction.apply(q, k, v, beta, h0, cu, curvature_tensor, scale, chunk_size)
+    else:
+        o, ht, realized = HyperbolicDeltaRuleFunction.apply(
+            q, k, v, beta, h0, cu, curvature_tensor, scale, chunk_size, mode, save, readout_q,
+        )
     if readout_q is not None:
         return o, ht if output_final_state else None, realized
     return o, ht if output_final_state else None

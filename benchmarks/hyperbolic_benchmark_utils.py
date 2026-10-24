@@ -74,7 +74,9 @@ def write_json(path, payload):
 
 def metadata(arguments):
     root = Path(__file__).resolve().parents[1]
-    revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, text=True, capture_output=True, check=True).stdout.strip()
+    revision = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'], cwd=root, text=True, capture_output=True, check=True,
+    ).stdout.strip()
     dirty = subprocess.run(['git', 'status', '--porcelain'], cwd=root, text=True, capture_output=True, check=True).stdout
     result = {
         'revision': revision, 'working_tree_dirty': bool(dirty), 'arguments': vars(arguments).copy(),
@@ -142,7 +144,9 @@ class KernelTrace:
             if not module_name.startswith(prefix) or module is None:
                 continue
             for name, value in list(vars(module).items()):
-                is_entry = name.endswith('_kernel') or name in ('hyperbolic_delta_tc_chunk_fwd', 'hyperbolic_delta_tc_chunk_bwd')
+                is_entry = name.endswith('_kernel') or name in (
+                    'hyperbolic_delta_tc_chunk_fwd', 'hyperbolic_delta_tc_chunk_bwd',
+                )
                 if is_entry and hasattr(value, '__getitem__') and hasattr(value, 'fn'):
                     if id(value) not in observed:
                         original_module = getattr(value.fn, '__module__', module_name)
@@ -271,6 +275,7 @@ def _memory(method, inputs, mode):
         'starting_allocated_bytes': before_allocated, 'starting_reserved_bytes': before_reserved,
         'additional_peak_allocated_bytes': allocated - before_allocated,
         'measurement': 'separate untimed memory trial; CUDA cache emptied before trial only',
+        'includes_forward_graph_and_setup': mode == 'bwd',
     }
 
 
@@ -298,6 +303,9 @@ def measure(methods, inputs_by_group, modes, warmup, repeats, tokens):
                 'warmup_samples': warming[method.name],
                 'memory': _memory(method, inputs_by_group[method.group], mode),
                 'baseline_method': method.baseline,
+                'timing_scope': ('backward only; forward graph and loss prepared before timing' if mode == 'bwd' else
+                                 'training forward with graph creation' if mode == 'fwd' else
+                                 'training forward, sum of mean-square floating outputs, and backward'),
             }
             if method.baseline:
                 baseline = samples[method.baseline]

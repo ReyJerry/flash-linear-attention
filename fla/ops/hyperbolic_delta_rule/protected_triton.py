@@ -387,6 +387,24 @@ def triton_protected_chunkwise_hyperbolic_delta_rule(
     if scores.shape != (B, T, H):
         raise ValueError("selection_scores must have shape [B,T,H].")
     scale = K ** -0.5 if scale is None else float(scale)
+    value_parallel = kernel_strategy == 'value_parallel' or (kernel_strategy == 'auto' and V >= 8)
+    if value_parallel and os.environ.get('FLA_HYPERBOLIC_PROTECTED_STAGED', '0') == '1':
+        from fla.ops.hyperbolic_delta_rule.protected_staged import _run_staged_protected
+
+        def run_staged(q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, c):
+            return _run_staged_protected(
+                q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, c,
+                scale, temperature, checkpoint_size,
+            )
+
+        # The schedule is selected outside the checkpoint closure so replay
+        # cannot change kernels if the environment changes after forward.
+        args = (q, k, v, beta, state, bank_k, bank_v, bank_scores, scores, c)
+        needs_grad = torch.is_grad_enabled() and any(x.requires_grad for x in args)
+        result = activation_checkpoint(run_staged, *args, use_reentrant=False) if checkpoint and needs_grad else run_staged(*args)
+        output, state, bank_k, bank_v, bank_scores = result
+        count = (bank_scores.detach() > (_EMPTY_SCORE / 2)).sum(-1).to(torch.int32)
+        return output.to(q.dtype), state, bank_k, bank_v, bank_scores, count
     shared_inverse = os.environ.get('FLA_HYPERBOLIC_SHARED_INVERSE', '0') == '1'
     outputs = []
     for start in range(0, T, checkpoint_size):
@@ -399,7 +417,7 @@ def triton_protected_chunkwise_hyperbolic_delta_rule(
         )
 
         def run(qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c):
-            if kernel_strategy == 'value_parallel' or (kernel_strategy == 'auto' and V >= 8):
+            if value_parallel:
                 return _run_value_parallel_chunk(
                     qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, sc, c, scale, temperature,
                     shared_inverse=shared_inverse,

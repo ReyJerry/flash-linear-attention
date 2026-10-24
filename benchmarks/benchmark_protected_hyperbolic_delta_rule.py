@@ -13,6 +13,7 @@ Example:
 
 import argparse
 import json
+import math
 import sys
 import traceback
 from pathlib import Path
@@ -94,16 +95,34 @@ def _unprotected(args, inputs, reference=False):
     )
 
 
-def _decomposed(args, inputs):
+def _decomposed_chunk(args, q, k, v, beta, selection, state, bank_k, bank_v, bank_scores, c):
     from fla.ops.hyperbolic_delta_rule.protected_triton import _run_chunk, _TritonSmoothBankUpdate
+
+    output, state, realized = _run_chunk(q, k, v, beta, state, bank_k, bank_v, bank_scores, c, q.shape[-1] ** -0.5)
+    bank_k, bank_v, bank_scores, count = _TritonSmoothBankUpdate.apply(
+        bank_k, bank_v, bank_scores, k, realized, selection, args.temperature,
+    )
+    return output, state, bank_k, bank_v, bank_scores, count
+
+
+def _decomposed(args, inputs):
+    from torch.utils.checkpoint import checkpoint as activation_checkpoint
+
     q, k, v, beta, state, bank_k, bank_v, bank_scores, selection, c = inputs
     outputs = []
+
+    def step(*tensors):
+        return _decomposed_chunk(args, *tensors)
+
     for start in range(0, q.shape[1], args.chunk_size):
         qc, kc, vc, bc, sc = (x[:, start:start + args.chunk_size].contiguous() for x in (q, k, v, beta, selection))
-        out, state, realized = _run_chunk(qc, kc, vc, bc, state, bank_k, bank_v, bank_scores, c, q.shape[-1] ** -0.5)
-        bank_k, bank_v, bank_scores, count = _TritonSmoothBankUpdate.apply(
-            bank_k, bank_v, bank_scores, kc, realized, sc, args.temperature,
-        )
+        tensors = (qc, kc, vc, bc, sc, state, bank_k, bank_v, bank_scores, c)
+        needs_grad = torch.is_grad_enabled() and any(x.requires_grad for x in tensors)
+        if not args.no_checkpoint and needs_grad:
+            result = activation_checkpoint(step, *tensors, use_reentrant=False)
+        else:
+            result = step(*tensors)
+        out, state, bank_k, bank_v, bank_scores, count = result
         outputs.append(out)
     return torch.cat(outputs, dim=1), state, bank_k, bank_v, bank_scores, count
 
@@ -129,7 +148,37 @@ def methods(args):
     if args.include_staged:
         result.append(Method('protected_decomposed', lambda x: _decomposed(args, x), FLAGS.copy(), 'protected',
                              'protected_kv_project_fwd_kernel', baseline=baseline))
+    if args.compare_trajectories:
+        result.append(Method('protected_trajectory', lambda x: _protected(args, x),
+                             {**FLAGS, 'FLA_HYPERBOLIC_PROTECTED_STAGED': '1'}, 'protected',
+                             'protected_value_trajectory_fwd_kernel', baseline=baseline))
     return result
+
+
+def _attest_training(method, trace):
+    attest(method, trace)
+    if method.expected_kernel == 'protected_value_tile_fwd_kernel':
+        expected_shared = method.environment['FLA_HYPERBOLIC_SHARED_INVERSE'] == '1'
+        backward = [record for record in trace if record['kernel'].endswith('protected_value_tile_bwd_kernel')]
+        if not backward or any(record['flags'].get('SHARED_INVERSE') != expected_shared for record in backward):
+            raise AssertionError(f'{method.name}: backward did not execute the requested SHARED_INVERSE policy')
+        required = ['soft_bank_update_bwd_kernel']
+        if expected_shared:
+            required.append('shared_key_gram_fwd_kernel')
+    elif method.expected_kernel == 'protected_value_trajectory_fwd_kernel':
+        required = ['protected_shared_trajectory_fwd_kernel', 'shared_key_gram_fwd_kernel',
+                    'protected_value_trajectory_bwd_kernel', 'protected_shared_trajectory_bwd_kernel',
+                    'protected_value_partials_bwd_kernel', 'protected_bank_partials_bwd_kernel']
+    elif method.expected_kernel == 'protected_fused_chunk_fwd_kernel':
+        required = ['protected_fused_chunk_bwd_kernel']
+    elif method.expected_kernel == 'protected_kv_project_fwd_kernel':
+        required = ['protected_kv_project_bwd_kernel', 'soft_bank_update_bwd_kernel', 'hyperbolic_delta_rule_bwd_kernel']
+    else:
+        required = ['hyperbolic_delta_rule_bwd_kernel']
+    for name in required:
+        if not any(record['kernel'].endswith(name) for record in trace):
+            raise AssertionError(f'{method.name}: required training kernel {name} was not launched')
+    return trace
 
 
 def correctness(args, candidates, inputs):
@@ -143,11 +192,7 @@ def correctness(args, candidates, inputs):
     for method in candidates:
         with environment(method.environment):
             actual, trace = evaluate(method.run, small[method.group], args.seed + 1, trace=True)
-        attest(method, trace)
-        if method.name == 'protected_shared_inverse' and not any(
-            x['kernel'].endswith('shared_key_gram_fwd_kernel') for x in trace
-        ):
-            raise AssertionError('Shared inverse preparation did not execute.')
+        _attest_training(method, trace)
         # these are the existing protected parity and TC dtype budgets, not new relaxed thresholds
         if method.group == 'protected':
             out_tol, grad_tol = (5e-3, 5e-2), (8e-3, 8e-2)
@@ -160,7 +205,7 @@ def correctness(args, candidates, inputs):
     for method in candidates:
         with environment(method.environment):
             actual, trace = evaluate(method.run, inputs[method.group], args.seed + 1, trace=True)
-        attest(method, trace)
+        _attest_training(method, trace)
         row = {'kernel_launches': trace}
         if method.baseline:
             if method.name == 'protected_shared_inverse':
@@ -191,15 +236,19 @@ def main():
     parser.add_argument('--modes', choices=('fwd', 'bwd', 'fwd_bwd'), nargs='+')
     parser.add_argument('--include-staged', action='store_true', help='include the legacy decomposed projection/WY/bank route')
     parser.add_argument('--compare-strategies', action='store_true', help='also include auto and head-fused protected routes')
+    parser.add_argument('--compare-trajectories', action='store_true',
+                        help='include the opt-in shared-trajectory implementation')
     parser.add_argument('--check-only', action='store_true')
-    parser.add_argument('--dry-run', action='store_true', help='print validated configuration without importing FLA or using CUDA')
+    parser.add_argument(
+        '--dry-run', action='store_true', help='print validated configuration without importing FLA or using CUDA',
+    )
     parser.add_argument('--output', type=Path, default=Path('profile/hyperbolic-opt/protected-benchmark.json'))
     args = parser.parse_args()
     validate_arguments(parser, args)
     if max(args.key_dim, args.value_dim) > 128 or not 1 <= args.rank <= 16:
         parser.error('protected kernels require K,V<=128 and rank in [1,16]')
-    if not 0 < args.curvature <= 2 or args.temperature < 1e-3:
-        parser.error('the protected reference gate requires curvature in (0,2] and temperature >=1e-3')
+    if not 0 < args.curvature <= 2 or not math.isfinite(args.temperature) or args.temperature < 1e-3:
+        parser.error('the protected reference gate requires curvature in (0,2] and finite temperature >=1e-3')
     candidates = methods(args)
     payload = {'status': 'CONFIGURED', 'metadata': metadata(args), 'methods': [
         {'name': x.name, 'environment': x.environment, 'expected_kernel': x.expected_kernel,
@@ -223,7 +272,9 @@ def main():
         payload['status'] = 'GPU CORRECTNESS PASSED'
         write_json(args.output, payload)
         if not args.check_only:
-            payload['measurements'] = measure(candidates, inputs, args.modes, args.warmup, args.repeats, args.batch * args.seq_len)
+            payload['measurements'] = measure(
+                candidates, inputs, args.modes, args.warmup, args.repeats, args.batch * args.seq_len,
+            )
             payload['status'] = 'GPU CORRECTNESS AND BENCHMARK COMPLETED'
         write_json(args.output, payload)
     except Exception:

@@ -41,6 +41,7 @@ Scheduling candidates require mathematical forward/VJP equivalence, actual CPU r
 Detailed equations, memory/performance models, supported domains and validation commands are maintained with each candidate:
 
 - [Shared Bank-Key inverse](hyperbolic_shared_inverse.md).
+- [Protected shared Key/Score and Value trajectories](hyperbolic_protected_staged.md).
 - [Per-GEMM precision RFC draft and CPU error study](hyperbolic_precision.md): production policy blocked by the required RFC issue being unavailable, not an implemented optimization.
 
 Raw local XML/JSON outputs and compiler caches are under ignored `profile/hyperbolic-opt/`. Model/kernel performance tables must use `GPU NOT RUN` until actual measurements exist. Existing numerical thresholds and tests are retained. Pre-existing Ruff findings in untouched portions of legacy protected files are distinguished from new-file or changed-line findings rather than hidden by repository-wide formatting.
@@ -56,3 +57,25 @@ FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q -o log_cli=false
 # 103 passed, 0 failed, 0 skipped.
 python scripts/analyze_hyperbolic_precision.py --json profile/hyperbolic-opt/precision-cpu.json
 ```
+
+## B1 submission gate
+
+The protected trajectory implementation retains the previous default and is requested only by `FLA_HYPERBOLIC_PROTECTED_STAGED=1` on an eligible Value-parallel route. The independent mathematical gate preceded kernel implementation. The final combined CPU gate ran **233 passed, 0 failed, 0 skipped, 63 deselected** in 12.87 s: 167 original reference tests, 6 original host tests, 37 B2 mathematical tests and 23 B1 mathematical/host tests. There was one expected CPU-platform warning. Separately, **11 actual-source Triton CPU interpreter tests passed**, including final-Bank-only loss paths and checkpoint replay; these are not CUDA tests.
+
+The protected/common benchmark host suite passed **18 tests**, zero failures/skips, in 12.42 s. It checks actual-path attestation, error gates, deterministic cotangents, backward-only timing, CLI validation, no-CUDA reporting and checkpoint-policy parity for the legacy decomposed comparison. Backward latency excludes forward-graph preparation; its separately measured memory peak includes the graph and its preparation, as explicitly recorded in JSON. Per-operator timings do not include an optimizer or full model.
+
+```bash
+FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q -o log_cli=false tests/ops/test_hyperbolic_delta_rule_reference.py tests/ops/test_hyperbolic_delta_rule_host.py tests/ops/test_hyperbolic_delta_rule_shared_inverse.py tests/ops/test_hyperbolic_delta_rule_protected_staged.py -k 'not cuda and not interpreter'
+TRITON_INTERPRET=1 FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q tests/ops/test_hyperbolic_delta_rule_protected_staged.py -k interpreter
+FLA_CI_ENV=0 python -m pytest --noconftest -q tests/benchmarks/test_hyperbolic_benchmarks.py
+```
+
+The reusable offline compiler was executed for all seven entry kernels (six new kernels plus the reused Gram preparation) in three representative configurations: BF16 Query with FP32 Key/Value at K=V128/R4/C16; FP32 at K=V128/R16/C32; FP16 storage at K7/V3/R3/C16. All 21 compilation cases passed. Additional independent compiler cases and same-flags assembler resource comparisons are recorded in the B1 document. The public CUDA matrix is defined and collected, but **GPU NOT RUN** remains the hardware status.
+
+```bash
+PYTHONPATH=. FLA_CI_ENV=0 python scripts/check_hyperbolic_compilation.py --component protected-staged --dtype bf16 --layer-inputs --resources --output profile/hyperbolic-opt/b1-compile.json
+FLA_CI_ENV=0 python -m pytest -q tests/ops/test_hyperbolic_delta_rule_protected_staged.py -k cuda
+python benchmarks/benchmark_protected_hyperbolic_delta_rule.py --batch 1 --seq-len 16384 --heads 16 --key-dim 128 --value-dim 128 --rank 4 --dtype bf16 --layer-inputs --compare-trajectories --no-checkpoint --modes fwd bwd fwd_bwd --warmup 20 --repeats 50 --output profile/hyperbolic-opt/protected-16k.json
+```
+
+The benchmark was actually invoked on this CPU host and exited 2 with `GPU NOT RUN: CUDA device unavailable`; it wrote no correctness or performance result. GPU commands above are instructions for the next hardware gate, not evidence that it ran. Profile the same candidate and baseline on the same hardware before interpreting launch reduction or register counts as acceleration.

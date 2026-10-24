@@ -315,3 +315,36 @@ python benchmarks/benchmark_hyperbolic_tensor_core.py --seq-len 4096 --heads 8 -
 No claim is made that the new path matches optimized GDN throughput
 until the benchmark runs on representative H20 hardware with measured
 latency, register usage, occupancy, peak memory, and correctness.
+
+## Opt-in scheduling experiments (2026-10-24)
+
+The following experiments preserve the existing default dispatch and precision.
+Their mathematical/VJP, CPU regression, actual-source Triton CPU interpreter,
+and representative offline CUDA compilation checks have passed. **GPU
+correctness, latency, memory peaks, and training speed remain GPU NOT RUN.**
+They are candidates for hardware validation, not production recommendations.
+
+| Option | Eligible route | Change | Design and validation |
+| --- | --- | --- | --- |
+| `FLA_HYPERBOLIC_STAGED=1` | Unprotected `tensor_core=True`, strict precision, K<=128, no extra readout-Q | Shared chunk preparation, separate state/output stages, analytic staged backward with final tiled Q/Key gradients | [Unprotected staged operator](hyperbolic_staged.md) |
+| `FLA_HYPERBOLIC_SHARED_INVERSE=1` | Existing protected Value-parallel chunks | Share the unchanged Bank-Key inverse between Value CTAs and backward | [Shared inverse](hyperbolic_shared_inverse.md) |
+| `FLA_HYPERBOLIC_PROTECTED_STAGED=1` | Protected `value_parallel`, or `auto` with V>=8 | Shared Key/Score trajectory and chunk inverses, persistent Value/state trajectory, bounded reverse windows | [Protected staged operator](hyperbolic_protected_staged.md) |
+
+Protected staged already includes shared inverses; enabling the standalone
+shared-inverse flag does not create another optimization inside that path.
+Explicit protected `fused`, small-Value `auto`, short decode, additional
+readout-Q, large-Key and active legacy TC FAST cases retain their respective
+documented dispatch behavior. Protected packed inputs remain unsupported.
+
+The proposed per-GEMM precision policy is **not implemented**. Its required
+RFC issue could not be created because Issues are disabled on the target
+fork. The [precision study](hyperbolic_precision.md) records the draft,
+unchanged-budget CPU experiments, and a feasible-domain counterexample to
+unconditional reduced-precision Gram computation.
+
+See the [audit and executed validation record](hyperbolic_optimization_validation.md)
+for the frozen baseline and independent submission gates. The
+[complete-training benchmark guide](hyperbolic_training_benchmark.md) provides
+small-model gradient gates and same-environment operator/model comparisons,
+including the four 16,384-token batch/sequence shapes. It keeps actual path
+evidence, numerical errors, raw timings and allocated/reserved memory in JSON.

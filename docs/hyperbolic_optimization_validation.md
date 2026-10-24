@@ -104,3 +104,81 @@ python benchmarks/benchmark_hyperbolic_tensor_core.py --batch 1 --seq-len 16384 
 ```
 
 The benchmark's CPU-host invocation was actually executed and returned exit 2 with `GPU NOT RUN: CUDA device unavailable`, writing `profile/hyperbolic-opt/a1-gpu-status-final.json` without timings. The CUDA command and timing command still require hardware execution. The final offline audit explicitly records high register counts and remaining state-scan spills; the absence of huge local-VJP spills is not a GPU acceleration result. The staged path remains opt-in and the original TC/recurrent/readout/large-Key fallbacks remain available.
+
+A1 was independently published as [`69d716145989323cead6d292a0a90a126c7085e5`](https://github.com/ReyJerry/flash-linear-attention/commit/69d716145989323cead6d292a0a90a126c7085e5).
+
+## Integrated CPU and benchmark gate
+
+After all three scheduling implementations and the complete-training runner were frozen, the combined CPU invocation passed **468 tests, 0 failed, 0 skipped, 151 deselected**, in 33.38 s, with one expected CPU-platform warning. The XML report is `profile/hyperbolic-opt/final-cpu-and-benchmarks.xml`. The count is a single combined run, not a sum of repeatedly executed gates:
+
+| Test file | Passed | What actually executes |
+| --- | ---: | --- |
+| `tests/ops/test_hyperbolic_delta_rule_reference.py` | 167 | Existing differentiable CPU reference |
+| `tests/ops/test_hyperbolic_delta_rule_host.py` | 6 | Existing host dispatch/launch contracts |
+| `tests/ops/test_hyperbolic_delta_rule_shared_inverse.py` | 37 | B2 independent math/VJP/finite differences |
+| `tests/ops/test_hyperbolic_delta_rule_protected_staged.py` | 23 | B1 independent math/VJP and host contracts |
+| `tests/ops/test_hyperbolic_delta_rule_staged.py` | 77 | A1 independent math/VJP/gradcheck |
+| `tests/ops/test_hyperbolic_delta_rule_precision.py` | 103 | A2 math, cast contracts and rejection cases |
+| `tests/benchmarks/test_hyperbolic_benchmarks.py` | 18 | Shared/protected benchmark host behavior |
+| `tests/benchmarks/test_hyperbolic_tensor_core_benchmark.py` | 11 | Unprotected benchmark host behavior |
+| `tests/benchmarks/test_hyperbolic_training_benchmark.py` | 26 | Full-model benchmark host behavior and real CPU model construction |
+
+```bash
+FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q -o log_cli=false \
+  --junitxml=profile/hyperbolic-opt/final-cpu-and-benchmarks.xml \
+  tests/ops/test_hyperbolic_delta_rule_reference.py \
+  tests/ops/test_hyperbolic_delta_rule_host.py \
+  tests/ops/test_hyperbolic_delta_rule_shared_inverse.py \
+  tests/ops/test_hyperbolic_delta_rule_protected_staged.py \
+  tests/ops/test_hyperbolic_delta_rule_staged.py \
+  tests/ops/test_hyperbolic_delta_rule_precision.py \
+  tests/benchmarks/test_hyperbolic_benchmarks.py \
+  tests/benchmarks/test_hyperbolic_tensor_core_benchmark.py \
+  tests/benchmarks/test_hyperbolic_training_benchmark.py \
+  -k 'not cuda and not interpreter'
+```
+
+The existing layer/streaming/model suite was also rerun after integration: **2 passed, 8 skipped, 0 failed**, in 8.13 s. The eight skips require CUDA; they are not passing layer/model forward/backward checks. This matches the frozen CPU baseline. The report is `profile/hyperbolic-opt/final-layer-model.xml`.
+
+```bash
+FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q -o log_cli=false \
+  --junitxml=profile/hyperbolic-opt/final-layer-model.xml \
+  tests/layers/test_hyperbolic_streaming.py \
+  tests/layers/test_hyperbolic_deltanet.py \
+  tests/models/test_hyperbolic_deltanet.py
+```
+
+The three new scheduling test files collected **108 CUDA cases** (13 B2, 36 B1, 59 A1), without executing them. No GPU tests are counted among the 468 CPU passes. Actual CUDA execution remains a release gate.
+
+A final single-process integration run of the actual-source Triton CPU interpreter suites passed **43 tests, 0 failed, 0 skipped, 245 deselected**, in 130.48 s: 3 B2, 11 B1 and 29 A1 cases. Its report is `profile/hyperbolic-opt/final-interpreter.xml`. This checks the integrated kernels and host routing on CPU, not CUDA execution. The 460 warnings were retained: 458 NumPy scalar-conversion deprecations from Triton's interpreter, one CPU-platform warning, and one `exp` overflow warning in the low-temperature legacy-sigmoid case. That case passed old/new output and all-gradient parity and explicit finite-gradient assertions; no warning or tolerance was suppressed to obtain a pass.
+
+```bash
+TRITON_INTERPRET=1 FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q -o log_cli=false \
+  --junitxml=profile/hyperbolic-opt/final-interpreter.xml \
+  tests/ops/test_hyperbolic_delta_rule_shared_inverse.py \
+  tests/ops/test_hyperbolic_delta_rule_protected_staged.py \
+  tests/ops/test_hyperbolic_delta_rule_staged.py -k interpreter
+```
+
+## Complete-training comparison
+
+`benchmarks/benchmark_hyperbolic_training.py` adds the requested 24-layer comparison, separately from the operator microbenchmarks. The [complete-training guide](hyperbolic_training_benchmark.md) documents all commands, method selection, checkpoint differences and JSON fields. Default parameters are FP32 with BF16 autocast, AdamW, outer nonreentrant layer checkpoint enabled, and protected inner checkpoint disabled. Methods are run sequentially with matching initial-weight hashes within each HDN group. GDN is a performance comparison, not an output or gradient oracle.
+
+The runner first requires a small-model loss and all-parameter-gradient parity gate, then records the full model's actual path, continuous loss/gradient/final-weight finite checks, forward/backward/optimizer times, total synchronized CUDA/wall times, raw distributions and peak allocated/reserved memory. It does not label full-size finite checks as full-size trajectory equivalence. The default is 10 warmup, 30 measured and 10 additional continuous stability steps. Compile, tracing, health checks, data preparation and `zero_grad` remain outside the reported timing scope. That scope is explicit in the JSON.
+
+The CPU host tests execute real small model constructors, verify FP32 parameters, same-group weight hashes and actual nonreentrant checkpoint hooks, while replacing only `.cuda()` with an identity for that construction check. They do not run model forward/backward on CPU or CUDA. The runner's no-CUDA `--check-only` invocation was actually executed and returned exit 2, writing `profile/hyperbolic-opt/training-final-no-gpu.json` with `GPU NOT RUN` and no correctness/timing result.
+
+| Optimization | Implementation status | Hardware status | Publication |
+| --- | --- | --- | --- |
+| A1 staged forward/backward | Implemented, opt-in; math/CPU/interpreter and offline compilation checked | GPU NOT RUN | `69d71614` |
+| A2 per-GEMM precision | Production change blocked by required RFC; draft and CPU evidence only | No selective-precision GPU implementation or measurement | `5838aac1` is evidence only |
+| B1 Key/Score and Value trajectories | Implemented, opt-in; full coupled VJP retained | GPU NOT RUN | `d4320de6` |
+| B2 shared Bank-Key inverse | Implemented only where real Value-CTA duplication remained | GPU NOT RUN | `7e2a09e5` |
+
+All new scheduling flags default off. Actual forward/backward/complete-training speedup and peak-memory changes are unmeasured. No candidate is promoted to formal GPU training based on this CPU-only validation. The remaining external gates are a usable/approved precision RFC and actual supported NVIDIA hardware for correctness, resource profiling, same-environment timing and longer training validation.
+
+## Final static review
+
+The final lint pass also used the repository-pinned **Ruff 0.14.10**, installed in a separate scratch tool directory; the development Ruff 0.17.2 was not treated as a substitute for that pin. All added Python files and changed Python files other than the two legacy protected files passed the pinned check. The complete legacy files retained eight pre-existing findings: one `__all__` ordering finding in `protected_kernels.py`, and one unused import plus six import-format findings in `protected_triton.py`. The same pinned tool reproduced those findings on the frozen baseline, which had nine across those two files; an edited import block already removed the ninth. No new finding was ignored and no broad legacy formatting was included.
+
+Python compilation passed for all changed/new Python files. New-file autopep8 2.3.2 checks and `git diff --check` were clean. Existing autopep8 changes suggested in untouched portions of `fused_recurrent.py` were reproduced on the baseline and left outside this scheduling change. These results do not claim that the entire repository's lint or GPU CI passed.

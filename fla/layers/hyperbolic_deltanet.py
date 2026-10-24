@@ -68,6 +68,7 @@ class HyperbolicDeltaNet(nn.Module):
         curvature: float = 1.0,
         learnable_curvature: bool = False,
         protection_rank: int = 0,
+        protected_checkpoint: bool = True,
         value_margin: float = 0.5,
         chunk_size: int = 16,
         use_gate: bool = True,
@@ -88,6 +89,7 @@ class HyperbolicDeltaNet(nn.Module):
         self.tensor_core = tensor_core
         self.learnable_curvature = learnable_curvature
         self.protection_rank = protection_rank
+        self.protected_checkpoint = protected_checkpoint
         if learnable_curvature:
             if curvature <= 0:
                 raise ValueError('Learnable curvature requires an initial curvature > 0.')
@@ -189,7 +191,7 @@ class HyperbolicDeltaNet(nn.Module):
         if self.protection_rank:
             if cu_seqlens is not None or attention_mask is not None:
                 raise ValueError('Protected memory currently requires dense, unpadded batches.')
-            protected_args = dict(curvature=curvature, scale=1.0,
+            protected_args = dict(curvature=curvature, scale=1.0, checkpoint=self.protected_checkpoint,
                                   protection_rank=self.protection_rank, checkpoint_size=self.chunk_size,
                                   mode='naive' if self.mode == 'naive' or not q.is_cuda else 'triton')
             if use_cache:

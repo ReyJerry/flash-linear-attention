@@ -48,3 +48,19 @@ def test_tensor_core_model_config_and_training(monkeypatch):
     loss.backward();assert called and all(called)
     assert torch.isfinite(loss)
     assert all(torch.isfinite(p.grad).all() for p in m.parameters() if p.grad is not None)
+
+def test_protected_model_checkpoint_modes():
+    if not torch.cuda.is_available(): pytest.skip('requires CUDA')
+    torch.manual_seed(813)
+    common=dict(hidden_size=32,head_dim=16,num_heads=2,num_hidden_layers=1,vocab_size=64,
+        intermediate_size=64,protection_rank=2,use_short_conv=False,fuse_norm=False,fuse_swiglu=False,fuse_cross_entropy=False)
+    models=[HyperbolicDeltaNetForCausalLM(HyperbolicDeltaNetConfig(**common,protected_checkpoint=flag)).cuda().train() for flag in (True,False)]
+    models[1].load_state_dict(models[0].state_dict())
+    ids=torch.randint(0,64,(2,35),device='cuda'); losses=[]
+    for m in models:
+        m.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant':False})
+        loss=m(ids,labels=ids,use_cache=False).loss;loss.backward();losses.append(loss)
+    torch.testing.assert_close(losses[0],losses[1],rtol=3e-4,atol=3e-5)
+    for a,b in zip(models[0].parameters(),models[1].parameters()):
+        assert (a.grad is None)==(b.grad is None)
+        if a.grad is not None:torch.testing.assert_close(a.grad,b.grad,rtol=3e-4,atol=3e-5)

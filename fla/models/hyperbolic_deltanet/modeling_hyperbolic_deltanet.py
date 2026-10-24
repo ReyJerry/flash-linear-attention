@@ -43,7 +43,7 @@ class HyperbolicDeltaNetBlock(GradientCheckpointingLayer):
                 expand_v=config.expand_v, head_dim=config.head_dim,
                 num_heads=config.num_heads, num_v_heads=config.num_v_heads,
                 curvature=config.curvature, learnable_curvature=config.learnable_curvature,
-                protection_rank=config.protection_rank, value_margin=config.value_margin,
+                protection_rank=config.protection_rank, protected_checkpoint=config.protected_checkpoint, value_margin=config.value_margin,
                 chunk_size=config.chunk_size, use_gate=config.use_gate,
                 use_short_conv=config.use_short_conv, conv_size=config.conv_size,
                 conv_bias=config.conv_bias, fuse_norm=config.fuse_norm,

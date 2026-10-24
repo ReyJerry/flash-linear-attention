@@ -31,6 +31,7 @@ class HyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         curvature: float = 1.0,
         learnable_curvature: bool = False,
         protection_rank: int = 0,
+        protected_checkpoint: bool = True,
         value_margin: float = 0.5,
         chunk_size: int = 16,
         use_gate: bool = True,
@@ -69,6 +70,7 @@ class HyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         self.curvature = curvature
         self.learnable_curvature = learnable_curvature
         self.protection_rank = protection_rank
+        self.protected_checkpoint = protected_checkpoint
         self.value_margin = value_margin
         self.chunk_size = chunk_size
         self.use_gate = use_gate

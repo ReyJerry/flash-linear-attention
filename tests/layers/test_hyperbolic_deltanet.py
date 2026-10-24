@@ -93,7 +93,7 @@ def test_layer_learnable_curvature_and_protected_cache():
         first, _, cache = protected(x, past_key_values=cache, use_cache=True)
         state = cache[0]['recurrent_state']
         assert state['protected_keys'].shape == (1, 2, 2, 16)
-        assert state['protected_values'].shape == (1, 2, 2, 8)
+        assert state['protected_values'].shape == (1, 2, 2, 16)
         assert state['protected_scores'].shape == (1, 2, 2)
         assert state['protected_count'].shape == (1, 2)
         second, _, cache = protected(x[:, :1], past_key_values=cache, use_cache=True)

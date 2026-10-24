@@ -55,7 +55,7 @@ class FLALayer(CacheLayerMixin):
     def update(
         self,
         *,
-        recurrent_state: torch.Tensor | tuple[torch.Tensor, ...] | None = None,
+        recurrent_state: torch.Tensor | tuple[torch.Tensor, ...] | dict[str, Any] | None = None,
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,
@@ -112,8 +112,9 @@ class FLALayer(CacheLayerMixin):
             if state is not None:
                 if isinstance(state, torch.Tensor):
                     self.device = state.device
-                elif isinstance(state, (tuple, list)):
-                    first_tensor = next((item for item in state if isinstance(item, torch.Tensor)), None)
+                elif isinstance(state, (tuple, list, dict)):
+                    values = state.values() if isinstance(state, dict) else state
+                    first_tensor = next((item for item in values if isinstance(item, torch.Tensor)), None)
                     if first_tensor is not None:
                         self.device = first_tensor.device
                 elif hasattr(state, 'device'):
@@ -231,7 +232,7 @@ class LegacyFLACache(HFCacheBase):
 
     def update(
         self,
-        recurrent_state: torch.Tensor | tuple[torch.Tensor, ...] | None = None,
+        recurrent_state: torch.Tensor | tuple[torch.Tensor, ...] | dict[str, Any] | None = None,
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,
@@ -242,7 +243,7 @@ class LegacyFLACache(HFCacheBase):
         """Update one layer while retaining any state omitted from the call.
 
         Args:
-            recurrent_state (torch.Tensor or tuple[torch.Tensor, ...], Optional):
+            recurrent_state (torch.Tensor or tuple[torch.Tensor, ...] or dict[str, Any], Optional):
                 The new recurrent state. Default: `None`.
             attn_state (tuple[torch.Tensor, ...], Optional):
                 The new attention key/value states. Default: `None`.
@@ -359,7 +360,7 @@ class FLACache(HFCacheBase):
 
     def update(
         self,
-        recurrent_state: torch.Tensor | tuple[torch.Tensor, ...] | None = None,
+        recurrent_state: torch.Tensor | tuple[torch.Tensor, ...] | dict[str, Any] | None = None,
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,

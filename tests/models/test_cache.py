@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pickle
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -151,6 +152,52 @@ def test_batch_operations(operation):
     torch.testing.assert_close(cache[1]['attn_state'], (state[indices, :, None], state[indices, :, None] + 60))
     assert cache.get_seq_length(layer_idx=0) == 5
     assert cache.get_seq_length(layer_idx=1) == 2
+
+
+@pytest.mark.parametrize('state_kind', ['tensor', 'tuple', 'list', 'mapping', 'custom-device', 'custom-attributes'])
+def test_layer_state_device(state_kind):
+    tensor = torch.ones(2, 3, device='meta')
+    states = {
+        'tensor': tensor,
+        'tuple': (None, tensor),
+        'list': [None, tensor],
+        'mapping': {'metadata': None, 'state': tensor},
+        'custom-device': SimpleNamespace(device=tensor.device),
+        'custom-attributes': SimpleNamespace(ht=tensor),
+    }
+    layer = FLALayer()
+    layer.update(recurrent_state=states[state_kind])
+    assert layer.device == tensor.device
+    assert layer.state['recurrent_state'] is states[state_kind]
+
+
+@pytest.mark.parametrize('operation', ['reorder_cache', 'batch_repeat_interleave', 'batch_select_indices'])
+def test_mapping_recurrent_state(operation):
+    state = {
+        'state': torch.arange(72, dtype=torch.float32).reshape(3, 2, 3, 4),
+        'protected_keys': torch.arange(36, dtype=torch.float32).reshape(3, 2, 2, 3),
+        'protected_values': torch.arange(48, dtype=torch.float32).reshape(3, 2, 2, 4),
+        'protected_scores': torch.arange(12, dtype=torch.float32).reshape(3, 2, 2),
+        'protected_count': torch.full((3, 2), 2, dtype=torch.int32),
+    }
+    cache = Cache()
+    cache.update(recurrent_state=state, offset=7)
+    assert cache[0]['recurrent_state'] is state
+    assert cache.layers[0].device == state['state'].device
+    restored = Cache.from_legacy_cache(past_key_values=cache.to_legacy_cache(), seen_tokens=7)
+    assert restored.layers[0].device == state['state'].device
+    restored.layers[0].offload()
+    restored.layers[0].prefetch()
+    torch.testing.assert_close(restored[0]['recurrent_state'], state)
+
+    indices = torch.tensor([2, 0, 2])
+    if operation == 'batch_repeat_interleave':
+        restored.batch_repeat_interleave(repeats=2)
+        indices = torch.arange(3).repeat_interleave(2)
+    else:
+        getattr(restored, operation)(indices)
+    torch.testing.assert_close(restored[0]['recurrent_state'], {key: value[indices] for key, value in state.items()})
+    assert restored.get_seq_length() == 7
 
 
 @pytest.mark.parametrize('max_length', [5, -2], ids=['absolute', 'relative'])

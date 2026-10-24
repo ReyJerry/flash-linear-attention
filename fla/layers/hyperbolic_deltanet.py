@@ -17,6 +17,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.modules.causal_conv1d.ops import causal_conv1d
 from fla.ops.hyperbolic_delta_rule import (
     chunk_hyperbolic_delta_rule,
     fused_recurrent_hyperbolic_delta_rule,
@@ -37,11 +38,12 @@ class HyperbolicDeltaNet(nn.Module):
 
     q/k/v projections, optional short convolutions, output normalization and cache
     handling follow the other FLA layers. Keys are normalized and values bounded
-    so that ||k||^2 - curvature*v^2 stays positive. This layer implements the base
-    projection rule, NOT the optional protected-old-association subspace variant.
+    so that ||k||^2 - curvature*v^2 stays positive. Protected memory freezes its
+    bank within globally aligned chunks, including across cached calls.
 
     Args:
         mode: 'chunk', 'fused_recurrent', or the slow PyTorch oracle 'naive'.
+        tensor_core: Enable the unprotected Tensor Core chunk route; decode retains its recurrent route.
         curvature: Fixed nonnegative scalar. Zero gives normalized Delta updates.
         value_margin: Bound relative to the admissible value radius, in (0, 1).
         chunk_size: 16 or 32; also the backward checkpoint interval.
@@ -49,8 +51,8 @@ class HyperbolicDeltaNet(nn.Module):
         fuse_norm: Use FLA fused norms; disable for the unfused reference path.
 
     The state is FP32 and has shape [batch_or_num_sequences, H_v, K, V].
-    Curvature is fixed across tokens/layers unless configured per layer externally;
-    it is not a trained tensor. No extra forgetting or negative-eigenvalue gate is
+    Curvature can be learned through a positive softplus parameter.
+    No extra forgetting or negative-eigenvalue gate is
     introduced, since those would change the derived geometry.
     """
 
@@ -156,7 +158,11 @@ class HyperbolicDeltaNet(nn.Module):
         projections = (self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states))
         if self.use_short_conv and hidden_states.shape[1] > 0:
             convolved = [
-                conv(x=x, cache=cache, output_final_state=use_cache, cu_seqlens=cu_seqlens)
+                (causal_conv1d(x=x, weight=conv.weight[:, 0, :], bias=conv.bias,
+                               initial_state=cache, output_final_state=use_cache,
+                               activation=conv.activation, backend=conv.backend, cu_seqlens=cu_seqlens)
+                 if self.protection_rank else
+                 conv(x=x, cache=cache, output_final_state=use_cache, cu_seqlens=cu_seqlens))
                 for x, conv, cache in zip(projections, (self.q_conv1d, self.k_conv1d, self.v_conv1d), conv_states)
             ]
             (q, k, raw_v), conv_states = tuple(zip(*convolved))

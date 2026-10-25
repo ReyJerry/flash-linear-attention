@@ -2,6 +2,20 @@
 
 This proposes a separate Key-Gated Hyperbolic DeltaNet (KHDN) identity with per-Key-channel forgetting and grouped joint Lorentz projection. Existing HyperbolicDeltaNet, protected HDN, GDN and KDA APIs, checkpoints, kernels and numerical policies remain unchanged. This is a design proposal, not a GPU correctness or speed claim.
 
+## Current implementation status
+
+`fla.ops.key_gated_hyperbolic_delta_rule.naive_recurrent_key_gated_hyperbolic_delta_rule` now provides the independent PyTorch dense-solve recurrence. It supports head-shared beta/decay, multiple heads and groups, noncontiguous inputs, packed empty sequences, canonical initial/final states and all seven first-order source gradients. It retains FP64 arithmetic when any source is FP64, otherwise FP32; the public output follows the Query dtype. It does not implement the production chunk schedule or establish GPU correctness.
+
+The formal CPU reference suite passes **207 tests**, including seven-input gradchecks, grouped geometry, endpoint derivatives, main-size multiple groups, exact strong-decay state/derivative, streaming, packed/empty inputs and validation. The unchanged HDN reference/host suite passes **173 tests**. A focused review correction preserves legal finite initial states at zero curvature even when squaring a large state would overflow; this changes only the state-domain check and retains the curvature derivative.
+
+An independent mathematical review accepts the exact canonical/chunk/gauge/carry identities and written source gradients. The production gate remains open until a complete manual source VJP and the range-safe exceptional path pass their own acceptance tests. The new KHDN production kernels, Layer/Model integration, GPU tests, performance, DDP and resume training are not certified by these reference results.
+
+Run the CPU reference independently of accelerator imports:
+
+```bash
+FLA_CI_ENV=0 OMP_NUM_THREADS=1 python -m pytest --noconftest -q tests/ops/test_key_gated_hyperbolic_delta_rule_reference.py
+```
+
 Development baseline: `46c54ef0d57609d66a5c158fa4a8cce124ca1483` on `add-hyperbolic-delta-net`. The implementation will retain later branch work. The specification is frozen by SHA-256 `faacdb1ded8cadf9716333adb0827dbbc444ff0af13ad6683affc3ca8e4d03a8`; the execution requirements are frozen by SHA-256 `86d39cdd0dc2000d81ac4478cb89fde56c428be8d32941972952de95456d1fb6`.
 
 ## Model contract

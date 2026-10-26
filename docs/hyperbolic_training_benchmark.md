@@ -5,9 +5,9 @@ compares complete dense causal-LM training steps with FP32 parameters, an explic
 and a fused AdamW optimizer. It measures the unprotected TC/staged routes, the protected baseline/shared-inverse/staged
 routes, and GatedDeltaNet (GDN). GDN is a performance reference with a different update rule, not a numerical oracle for HDN.
 
-**GPU NOT RUN:** the implementation environment has no CUDA device. The host tests, real CPU model-construction checks,
-CLI checks, and static checks described below do not validate GPU kernels, GPU timings, or a performance improvement.
-The commands in this document are the reproducible GPU verification procedure, not reported GPU results.
+The initial legacy-route implementation was validated in a CPU-only environment; those historical checks below do not
+establish GPU performance. Subsequent native GDN W1/W8/W16 tiny checks and strict KHDN validation are described in
+[the distributed harness](hyperbolic_ddp_harness.md) and the KHDN section below. Example commands are not execution evidence.
 
 ## Default configuration and comparison contract
 
@@ -416,4 +416,4 @@ Long/full-model expansion requires a separately reviewed run scope. The CLI acce
 
 Long correctness uses nonreentrant checkpointing around independent dense-Oracle temporal chunks (`--oracle-chunk-size`, default16). Canonical S connects adjacent chunks, retaining the complete q/k/v/beta/log_decay/S0/c gradient chain. Each case first compares this harness against the uncheckpointed independent dense Oracle on a bounded witness. It then evaluates actual long FP64 truth without retaining every token's dense-solve graph. The truth never calls production chunk kernels. This reduces retained AD activation memory; it does not remove the dense Oracle's compute cost or claim long-shape feasibility without GPU measurement. High-precision exceptional routes remain outside strict timing acceptance.
 
-This integration has CPU validation only. Real compiled-launch, model parity, long-shape Oracle memory, GPU timing and KHDN W1/8/16 acceptance require separate execution and review. No GPU performance result is included here.
+The fixed integration has passed 217 CPU cases and targeted independent review of compiled-type parsing and actual token-domain binding. Actual H20 FP32/BF16 tiny W1 checks passed for both carry modes, including same-model Oracle parity, all-parameter gradients, checkpoint replay and zero fallback. Two unchanged 24-layer BF16/plain-CE B8x2048 pilots each completed five finite updates and checkpoint reload with the actual 1,412,912,536-parameter learned-curvature model. Their two measured step samples per method are feasibility evidence, not the required 10-warmup/30-sample/three-repeat performance acceptance. Multi-rank full KHDN training, broader precision coverage and formal performance remain pending. Separately discovered extreme-query and c0/large-state numerical limits are under repair; normal model checks do not certify that whole input domain.

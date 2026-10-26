@@ -1,12 +1,12 @@
 # Hyperbolic training/DDP harness
 
-The recovery, evidence-retention and archive-metadata fixes require targeted independent review. CPU checks do not establish KHDN, CUDA/NCCL, or 1/8/16-GPU acceptance. No GPU jobs were launched by KHDN-DDP-HARNESS.
+The recovery, evidence-retention and archive-metadata fixes have passed targeted independent review. Native GDN FP32 tiny-model update/recovery checks have passed on H20 at W1/W8/W16. Fixed KHDN FP32/BF16 tiny W1 checks and two finite full-recipe pilots have also passed; formal full-model performance and KHDN multi-rank scaling acceptance remain pending.
 
 `benchmark_hyperbolic_training.py` retains all previous options and the six default methods. `--rank` remains the protected-memory rank; torchrun supplies global rank through `RANK` and device rank through `LOCAL_RANK`. `--local-rank`/`--local_rank` optionally select the local device. A multi-rank invocation must explicitly choose `--scaling strong` or `weak`.
 
 ## Availability and configuration
 
-GDN, KDA, Comba, HDN TC/staged and the existing protected baselines use their native CausalLMs. GDN2 has native operators and a layer but no native CausalLM/config, so a full-model GDN2 request fails. Optimized KHDN requests (`khdn_no_carry`/`khdn_y_carry`) fail explicitly regardless of in-flight operator exports. Even after an export is added, optimized KHDN remains blocked until real kernel/carry attestation is implemented in `trace_route`; symbol availability alone cannot promote a route. There is no reference fallback. `khdn_naive` requires `--check-only` and constructs only a tiny model with head dimension/group size 32 by default; it never produces full-model timing.
+GDN, KDA, Comba, HDN TC/staged and the existing protected baselines use their native CausalLMs. GDN2 has native operators and a layer but no native CausalLM/config, so a full-model GDN2 request fails. KHDN requests (`khdn_no_carry`/`khdn_y_carry`) require explicit `--khdn-strict` and actual operator/autograd/kernel, precision, token-domain and checkpoint-replay checks. The current device path uses FP64 SIMT; exceptional host/reference/recurrent substitutions are rejected from strict timing. `khdn_naive` requires `--check-only` and constructs only a tiny model with head dimension/group size 32 by default; it never produces full-model timing.
 
 The full recipe is 24 layers, hidden 2048, H16, K/V128, FFN5184, vocab32000, expand_v1, short convolution, output gate, FP32 parameters, BF16 autocast, and outer nonreentrant checkpointing. Default fixed-curvature counts from the source inventory are HDN 1,400,280,064; GDN 1,401,067,264; KDA 1,324,881,280; Comba 1,401,068,032; KHDN 1,412,912,512. Learned KHDN curvature adds 24 parameters. KHDN adds 12,632,448 parameters over HDN. KDA uses its native low-rank output gate, so matched width/depth is not equal parameter count. `--parameter-counts` cross-checks actual meta constructors when native dependencies exist; when Triton is absent it explicitly reports source inventory without constructor verification. Every full CUDA model's actual count must agree before timing.
 
@@ -54,7 +54,7 @@ The previous frozen H20 source failed at `git rev-parse` before model execution.
 
 ## Separate controlled-loss and memory recipes
 
-Run only after main's review/approval gates, in separate fresh processes with separate outputs. These examples describe supported flags, not executed GPU work:
+Run after the matching correctness and route checks pass, in separate fresh processes with separate outputs. These memory-only examples describe supported flags, not executed memory-isolation results:
 
 ```bash
 python benchmarks/benchmark_hyperbolic_training.py --methods gdn kda comba hdn_tc hdn_staged \
@@ -112,4 +112,4 @@ python -m torch.distributed.run --nnodes=2 --nproc-per-node=8 --max-restarts=0 \
   --ddp-timeout 300 --task-timeout 14400 --output profile/khdn-ddp/gdn-strong-w16.json
 ```
 
-Use `--scaling weak` and separate output names for weak scaling. For the long endpoint use `--batch 1 --seq-len 16384`; other matched endpoints are batch4/4096 and batch2/8192. Phase measurements and `--profile` run separately; distributed profiling is rejected. The harness does not schedule manifests, compute cross-run scaling efficiency, or declare a winner. Review global sample hashes and calculate strong/weak efficiency from matching run files. Optimized KHDN GPU commands intentionally remain blocked until accepted kernels and their attestation exist.
+Use `--scaling weak` and separate output names for weak scaling. For the long endpoint use `--batch 1 --seq-len 16384`; other matched endpoints are batch4/4096 and batch2/8192. Phase measurements and `--profile` run separately; distributed profiling is rejected. The harness does not schedule manifests, compute cross-run scaling efficiency, or declare a winner. Review global sample hashes and calculate strong/weak efficiency from matching run files. KHDN's explicit strict opt-in does not waive numerical, actual-shape or fallback gates; it is not a performance endorsement.

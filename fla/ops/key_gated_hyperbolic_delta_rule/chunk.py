@@ -37,18 +37,24 @@ def _shapes(c, k):
     return common, group, shared
 
 
+def _host_arguments(sources, options, check_inputs):
+    from fla.ops.key_gated_hyperbolic_delta_rule.reference_chunk import _arguments
+    q, k, v, beta, ell, state, c = sources
+    cu = torch.tensor(options['bounds'], dtype=torch.int64) if q.shape[0] == 1 else None
+    normalized, opts = _arguments(q, k, v, beta, ell, c, state, options['scale'], cu, options['g'],
+                                  check_inputs, options['c'], options['carry'], 'zero_detached', None, True, 0)
+    # the device contract requires FP64 preparation even when the CPU public dtype is FP32
+    opts.update(output_final_state=options['final'], working_dtype=torch.float64)
+    return normalized, opts
+
+
 def _host_call(sources, options, telemetry):
-    from fla.ops.key_gated_hyperbolic_delta_rule.reference_backward import manual_chunk_key_gated_hyperbolic_delta_rule
+    from fla.ops.key_gated_hyperbolic_delta_rule.reference_backward import _ManualChunk
     start = time.perf_counter()
     host = tuple(x.to('cpu') for x in sources)
-    q, k, v, beta, ell, state, c = host
-    cu = torch.tensor(options['bounds'], dtype=torch.int64) if q.shape[0] == 1 else None
+    normalized, opts = _host_arguments(host, options, True)
     details = {}
-    output, final = manual_chunk_key_gated_hyperbolic_delta_rule(
-        q, k, v, beta, ell, curvature=c, initial_state=state, output_final_state=options['final'],
-        scale=options['scale'], cu_seqlens=cu, group_size=options['g'], chunk_size=options['c'],
-        carry_mode=options['carry'], telemetry=details,
-    )
+    output, final = _ManualChunk.apply(*normalized, opts, details, None)
     output = output.to(sources[0].device)
     final = None if final is None else final.to(sources[0].device)
     torch.cuda.synchronize(sources[0].device)
@@ -59,14 +65,13 @@ def _host_call(sources, options, telemetry):
     return output, final
 
 
-def _exception_reason(sources, g):
+def _exception_reason(sources, g, scale):
     q, k, v, beta, ell, state, c = sources
-    if any(x.dtype == torch.float64 for x in sources):
-        # preserve original sources before arbitrary-precision range selection
-        if any(x.numel() and (x.detach().abs().max().item() > 2.**100
-                              or ((x != 0) & (x.detach().abs() < 2.**-100)).any().item())
-               for x in (q, k, v, state, c)):
-            return 'source_exponent_range'
+    # inspect original sources of every dtype before device preparation
+    if any(x.numel() and (x.detach().abs().max().item() > 2.**100
+                          or ((x != 0) & (x.detach().abs() < 2.**-100)).any().item())
+           for x in (q, k, v, state, c)):
+        return 'source_exponent_range'
     if not k.numel():
         return None
     kd = k.detach().double()
@@ -79,19 +84,18 @@ def _exception_reason(sources, g):
     radius2 = c.detach().double() / g * state.detach().double().reshape(*state.shape[:-1], -1, g).square().sum((-3, -1))
     if (radius2 > .5).any().item():
         return 'entry_ball_margin'
+    from fla.ops.key_gated_hyperbolic_delta_rule.reference_arithmetic import source_roundoff_bits, source_roundoff_reason
+    if source_roundoff_reason(source_roundoff_bits(q, k, v, state, scale), torch.float64):
+        return 'state_readout_source_roundoff'
     return None
 
 
 def _host_backward(sources, options, do, ds, needs, telemetry):
     from fla.ops.key_gated_hyperbolic_delta_rule.reference_backward import _backward
-    from fla.ops.key_gated_hyperbolic_delta_rule.reference_chunk import _arguments, _execute
+    from fla.ops.key_gated_hyperbolic_delta_rule.reference_chunk import _execute
     start = time.perf_counter()
     host = tuple(x.detach().cpu() for x in sources)
-    q, k, v, beta, ell, state, c = host
-    cu = torch.tensor(options['bounds'], dtype=torch.int64) if q.shape[0] == 1 else None
-    normalized, opts = _arguments(q, k, v, beta, ell, c, state, options['scale'], cu, options['g'],
-                                  False, options['c'], options['carry'], 'zero_detached', None, True, 0)
-    opts['output_final_state'] = options['final']
+    normalized, opts = _host_arguments(host, options, False)
     details = {}
     _, _, tapes = _execute(normalized, opts, details)
     result = _backward(tapes, normalized, opts, do.cpu(), ds.cpu(), details, needs)
@@ -174,7 +178,11 @@ class _Chunk(torch.autograd.Function):
         ds = torch.zeros_like(state) if final_grad is None else final_grad.contiguous()
         extreme_cotangent = any(x.numel() and (((x != 0) & (x.abs() < 2.**-100)).any().item()
                                                or x.abs().max().item() > 2.**100) for x in (do, ds))
-        if extreme_cotangent:
+        from fla.ops.key_gated_hyperbolic_delta_rule.reference_arithmetic import cotangent_precision_bits
+        accuracy_replay = cotangent_precision_bits(sources, options['scale'], do, ds, torch.float64) > 53
+        if extreme_cotangent or accuracy_replay:
+            if ctx.telemetry is not None:
+                ctx.telemetry['backward_exception_reason'] = 'cotangent_accuracy' if accuracy_replay else 'cotangent_range'
             result = _host_backward(sources, options, do, ds, ctx.needs_input_grad[:7], ctx.telemetry)
             return (*result, None, None)
         grads = [torch.empty_like(x, memory_format=torch.contiguous_format) for x in sources]
@@ -237,7 +245,7 @@ def chunk_key_gated_hyperbolic_delta_rule(
              if initial_state is None else initial_state)
     sources = (q, k, v, beta, log_decay, state, c)
     options = dict(bounds=bounds, scale=scale, g=group_size, c=chunk_size, final=output_final_state, carry=carry_mode)
-    reason = _exception_reason(sources, group_size)
+    reason = _exception_reason(sources, group_size, scale)
     if reason:
         if telemetry is not None:
             telemetry['exception_reason'] = reason

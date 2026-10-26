@@ -19,6 +19,46 @@ import numpy as np
 import torch
 
 
+def source_roundoff_bits(q, k, v, state, scale):
+    """Screen absolute cancellation in state, readout and their source VJP before preparation."""
+    def max_bits(x):
+        largest = x.detach().double().abs().max().item() if x.numel() else 0.
+        return math.log2(largest) if largest else -math.inf
+
+    query = max_bits(q) + (math.log2(abs(scale)) if scale else -math.inf)
+    state_bits = max(0., max_bits(state))
+    target_bits = 0.
+    if k.numel():
+        kd = k.detach().double().abs()
+        largest = kd.amax(-1, keepdim=True)
+        safe = torch.where(largest > 0, largest, torch.ones_like(largest))
+        log_norm = safe.squeeze(-1).log2() + .5 * (kd / safe).square().sum(-1).log2()
+        log_value = v.detach().double().abs().amax(-1).log2()
+        target_bits = max(0., (log_value - log_norm).max().item())
+    # curvature adjoints contain state-squared times target and state times target-squared terms
+    cancellation = max(0., query) + 2 * max(state_bits, target_bits) + target_bits
+    return cancellation
+
+
+def source_roundoff_reason(bits, dtype):
+    budget = 2e-5 if dtype == torch.float32 else 1e-10
+    if bits + math.log2(torch.finfo(dtype).eps) > math.log2(budget / 8):
+        return ('state_readout_source_roundoff',)
+    return ()
+
+
+def cotangent_precision_bits(sources, scale, output_grad, final_grad, dtype):
+    """Significand demand from original sources and the actual unscaled adjoint amplitude."""
+    largest = max((x.detach().double().abs().max().item() for x in (output_grad, final_grad) if x.numel()), default=0.)
+    if not math.isfinite(largest):
+        raise ValueError('Nonfinite incoming cotangent.')
+    if not largest:
+        return -math.inf
+    q, k, v, _, _, state, _ = sources
+    budget = 2e-5 if dtype == torch.float32 else 1e-10
+    return 1 + source_roundoff_bits(q, k, v, state, scale) + math.log2(largest) - math.log2(budget / 8)
+
+
 def precision_context(sources):
     # reserve guard bits for products and source cancellation over the input exponent span
     exponents = []

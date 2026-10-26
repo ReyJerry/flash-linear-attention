@@ -933,3 +933,399 @@ def test_chunk_numerics_invalid_margin():
         xs[2].fill_(math.nextafter(math.sqrt(1/.6), math.inf))
     with pytest.raises(ValueError, match='curvature/group_size'):
         run(manual, xs, 1, scale=1., chunk_size=1)
+
+
+def conditioning_fixture(family, key=1.3, dtype=torch.float32, length=1):
+    values = [2.**80 if family == 'query' else 1., key, .2*key, 1., -.2,
+              .1 if family == 'query' else 2.**80, .6 if family == 'query' else 0.]
+    if family == 'near_c0':
+        values[-1] = 2.**-164
+    shapes = [(1, length, 1, 1)]*3 + [(1, length, 1), (1, length, 1, 1), (1, 1, 1, 1), ()]
+    return tuple(torch.full(shape, value, dtype=dtype).requires_grad_() for value, shape in zip(values, shapes))
+
+
+def conditioning_truth(xs, mode):
+    cot = (torch.full_like(xs[2], .7), torch.full_like(xs[5], -.3))
+    if mode == 'output':
+        cot = cot[0], torch.zeros_like(cot[1])
+    elif mode == 'state':
+        cot = torch.zeros_like(cot[0]), cot[1]
+    low, raw_low = mp_canonical(xs, cot, 1, 160)
+    high, raw_high = mp_canonical(xs, cot, 1, 240)
+    for a, b in zip(low, high):
+        torch.testing.assert_close(a, b, atol=1e-70, rtol=1e-14)
+    return high, cot, (raw_low, raw_high)
+
+
+@pytest.mark.parametrize('family', ['query', 'state'])
+@pytest.mark.parametrize('key', [1.1, 1.3, 3., 7.])
+@pytest.mark.parametrize('mode', ['output', 'state', 'joint'])
+def test_chunk_endpoint_conditioning(family, key, mode):
+    xs = conditioning_fixture(family, key)
+    reference, cot, raw = conditioning_truth(xs, mode)
+    exact_state = xs[2].double() / xs[1].double()
+    torch.testing.assert_close(reference[1], exact_state, atol=0, rtol=1e-15)
+    for fn in (ordinary, manual):
+        xx, info = leaves(xs), {}
+        result = run(fn, xx, 1, chunk_size=16, scale=1., telemetry=info)
+        got = (*result, *vjp(result, xx, cot))
+        ROWS.append(dict(label='endpoint_conditioning', family=family, key=key, cotangent=mode,
+                         implementation=fn.__name__, telemetry=info, truth160=raw[0], truth240=raw[1],
+                         inputs_hex=[[float(v).hex() for v in x.detach().flatten()] for x in xs],
+                         metrics={n: metrics(a, b) for n, a, b in zip(NAMES, got, reference)}))
+        for name, actual, expected in zip(NAMES, got, reference):
+            torch.testing.assert_close(actual.double(), expected, **TOL32, msg=name)
+        for grad in got[-3:]:
+            torch.testing.assert_close(grad, torch.zeros_like(grad), atol=1e-8, rtol=0)
+        assert got[5].abs().max() > 0
+
+
+def check_conditioning(fn, xs, mode='joint', requested=tuple(range(7)), streaming=False, **options):
+    host = tuple(x.detach().cpu() for x in xs)
+    scale = options.get('scale', 1.)
+    truth_sources = (host[0].double() * scale, *host[1:])
+    reference, cot, raw = conditioning_truth(truth_sources, mode)
+    reference = (*reference[:2], reference[2] * scale, *reference[3:])
+    xx = tuple(x.detach().clone().requires_grad_(i in requested) for i, x in enumerate(xs))
+    info = {}
+    opts = dict(chunk_size=1, scale=1.)
+    opts.update(options)
+    if streaming:
+        state = xx[5]
+        outputs, backends = [], []
+        for t in range(xx[0].shape[1]):
+            output, state = fn(*(x[:, t:t+1] for x in xx[:5]), curvature=xx[6], initial_state=state,
+                               output_final_state=True, group_size=1, telemetry=info, **opts)
+            outputs.append(output)
+            backends.append(info['backend'])
+        info['streaming_backends'] = backends
+        result = torch.cat(outputs, 1), state
+    else:
+        result = fn(*xx[:5], curvature=xx[6], initial_state=xx[5], output_final_state=mode != 'output',
+                    group_size=1, telemetry=info, **opts)
+    used = (result[0],) if mode == 'output' else result
+    cc = tuple(c.to(r.device) for c, r in zip(cot, used))
+    grads = torch.autograd.grad(used, tuple(xx[i] for i in requested), cc)
+    indices = [0] + ([] if result[1] is None else [1]) + [i+2 for i in requested]
+    got = tuple(r for r in result if r is not None) + grads
+    for index, actual in zip(indices, got):
+        budget = TOL32 if actual.dtype == torch.float32 else TOL64
+        assert torch.isfinite(actual).all(), NAMES[index]
+        torch.testing.assert_close(actual.cpu().double(), reference[index], **budget, msg=NAMES[index])
+        if actual.is_cuda and actual.dtype == torch.float32:
+            from test_key_gated_hyperbolic_delta_rule import compare_tensor
+            compare_tensor(NAMES[index], actual, reference[index].to(actual.device), backward=index >= 2)
+    record = dict(label='endpoint_conditioning_neighbor', mode=mode, requested=requested, streaming=streaming,
+                  dtype=[str(x.dtype) for x in xs], telemetry=info, truth160=raw[0], truth240=raw[1],
+                  inputs_hex=[[float(v).hex() for v in x.detach().flatten()] for x in host],
+                  metrics={NAMES[i]: metrics(a.cpu(), reference[i]) for i, a in zip(indices, got)})
+    ROWS.append(record)
+    return info, record
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+@pytest.mark.parametrize('family', ['query', 'state', 'near_c0', 'target', 'beta0', 'near_beta1'])
+@pytest.mark.parametrize('mode', ['output', 'state', 'joint'])
+def test_chunk_endpoint_conditioning_neighbors(dtype, family, mode):
+    xs = list(conditioning_fixture('query' if family == 'query' else 'state', dtype=dtype, length=3))
+    with torch.no_grad():
+        if family == 'near_c0':
+            xs[5].fill_(2.**60)
+            xs[6].fill_(2.**-124)
+        elif family == 'target':
+            xs[1].fill_(2.**-20)
+            xs[2].fill_(.2)
+            xs[5].fill_(.1)
+        elif family in ('beta0', 'near_beta1'):
+            xs[5].fill_(2.**40)
+            xs[3].fill_(0. if family == 'beta0' else 1-torch.finfo(dtype).eps)
+    for fn in (ordinary, manual):
+        check_conditioning(fn, xs, mode, carry_mode='y_carry')
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+@pytest.mark.parametrize('streaming', [False, True])
+@pytest.mark.parametrize('requested', [(0,), (3,), (4, 5, 6), tuple(range(7))])
+def test_chunk_endpoint_conditioning_selective(dtype, streaming, requested):
+    xs = conditioning_fixture('state', key=1.1, dtype=dtype, length=3)
+    check_conditioning(manual, xs, 'joint', requested, streaming, carry_mode='y_carry')
+
+
+@pytest.mark.parametrize('source', ['query', 'state'])
+@pytest.mark.parametrize('outside', [False, True])
+def test_chunk_endpoint_conditioning_boundary(source, outside):
+    limit = (1e-10 / 8) / torch.finfo(torch.float64).eps
+    xs = list(conditioning_fixture('state', dtype=torch.float64))
+    with torch.no_grad():
+        xs[5].fill_(.1)
+        xs[0 if source == 'query' else 5].fill_((limit if source == 'query' else math.sqrt(limit))
+                                                * (1 + (1e-6 if outside else -1e-6)))
+    info, _ = check_conditioning(manual, xs)
+    assert bool(info['extended_subblocks']) == outside
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_chunk_endpoint_conditioning_output_scale(dtype):
+    xs = list(conditioning_fixture('query', dtype=dtype, length=3))
+    with torch.no_grad():
+        xs[0].fill_(1.)
+    for fn in (ordinary, manual):
+        info, _ = check_conditioning(fn, xs, scale=2.**80, carry_mode='y_carry')
+        assert info['extended_subblocks'] > 0
+
+
+@pytest.mark.parametrize('late_query', [False, True])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_chunk_endpoint_conditioning_late_readout(late_query, dtype):
+    xs = list(conditioning_fixture('state', key=1.3, dtype=dtype, length=5))
+    with torch.no_grad():
+        xs[3][:, 1:] = 0
+        if late_query:
+            xs[5].fill_(.1)
+            xs[0][:, -1] = 2.**80
+    for fn in (ordinary, manual):
+        info, _ = check_conditioning(fn, xs, chunk_size=2, carry_mode='y_carry')
+        assert all(p['precision'] == 'mpmath' for p in info['partition'])
+
+
+@pytest.mark.parametrize('curvature', [0., 2.**-124])
+def test_chunk_endpoint_conditioning_working_precision(curvature):
+    xs = list(conditioning_fixture('state', key=1.7))
+    with torch.no_grad():
+        xs[5].fill_(.2)
+        xs[6].fill_(curvature)
+    sources, options = MODULES['reference_chunk']._arguments(
+        *xs[:5], xs[6], xs[5], 1., None, 1, True, 16, 'no_carry', 'zero_detached', None, True, 0,
+    )
+    options.update(output_final_state=True, working_dtype=torch.float64)
+    info = {}
+    result = MODULES['reference_backward']._ManualChunk.apply(*sources, options, info, None)
+    reference, cot, _ = conditioning_truth(xs, 'joint')
+    got = (*result, *vjp(result, xs, cot))
+    for name, actual, expected in zip(NAMES, got, reference):
+        assert actual.dtype == torch.float32
+        torch.testing.assert_close(actual.double(), expected, **TOL32, msg=name)
+    for grad in got[-3:]:
+        torch.testing.assert_close(grad, torch.zeros_like(grad), atol=1e-8, rtol=0)
+    assert all(p['precision'] == 'torch.float64' for p in info['partition'])
+
+
+def cotangent_fixture(dtype=torch.float32, query_power=0):
+    xs = list(conditioning_fixture('query', key=1.1, dtype=dtype))
+    with torch.no_grad():
+        xs[0].fill_(2.**query_power)
+    return tuple(xs)
+
+
+def check_cotangent_accuracy(fn, xs, power, mode, **options):
+    co, cs = dict(output=(2.**power, 0.), state=(0., 2.**power), joint=(2.**power, 2.**power))[mode]
+    cot = torch.full_like(xs[2], co), torch.full_like(xs[5], cs)
+    host = tuple(x.detach().cpu() for x in xs)
+    truth160, raw160 = mp_canonical(host, tuple(x.cpu() for x in cot), 1, 160)
+    truth240, raw240 = mp_canonical(host, tuple(x.cpu() for x in cot), 1, 240)
+    for a, b in zip(truth160, truth240):
+        torch.testing.assert_close(a, b, atol=1e-70, rtol=1e-14)
+    info = {}
+    result = run(fn, xs, 1, chunk_size=16, scale=1., telemetry=info, **options)
+    got = (*result, *vjp(result, xs, cot))
+    ROWS.append(dict(label='cotangent_accuracy', power=power, mode=mode, telemetry=info,
+                     implementation=fn.__name__, inputs_hex=[[float(v).hex() for v in x.flatten()] for x in host],
+                     truth160=raw160, truth240=raw240,
+                     metrics={n: metrics(a.cpu(), b) for n, a, b in zip(NAMES, got, truth240)}))
+    for index, (actual, expected) in enumerate(zip(got, truth240)):
+        torch.testing.assert_close(actual.cpu().double(), expected, **(TOL32 if actual.dtype == torch.float32 else TOL64),
+                                   msg=NAMES[index])
+        if actual.is_cuda and actual.dtype == torch.float32:
+            from test_key_gated_hyperbolic_delta_rule import compare_tensor
+            compare_tensor(NAMES[index], actual, expected.to(actual.device), backward=index >= 2)
+    for grad in got[-3:]:
+        torch.testing.assert_close(grad, torch.zeros_like(grad), atol=1e-8, rtol=0)
+    assert got[5].abs().max() > 0
+    return info
+
+
+@pytest.mark.parametrize('fn', [ordinary, manual])
+@pytest.mark.parametrize('power', [0, 40, 80])
+@pytest.mark.parametrize('mode', ['output', 'state', 'joint'])
+def test_chunk_cotangent_accuracy(fn, power, mode):
+    check_cotangent_accuracy(fn, cotangent_fixture(), power, mode)
+
+
+def cotangent_general_compare(fn, xs, group_size=1, requested=tuple(range(7)), final=True, streaming=False):
+    xx = tuple(x.detach().clone().requires_grad_(i in requested) for i, x in enumerate(xs))
+    cot = (torch.full_like(xx[2], 2.**80), torch.full_like(xx[5], -2.**79 if final else 0.))
+    truths = [mp_canonical(tuple(x.detach().cpu() for x in xx), tuple(x.cpu() for x in cot), group_size, d)
+              for d in (160, 240)]
+    for a, b in zip(truths[0][0], truths[1][0]):
+        torch.testing.assert_close(a, b, atol=1e-70, rtol=1e-14)
+    info = {}
+    if streaming:
+        state, outputs = xx[5], []
+        for t in range(xx[0].shape[1]):
+            out, state = fn(*(x[:, t:t+1] for x in xx[:5]), curvature=xx[6], initial_state=state,
+                            output_final_state=True, group_size=group_size, scale=1., chunk_size=1, telemetry=info)
+            outputs.append(out)
+        result = torch.cat(outputs, 1), state
+    else:
+        result = fn(*xx[:5], curvature=xx[6], initial_state=xx[5], output_final_state=final, group_size=group_size,
+                    scale=1., chunk_size=2, carry_mode='y_carry', telemetry=info)
+    used = result if final else result[:1]
+    grads = torch.autograd.grad(used, tuple(xx[i] for i in requested), cot if final else cot[:1])
+    indices = [0] + ([1] if final else []) + [i+2 for i in requested]
+    got = (*used, *grads)
+    for i, actual in zip(indices, got):
+        expected = truths[1][0][i]
+        torch.testing.assert_close(actual.cpu().double(), expected, **(TOL32 if actual.dtype == torch.float32 else TOL64),
+                                   msg=NAMES[i])
+        if actual.is_cuda and actual.dtype == torch.float32:
+            from test_key_gated_hyperbolic_delta_rule import compare_tensor
+            compare_tensor(NAMES[i], actual, expected.to(actual.device), backward=i >= 2)
+    ROWS.append(dict(label='cotangent_general', group_size=group_size, requested=requested, final=final, streaming=streaming,
+                     telemetry=info, truth160=truths[0][1], truth240=truths[1][1],
+                     metrics={NAMES[i]: metrics(a.cpu(), truths[1][0][i]) for i, a in zip(indices, got)}))
+    return info
+
+
+@pytest.mark.parametrize('fn', [ordinary, manual])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+@pytest.mark.parametrize('power', [40, 80])
+def test_chunk_cotangent_rebalance(fn, dtype, power):
+    left = check_cotangent_accuracy(fn, cotangent_fixture(dtype), power, 'output')
+    right = check_cotangent_accuracy(fn, cotangent_fixture(dtype, power), 0, 'output')
+    assert left['backward_reprepared']
+    assert right['extended_subblocks'] > 0
+
+
+@pytest.mark.parametrize('fn', [ordinary, manual])
+@pytest.mark.parametrize('double_source', [None, 0, 6])
+@pytest.mark.parametrize('requested', [(0,), (3,), (4, 5, 6), tuple(range(7))])
+@pytest.mark.parametrize('final', [False, True])
+def test_chunk_cotangent_requested(fn, double_source, requested, final):
+    xs = tuple(x.double() if i == double_source else x for i, x in enumerate(cotangent_fixture()))
+    info = cotangent_general_compare(fn, xs, requested=requested, final=final)
+    assert info['backward_reprepared']
+    assert info['requested_source_gradients'] == [i in requested for i in range(7)]
+
+
+@pytest.mark.parametrize('fn', [ordinary, manual])
+@pytest.mark.parametrize('streaming', [False, True])
+def test_chunk_cotangent_multichunk(fn, streaming):
+    xs = list(conditioning_fixture('query', key=1.3, length=5))
+    with torch.no_grad():
+        xs[0].fill_(1.)
+    info = cotangent_general_compare(fn, xs, streaming=streaming)
+    assert info['backward_reprepared']
+    if not streaming:
+        assert info['backward_direct_FS'] == info['direct_FS']
+        assert len(info['carry_Fnext_owners']) == info['carry_edges']
+        assert info['shared_A_vjp'] == len(info['partition'])
+
+
+@pytest.mark.parametrize('fn', [ordinary, manual])
+def test_chunk_cotangent_grouped(fn):
+    xs = list(cotangent_fixture())
+    xs[2] = torch.cat((xs[2], torch.zeros(1, 1, 1, 31)), -1)
+    xs[5] = torch.cat((xs[5], torch.zeros(1, 1, 1, 31)), -1)
+    xs[6] = xs[6] * 32
+    info = cotangent_general_compare(fn, xs, group_size=32)
+    assert info['backward_reprepared']
+
+
+@pytest.mark.parametrize('power', [0, 40, 80])
+@pytest.mark.parametrize('fn', [ordinary, manual])
+def test_chunk_cotangent_alias(fn, power):
+    xs = list(cotangent_fixture())
+    xs[0] = xs[1]
+    cot = (torch.full_like(xs[2], 2.**power), torch.zeros_like(xs[5]))
+    reference, _ = mp_canonical(tuple(x.detach() for x in xs), cot, 1, 240)
+    result = run(fn, xs, 1, chunk_size=16, scale=1.)
+    grads = torch.autograd.grad(result, xs[1:], cot)
+    expected = (reference[2]+reference[3], *reference[4:])
+    for a, b in zip(grads, expected):
+        torch.testing.assert_close(a.double(), b, **TOL32)
+    if power:
+        torch.testing.assert_close(grads[0], torch.zeros_like(grads[0]), atol=1e-8, rtol=0)
+
+
+def test_chunk_cotangent_native_higher_order(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Normal ordinary AD must not execute manual backward.')
+    monkeypatch.setattr(MODULES['reference_backward'], '_backward', forbidden)
+    xs = list(cotangent_fixture(torch.float64))
+    with torch.no_grad():
+        xs[3].fill_(.7)
+    assert torch.autograd.gradgradcheck(lambda *xx: run(ordinary, xx, 1, chunk_size=1, scale=1., gauge='none'),
+                                        tuple(xs), **GRADCHECK)
+
+
+def test_chunk_cotangent_exception_higher_order():
+    xs = cotangent_fixture(torch.float64)
+    result = run(ordinary, xs, 1, chunk_size=16, scale=1.)
+    with pytest.raises(RuntimeError, match='Cotangent-accuracy replay supports first-order'):
+        torch.autograd.grad(result[0].sum() * 2.**80, xs, create_graph=True)
+
+
+@pytest.mark.parametrize('fn', [ordinary, manual])
+def test_chunk_cotangent_checkpoint(fn):
+    xs = make(T=5, K=2, V=2, g=1, dtype=torch.float64)
+    info = {}
+    result = run(fn, xs, 1, chunk_size=2, scale=1., carry_mode='y_carry', telemetry=info)
+    cot = tuple(torch.full_like(x, 2.**40) for x in result)
+    expected = torch.autograd.grad(result, xs, cot)
+    xx, replay_info = leaves(xs), {}
+    replayed = checkpoint(lambda *z: run(fn, z, 1, chunk_size=2, scale=1., carry_mode='y_carry',
+                                         telemetry=replay_info, execution_plan=info['execution_plan']), *xx, use_reentrant=False)
+    actual = torch.autograd.grad(replayed, xx, cot)
+    for a, b in zip(actual, expected):
+        torch.testing.assert_close(a, b, atol=0, rtol=0)
+    assert replay_info['execution_plan'] == info['execution_plan']
+    assert replay_info['backward_reprepare_partition'] == info['backward_reprepare_partition']
+
+
+@pytest.mark.parametrize('fn', [ordinary, manual])
+def test_chunk_cotangent_reprepare_original_sources(fn, monkeypatch):
+    import mpmath
+
+    xs = cotangent_fixture()
+    info = {}
+    result = run(fn, xs, 1, chunk_size=16, scale=1., telemetry=info)
+    expected, _ = mp_canonical(xs, (torch.full_like(result[0], 2.**80), torch.zeros_like(result[1])), 1, 240)
+    original = MODULES['reference_chunk']._prepare_common
+    calls = []
+
+    def prepare(q, k, beta, ell):
+        assert isinstance(k, MODULES['reference_arithmetic'].MPArray)
+        assert float(k[0, 0]) == xs[1].item()
+        calls.append(k.ctx.prec)
+        return original(q, k, beta, ell)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Generic AD/differentiation is forbidden inside replay/manual backward.')
+
+    monkeypatch.setattr(MODULES['reference_chunk'], '_prepare_common', prepare)
+    monkeypatch.setattr(torch.autograd, 'grad', forbidden)
+    monkeypatch.setattr(mpmath.ctx_mp.MPContext, 'diff', forbidden)
+    (result[0].sum()*2.**80).backward()
+    assert len(calls) == len(info['partition'])
+    for name, source, reference in zip(NAMES[2:], xs, expected[2:]):
+        torch.testing.assert_close(source.grad.double(), reference, **TOL32, msg=name)
+    assert info['backward_reprepared']
+
+
+@pytest.mark.parametrize('gauge', ['none', 'fixed', 'zero_live', 'zero_detached'])
+def test_chunk_cotangent_replay_options(gauge):
+    xs = list(conditioning_fixture('query', key=1.3, dtype=torch.float64, length=3))
+    with torch.no_grad():
+        xs[0].fill_(1.)
+    cot = (torch.full_like(xs[2], 2.**40), torch.full_like(xs[5], 2.**40))
+    reference, _ = mp_canonical(xs, cot, 1, 240)
+    fixed = torch.tensor([.8, 1.2, 2.], dtype=torch.float64).reshape(1, 3, 1, 1) if gauge == 'fixed' else None
+    info = {}
+    result = run(manual, xs, 1, chunk_size=2, scale=1., carry_mode='y_carry', gauge=gauge, gauge_values=fixed,
+                 feedback_precomposition=False, reanchor_interval=1, telemetry=info)
+    got = (*result, *vjp(result, xs, cot))
+    for name, actual, expected in zip(NAMES, got, reference):
+        torch.testing.assert_close(actual, expected, **TOL64, msg=name)
+    assert info['backward_reprepared']
+    assert info['backward_direct_FS'] == info['direct_FS']
+    assert info['carry_Fnext_owners'] == []

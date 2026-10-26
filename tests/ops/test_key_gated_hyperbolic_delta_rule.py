@@ -339,3 +339,215 @@ def record_device_metrics(monkeypatch, request):
         original(name, actual, expected, backward)
 
     monkeypatch.setitem(globals(), 'compare_tensor', recorded)
+
+
+def record_conditioning(row):
+    import json
+    import os
+    from pathlib import Path
+
+    destination = os.environ.get('KHDN_CONDITIONING_DEVICE_EVIDENCE')
+    if destination:
+        with Path(destination).open('a') as stream:
+            stream.write(json.dumps(row, allow_nan=False) + '\n')
+
+
+@pytest.mark.parametrize('family', ['query', 'state'])
+@pytest.mark.parametrize('key', [1.1, 1.3, 3., 7.])
+@pytest.mark.parametrize('mode', ['output', 'state', 'joint'])
+def test_chunk_endpoint_conditioning(family, key, mode):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import check_conditioning, conditioning_fixture
+
+    xs = tuple(x.detach().to(device) for x in conditioning_fixture(family, key))
+    info, row = check_conditioning(ops.chunk_key_gated_hyperbolic_delta_rule, xs, mode, chunk_size=16)
+    record_conditioning(row)
+    assert info['backend'] == 'host_reviewed_chunk_exception'
+    assert info['host_details']['extended_subblocks'] > 0
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+@pytest.mark.parametrize('family', ['near_c0', 'target', 'beta0', 'near_beta1'])
+@pytest.mark.parametrize('streaming', [False, True])
+def test_chunk_endpoint_conditioning_neighbors(dtype, family, streaming):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import check_conditioning, conditioning_fixture
+
+    xs = list(conditioning_fixture('state', key=1.7, dtype=dtype, length=3))
+    with torch.no_grad():
+        if family == 'near_c0':
+            xs[5].fill_(2.**60)
+            xs[6].fill_(2.**-124)
+        elif family == 'target':
+            xs[1].fill_(2.**-20)
+            xs[2].fill_(.2)
+            xs[5].fill_(.1)
+        else:
+            xs[5].fill_(2.**40)
+            xs[3].fill_(0. if family == 'beta0' else 1-torch.finfo(dtype).eps)
+    xs = tuple(x.detach().to(device) for x in xs)
+    info, row = check_conditioning(ops.chunk_key_gated_hyperbolic_delta_rule, xs, streaming=streaming, carry_mode='y_carry')
+    record_conditioning(row)
+    assert info.get('streaming_backends', [info['backend']])[0] == 'host_reviewed_chunk_exception'
+    if streaming and family == 'near_beta1':
+        assert info['streaming_backends'][-1] == 'triton_chunk'
+
+
+@pytest.mark.parametrize('source', ['query', 'state'])
+@pytest.mark.parametrize('outside', [False, True])
+def test_chunk_endpoint_conditioning_boundary(source, outside):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import check_conditioning, conditioning_fixture
+
+    limit = (1e-10 / 8) / torch.finfo(torch.float64).eps
+    xs = list(conditioning_fixture('state', dtype=torch.float64))
+    with torch.no_grad():
+        xs[5].fill_(.1)
+        xs[0 if source == 'query' else 5].fill_((limit if source == 'query' else math.sqrt(limit))
+                                                * (1 + (1e-6 if outside else -1e-6)))
+    xs = tuple(x.detach().to(device) for x in xs)
+    info, row = check_conditioning(ops.chunk_key_gated_hyperbolic_delta_rule, xs)
+    record_conditioning(row)
+    assert (info['backend'] == 'host_reviewed_chunk_exception') == outside
+
+
+@pytest.mark.parametrize('requested', [(0,), (3,), (4, 5, 6), tuple(range(7))])
+@pytest.mark.parametrize('double_source', [0, 5, 6])
+def test_chunk_endpoint_conditioning_selective(requested, double_source):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import check_conditioning, conditioning_fixture
+
+    xs = tuple(x.detach().to(device=device, dtype=torch.float64 if i == double_source else x.dtype)
+               for i, x in enumerate(conditioning_fixture('state', length=3)))
+    info, row = check_conditioning(ops.chunk_key_gated_hyperbolic_delta_rule, xs, requested=requested, carry_mode='y_carry')
+    record_conditioning(row)
+    assert info['backend'] == 'host_reviewed_chunk_exception'
+
+
+@pytest.mark.parametrize('group_size', [1, 32])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_chunk_endpoint_conditioning_retained_witness(group_size, dtype):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import TOL32, TOL64, oracle, run, witness
+
+    host = witness(group_size, dtype)
+    reference_sources = tuple(x.detach().double().requires_grad_() for x in host)
+    reference = run(oracle, reference_sources, group_size, scale=1.)
+    xs = tuple(x.detach().to(device).requires_grad_() for x in host)
+    info = {}
+    result = run(ops.chunk_key_gated_hyperbolic_delta_rule, xs, group_size, chunk_size=32,
+                 carry_mode='y_carry', scale=1., telemetry=info)
+    cot = tuple(torch.full_like(x, .7) for x in result)
+    got = (*result, *torch.autograd.grad(result, xs, cot))
+    want = (*reference, *torch.autograd.grad(reference, reference_sources, tuple(x.cpu().double() for x in cot)))
+    for actual, expected in zip(got, want):
+        torch.testing.assert_close(actual.cpu().double(), expected, **(TOL32 if dtype == torch.float32 else TOL64))
+    assert info['backend'] == 'host_reviewed_chunk_exception'
+    parts = info['host_details']['partition']
+    assert [p['stop']-p['start'] for p in parts] == [4]*8
+    assert all(p['precision'] == 'torch.float64' for p in parts)
+    record_conditioning(dict(label='retained_witness', group_size=group_size, dtype=str(dtype), telemetry=info))
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_chunk_endpoint_conditioning_output_scale(dtype):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import check_conditioning, conditioning_fixture
+
+    xs = list(conditioning_fixture('query', dtype=dtype, length=3))
+    with torch.no_grad():
+        xs[0].fill_(1.)
+    xs = tuple(x.detach().to(device) for x in xs)
+    info, row = check_conditioning(ops.chunk_key_gated_hyperbolic_delta_rule, xs, scale=2.**80, carry_mode='y_carry')
+    record_conditioning(row)
+    assert info['backend'] == 'host_reviewed_chunk_exception'
+
+
+@pytest.mark.parametrize('late_query', [False, True])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_chunk_endpoint_conditioning_late_readout(late_query, dtype):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import check_conditioning, conditioning_fixture
+
+    xs = list(conditioning_fixture('state', key=1.3, dtype=dtype, length=5))
+    with torch.no_grad():
+        xs[3][:, 1:] = 0
+        if late_query:
+            xs[5].fill_(.1)
+            xs[0][:, -1] = 2.**80
+    xs = tuple(x.detach().to(device) for x in xs)
+    info, row = check_conditioning(ops.chunk_key_gated_hyperbolic_delta_rule, xs, chunk_size=2, carry_mode='y_carry')
+    record_conditioning(row)
+    assert all(p['precision'] == 'mpmath' for p in info['host_details']['partition'])
+
+
+@pytest.mark.parametrize('route', ['device', 'host'])
+@pytest.mark.parametrize('power', [0, 40, 80])
+@pytest.mark.parametrize('mode', ['output', 'state', 'joint'])
+def test_chunk_cotangent_accuracy(route, power, mode):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import check_cotangent_accuracy, cotangent_fixture
+
+    from fla.ops.key_gated_hyperbolic_delta_rule.chunk import _host_call
+
+    xs = tuple(x.detach().to(device).requires_grad_() for x in cotangent_fixture())
+    fn = ops.chunk_key_gated_hyperbolic_delta_rule
+    if route == 'host':
+        def fn(q, k, v, beta, ell, curvature, initial_state, telemetry, **kwargs):
+            return _host_call((q, k, v, beta, ell, initial_state, curvature),
+                              dict(bounds=[0, 1], scale=1., g=1, c=16, final=True, carry='no_carry'), telemetry)
+    info = check_cotangent_accuracy(fn, xs, power, mode)
+    record_conditioning(dict(label='cotangent_accuracy', route=route, power=power, mode=mode, telemetry=info))
+
+
+@pytest.mark.parametrize('double_source', [None, 0, 6])
+@pytest.mark.parametrize('requested', [(0,), (3,), (4, 5, 6), tuple(range(7))])
+@pytest.mark.parametrize('final', [False, True])
+def test_chunk_cotangent_requested(double_source, requested, final):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import cotangent_fixture, cotangent_general_compare
+
+    xs = tuple(x.detach().to(device=device, dtype=torch.float64 if i == double_source else x.dtype)
+               for i, x in enumerate(cotangent_fixture()))
+    info = cotangent_general_compare(ops.chunk_key_gated_hyperbolic_delta_rule, xs, requested=requested, final=final)
+    assert info['backward_host_details']['backward_reprepared']
+    record_conditioning(dict(label='cotangent_requested', requested=requested, final=final, telemetry=info))
+
+
+@pytest.mark.parametrize('power', [40, 80])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_chunk_cotangent_rebalance(power, dtype):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import check_cotangent_accuracy, cotangent_fixture
+
+    for query_power, cot_power in [(0, power), (power, 0)]:
+        xs = tuple(x.detach().to(device).requires_grad_() for x in cotangent_fixture(dtype, query_power))
+        info = check_cotangent_accuracy(ops.chunk_key_gated_hyperbolic_delta_rule, xs, cot_power, 'output')
+        if cot_power:
+            assert info['backend'] == 'triton_chunk'
+            assert info['backward_exception_reason'] == 'cotangent_accuracy'
+            assert info['backward_host_details']['backward_reprepared']
+        else:
+            assert info['backend'] == 'host_reviewed_chunk_exception'
+        record_conditioning(dict(label='cotangent_rebalance', query_power=query_power, cot_power=cot_power, telemetry=info))
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_chunk_cotangent_multichunk(streaming):
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import conditioning_fixture, cotangent_general_compare
+
+    xs = list(conditioning_fixture('query', key=1.3, length=5))
+    with torch.no_grad():
+        xs[0].fill_(1.)
+    xs = tuple(x.detach().to(device) for x in xs)
+    info = cotangent_general_compare(ops.chunk_key_gated_hyperbolic_delta_rule, xs, streaming=streaming)
+    assert info['backward_host_details']['backward_reprepared']
+    record_conditioning(dict(label='cotangent_multichunk', streaming=streaming, telemetry=info))
+
+
+def test_chunk_cotangent_grouped():
+    from test_key_gated_hyperbolic_delta_rule_chunk_reference import cotangent_fixture, cotangent_general_compare
+
+    xs = list(cotangent_fixture())
+    xs[2] = torch.cat((xs[2], torch.zeros(1, 1, 1, 31)), -1)
+    xs[5] = torch.cat((xs[5], torch.zeros(1, 1, 1, 31)), -1)
+    xs[6] = xs[6] * 32
+    xs = tuple(x.detach().to(device) for x in xs)
+    info = cotangent_general_compare(ops.chunk_key_gated_hyperbolic_delta_rule, xs, group_size=32)
+    assert info['backward_host_details']['backward_reprepared']
+    record_conditioning(dict(label='cotangent_grouped', telemetry=info))
+
+
+def test_chunk_cotangent_normal_long():
+    sources, cu = make_case(2048, 128, 128, 32, torch.float32)
+    compare_case('chunk_key_gated_hyperbolic_delta_rule', sources, cu, 32, 32, 'y_carry')

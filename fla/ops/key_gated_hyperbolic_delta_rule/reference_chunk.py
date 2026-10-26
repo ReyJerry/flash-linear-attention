@@ -23,6 +23,8 @@ from fla.ops.key_gated_hyperbolic_delta_rule.reference_arithmetic import (
     extended,
     like,
     precision_context,
+    source_roundoff_bits,
+    source_roundoff_reason,
     tensor,
 )
 
@@ -242,6 +244,7 @@ def _probe(q, k, v, beta, ell, c, g, dtype, gauge, fixed):
 
 def _plan_head(q, k, v, beta, ell, state, c, g, chunk_size, dtype, gauge, fixed, output_scale):
     result = []
+    cancellation_bits = source_roundoff_bits(q, k, v, state, output_scale)
     radius = 0.0
     if c.item() > 0:
         groups = state.reshape(state.shape[0], -1, g).transpose(0, 1).flatten(1)
@@ -252,7 +255,8 @@ def _plan_head(q, k, v, beta, ell, state, c, g, chunk_size, dtype, gauge, fixed,
         bound = _input_bound(k[start:end], v[start:end], beta[start:end], c, g, dtype, fx, radius)
         bound['requested_amplitude_bits'] = bound['amplitude_bits']
         bound['requested_inverse_bound_bits'] = bound['inverse_bound_bits']
-        reasons = list(bound['reasons'])
+        bound['state_readout_source_bits'] = cancellation_bits
+        reasons = list(bound['reasons']) + list(source_roundoff_reason(cancellation_bits, dtype))
         maximum = max(x.detach().abs().max().item() for x in (k[start:end], v[start:end], state, c))
         source_bits = math.log2(maximum) if maximum else 0.
         qmax = q[start:end].detach().abs().max().item()
@@ -280,6 +284,8 @@ def _plan_head(q, k, v, beta, ell, state, c, g, chunk_size, dtype, gauge, fixed,
                 strict = _input_bound(k[pos:stop], v[pos:stop], beta[pos:stop], c, g, torch.float64, fx, radius)
                 strict['requested_amplitude_bits'] = bound['amplitude_bits']
                 strict['requested_inverse_bound_bits'] = bound['inverse_bound_bits']
+                strict['state_readout_source_bits'] = cancellation_bits
+                strict['reasons'] += source_roundoff_reason(cancellation_bits, torch.float64)
                 if source_bits > 200:
                     strict['reasons'] += ('source_amplitude_range',)
                 if query_bits + math.log2(torch.finfo(torch.float64).eps) > math.log2(1e-10 / 8):
@@ -302,6 +308,7 @@ def _plan_head(q, k, v, beta, ell, state, c, g, chunk_size, dtype, gauge, fixed,
                                       None if fixed is None else fixed[pos:stop], radius)
                 strict['requested_amplitude_bits'] = bound['amplitude_bits']
                 strict['requested_inverse_bound_bits'] = bound['inverse_bound_bits']
+                strict['state_readout_source_bits'] = cancellation_bits
                 result.append((pos, stop, 'mpmath', True, tuple(dict.fromkeys([*reasons, last_error])), strict))
                 pos = stop
     return result
@@ -401,7 +408,7 @@ def _arguments(q, k, v, beta, log_decay, curvature, initial_state, scale, cu_seq
     return (q, k, v, beta, log_decay, state, c), options
 
 
-def _execute(sources, options, telemetry, execution_plan=None):
+def _execute(sources, options, telemetry, execution_plan=None, replay=None):
     q, k, v, beta, ell, s0, c = sources
     B, T, H, K = q.shape
     V, g = v.shape[-1], options['group_size']
@@ -414,15 +421,18 @@ def _execute(sources, options, telemetry, execution_plan=None):
         raise ValueError('Frozen execution_plan has the wrong sequence/head count.')
     direct_fs = carry_edges = 0
     plan_index = 0
-    mp_context = None
+    mp_context = None if replay is None else replay[1]
     for seq, (bos, eos) in enumerate(zip(options['bounds'], options['bounds'][1:])):
         output_heads, final_heads = [], []
         for head in range(H):
             x = [z[bos:eos, head] for z in flat]
             fx = None if fixed is None else fixed[bos:eos, head]
-            with torch.no_grad():
-                plan = _plan_head(*x, s0[seq, head], c, g, options['chunk_size'], options['dtype'], options['gauge'],
-                                  fx, options['scale'])
+            if replay is None:
+                with torch.no_grad():
+                    plan = _plan_head(*x, s0[seq, head], c, g, options['chunk_size'],
+                                      options.get('working_dtype', options['dtype']), options['gauge'], fx, options['scale'])
+            else:
+                plan = replay[0][plan_index]['plan']
             if any(row[2] == 'mpmath' for row in plan):
                 if torch.is_grad_enabled():
                     from fla.ops.key_gated_hyperbolic_delta_rule.reference_backward import _ManualChunk
@@ -444,6 +454,7 @@ def _execute(sources, options, telemetry, execution_plan=None):
             plan_index += 1
             prepared = []
             for start, stop, precision, fallback, reasons, bound in plan:
+                precision = precision if replay is None else 'mpmath'
                 dt = torch.float64 if precision == 'torch.float64' else torch.float32
                 xx = [extended(z[start:stop], mp_context) if precision == 'mpmath' else z[start:stop].to(dt) for z in x]
                 p = _prepare_common(xx[0] * options['scale'], xx[1], xx[3], xx[4])
@@ -473,14 +484,17 @@ def _execute(sources, options, telemetry, execution_plan=None):
                 carry_edges += int(outgoing)
                 head_tape.append(tape)
                 y = next_y if outgoing else None
-                output_chunks.append(tensor(output, q.dtype))
+                if replay is None:
+                    output_chunks.append(tensor(output, q.dtype))
             output_heads.append(torch.cat(output_chunks) if output_chunks else v.new_empty((0, V)))
-            if options['output_final_state']:
+            if options['output_final_state'] and replay is None:
                 final_heads.append(tensor(state, options['dtype']))
-            tapes.append(dict(sequence=seq, head=head, bos=bos, eos=eos, blocks=head_tape))
+            tapes.append(dict(sequence=seq, head=head, bos=bos, eos=eos, blocks=head_tape, plan=plan))
         output_sequences.append(torch.stack(output_heads, dim=1))
-        if options['output_final_state']:
+        if options['output_final_state'] and replay is None:
             final_sequences.append(torch.stack(final_heads))
+    if replay is not None:
+        return None, None, tapes
     anchor = sum(x.reshape(-1)[:0].sum() for x in sources)
     output = (torch.cat(output_sequences).reshape(B, T, H, V) + anchor).to(q.dtype)
     final = torch.stack(final_sequences) + anchor if options['output_final_state'] else None
@@ -538,5 +552,8 @@ def naive_chunk_key_gated_hyperbolic_delta_rule(
                                   feedback_precomposition, reanchor_interval)
     options['output_final_state'] = output_final_state
     with torch.autocast(device_type='cpu', enabled=False):
-        output, final, _ = _execute(sources, options, telemetry, execution_plan)
+        output, final, tapes = _execute(sources, options, telemetry, execution_plan)
+        if torch.is_grad_enabled() and tapes and any(x.requires_grad for x in sources):
+            from fla.ops.key_gated_hyperbolic_delta_rule.reference_backward import _OrdinaryCotangent
+            output, final = _OrdinaryCotangent.apply(output, final, *sources, options, tapes, telemetry)
     return output, final

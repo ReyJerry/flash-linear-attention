@@ -18,6 +18,7 @@ import torch
 from fla.ops.key_gated_hyperbolic_delta_rule.reference_arithmetic import (
     MPArray,
     arithmetic,
+    cotangent_precision_bits,
     extended,
     like,
     precision_context,
@@ -202,7 +203,29 @@ def _reverse_common(p, shared):
     return gq, gk, gb, gate
 
 
+def _replay_demand(tapes, sources, options, go, gs):
+    demand = cotangent_precision_bits(sources, options['scale'], go, gs, options.get('working_dtype', options['dtype']))
+    precisions = [b['p']['k'].ctx.prec if isinstance(b['p']['k'], MPArray) else
+                  (24 if b['p']['k'].dtype == torch.float32 else 53) for t in tapes for b in t['blocks']]
+    return demand, bool(precisions) and demand > min(precisions)
+
+
 def _backward(tapes, sources, options, go, gs, telemetry, needs_input_grad=None):
+    demand, rebuild = _replay_demand(tapes, sources, options, go, gs)
+    if rebuild:
+        precision_sources = (*sources, go, gs, torch.tensor(options['scale'], dtype=torch.float64))
+        if options['gauge_values'] is not None:
+            precision_sources += (options['gauge_values'],)
+        context = precision_context(precision_sources)
+        context.prec = max(context.prec, math.ceil(demand) + 32,
+                           *(b['p']['k'].ctx.prec for t in tapes for b in t['blocks'] if isinstance(b['p']['k'], MPArray)))
+        with torch.no_grad(), torch.autocast(device_type='cpu', enabled=False):
+            _, _, tapes = _execute(sources, options, None, replay=(tapes, context))
+    if telemetry is not None:
+        telemetry.update(backward_reprepared=rebuild, backward_required_bits=demand if math.isfinite(demand) else None,
+                         backward_reprepare_precision_bits=context.prec if rebuild else None,
+                         backward_reprepare_partition=[[(b['start'], b['stop'], b['direct'], b['outgoing'])
+                                                        for b in t['blocks']] for t in tapes] if rebuild else None)
     B, T, H, K = sources[0].shape
     V, g = sources[2].shape[-1], options['group_size']
     # flattened accumulators must be views even when the source has noncontiguous strides
@@ -287,6 +310,34 @@ def _backward(tapes, sources, options, go, gs, telemetry, needs_input_grad=None)
                          backward_cotangent_promotion=scaled_subnormal,
                          backward_extended_precision_bits=None if mp_context is None else mp_context.prec)
     return tuple(results)
+
+
+class _OrdinaryCotangent(torch.autograd.Function):
+    """Keep native AD edges unless the actual adjoint requires original-source replay."""
+
+    @staticmethod
+    def forward(ctx, output, final, q, k, v, beta, ell, state, c, options, tapes, telemetry):
+        ctx.save_for_backward(q, k, v, beta, ell, state, c)
+        ctx.options, ctx.tapes, ctx.telemetry = options, tapes, telemetry
+        ctx.set_materialize_grads(False)
+        return output, final
+
+    @staticmethod
+    def backward(ctx, output_grad, final_grad):
+        sources = ctx.saved_tensors
+        go = torch.zeros_like(sources[2]) if output_grad is None else output_grad
+        gs = torch.zeros_like(sources[5]) if final_grad is None else final_grad
+        _, rebuild = _replay_demand(ctx.tapes, sources, ctx.options, go, gs)
+        if not rebuild:
+            return output_grad, final_grad, *([None] * 10)
+        if torch.is_grad_enabled():
+            raise RuntimeError(
+                'Cotangent-accuracy replay supports first-order gradients only; double backward is not supported.')
+        with torch.no_grad(), torch.autocast(device_type='cpu', enabled=False):
+            grads = _backward(ctx.tapes, sources, ctx.options, go, gs, ctx.telemetry, ctx.needs_input_grad[2:9])
+        if ctx.telemetry is not None:
+            ctx.telemetry['ordinary_entry_cotangent_manual'] = True
+        return None, None, *grads, None, None, None
 
 
 class _ManualChunk(torch.autograd.Function):

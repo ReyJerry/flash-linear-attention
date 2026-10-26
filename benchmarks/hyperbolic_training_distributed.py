@@ -31,7 +31,14 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
-from benchmarks.hyperbolic_benchmark_utils import environment, metadata, summarize, write_json
+from benchmarks.hyperbolic_benchmark_utils import (
+    KHDNExceptionGuard,
+    KHDNTrace,
+    environment,
+    metadata,
+    summarize,
+    write_json,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_CLASSES = {
@@ -55,9 +62,9 @@ def audit_methods():
     for name in METHOD_NAMES + EXTRA_METHOD_NAMES:
         available, reason = True, 'Native source present; actual CUDA forward/backward route must be attested at runtime.'
         if name.startswith('khdn_') and name != 'khdn_naive':
-            available = False
-            reason = ('Optimized chunk symbol exported, but kernel/carry attestation is missing; timing remains blocked.' if optimized else
-                      'optimized chunk_key_gated_hyperbolic_delta_rule is absent; no naive fallback is permitted')
+            available = optimized
+            reason = ('Strict FP64 SIMT source present; explicit opt-in and actual operator/autograd/compiled-launch gates required.'
+                      if optimized else 'optimized chunk_key_gated_hyperbolic_delta_rule is absent; no naive fallback is permitted')
         if name == 'gdn2':
             available = False
             reason = 'GDN2 layer and ops exist, but no native GDN2 CausalLM/config exists; full-model baseline unavailable'
@@ -704,27 +711,94 @@ def observe_key_gates(model, name):
             hook.remove()
 
 
+def khdn_batch_layout(inputs):
+    """Derive the exact consumed token domain using the layer's explicit-packed-before-mask convention."""
+    tokens = inputs['input_ids']
+    if tokens.ndim != 2:
+        raise AssertionError('KHDN input batch shape must be [B,T]')
+    batch, length = tokens.shape
+    cu, mask = inputs.get('cu_seqlens'), inputs.get('attention_mask')
+    if cu is not None:
+        if batch != 1 or cu.ndim != 1 or cu.numel() < 2 or cu.dtype not in (torch.int32, torch.int64):
+            raise AssertionError('KHDN packed batch has invalid sequence boundaries')
+        bounds = cu.detach().cpu().tolist()
+        if bounds[0] != 0 or bounds[-1] != length or any(a > b for a, b in zip(bounds, bounds[1:])):
+            raise AssertionError('KHDN packed sequence boundaries do not cover the actual batch')
+        shape, layout = [batch, length], 'explicit_packed'
+    elif mask is not None:
+        if mask.ndim != 2 or mask.shape[0] != batch or mask.shape[1] < length:
+            raise AssertionError('KHDN padding mask shape differs from actual batch')
+        valid = mask[:, -length:]
+        if not bool(((valid == 0) | (valid == 1)).all()):
+            raise AssertionError('KHDN padding mask must identify binary valid token positions')
+        counts = valid.to(torch.int64).sum(-1).detach().cpu()
+        bounds = [0, *counts.cumsum(0).tolist()]
+        shape, layout = [1, bounds[-1]], 'unpadded'
+    else:
+        shape, bounds, layout = [batch, length], [i * length for i in range(batch + 1)], 'dense'
+    return {'layout': layout, 'input_batch_shape': [batch, length], 'operator_batch_time': shape,
+            'consumed_tokens': shape[0] * shape[1], 'sequence_bounds': bounds}
+
+
+def attest_khdn_batch(calls, expected):
+    for row in calls:
+        if row.get('sequence_bounds') != expected['sequence_bounds']:
+            raise AssertionError('KHDN observed sequence boundaries differ from actual batch token domain')
+        for key in ('q', 'k', 'v', 'beta', 'log_decay'):
+            shape = row.get('sources', {}).get(key, {}).get('shape', [])
+            if shape[:2] != expected['operator_batch_time']:
+                raise AssertionError(f'KHDN observed {key} B/T shape differs from actual batch token domain')
+        executed = row.get('executed_sources', [])
+        if len(executed) != 7 or any(value.get('shape', [])[:2] != expected['operator_batch_time'] for value in executed[:5]):
+            raise AssertionError('KHDN executed source B/T shape differs from actual batch token domain')
+    return expected
+
+
 def trace_route(model, batch, args, name, benchmark):
     started = time.perf_counter()
     model.zero_grad(set_to_none=True)
-    if name.startswith('khdn_') and name != 'khdn_naive':
-        raise RuntimeError('KHDN optimized carry dispatch/kernel attestation is not implemented; route remains blocked')
-    context = (NativeTrainingTrace(name) if name in ('kda', 'comba') else
+    strict = name in ('khdn_no_carry', 'khdn_y_carry')
+    context = (KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
+                         model.config.num_hidden_layers) if strict else NativeTrainingTrace(name) if name in ('kda', 'comba') else
                benchmark.GDNBackendTrace() if name == 'gdn' else
                contextlib.nullcontext() if name == 'khdn_naive' else benchmark.KernelTrace())
-    with context as trace, observe_key_gates(model, name) as gates:
+    if strict:
+        expected_layout = khdn_batch_layout(batch.inputs)
+        context.bind_model(model)
+    with context as trace, observe_key_gates(model, name if not strict else '') as gates:
         loss = weighted_loss(model, batch, args, max(1, batch.valid_labels), 1)
         loss.backward()
         torch.cuda.synchronize()
-    if name == 'khdn_naive':
+    if strict:
+        route = trace.attest()
+        try:
+            route['actual_token_domain'] = attest_khdn_batch(trace.calls, expected_layout)
+        except AssertionError as error:
+            error.khdn_evidence = trace.calls
+            raise
+        expected = (model.config.num_heads, model.config.head_dim)
+        if any(tuple(row['sources']['q']['shape'][-2:]) != expected
+               or row['sources']['v']['shape'][-1] != model.config.head_dim for row in trace.calls):
+            raise AssertionError('KHDN observed head dimensions differ from the actual configured model')
+        replay_layers = {row['layer'] for row in trace.calls
+                         if 'recompute_fn' in row.get('checkpoint_frames', [])
+                         or row.get('forward_interrupted') == '_StopRecomputationError'}
+        if (not args.no_layer_checkpoint and replay_layers != set(trace.layer_names)
+                or args.no_layer_checkpoint and replay_layers):
+            raise AssertionError('KHDN observed outer checkpoint replay differs from requested per-layer policy')
+        route['actual_model_config'] = model.config.to_dict()
+        route['actual_batch_shape'] = list(batch.inputs['input_ids'].shape)
+    elif name == 'khdn_naive':
         route = {'route': 'explicit naive recurrent; correctness only; GPU performance NOT ACCEPTED'}
     elif name in ('kda', 'comba'):
         route = trace.attest()
     else:
         route = benchmark.attest_training(name, trace.records())
+    if not torch.isfinite(loss.detach()):
+        raise AssertionError('Non-finite route-gate loss')
     route.update(loss=float(loss.detach()), gradient_l2=benchmark.gradient_health(model),
                  effective_loss_backend=effective_loss_backend(args, name))
-    if name.startswith('khdn_'):
+    if name.startswith('khdn_') and not strict:
         if not gates:
             raise AssertionError('KHDN gate projection was not observed')
         route['key_gate_observations'] = gates
@@ -775,6 +849,7 @@ def small_gate(args, name, runtime, benchmark):
     total = sum(batch.valid_labels for batch in global_batches)
     route_batch = global_batches[0].to(runtime.device)
     route = trace_route(model, route_batch, args, name, benchmark)
+    oracle_parity = khdn_model_oracle_gate(args, name, benchmark) if name in ('khdn_no_carry', 'khdn_y_carry') else None
     model.zero_grad(set_to_none=True)
     ddp = runtime.wrap(model)
     local_batches = [global_batches[index].to(runtime.device)
@@ -801,6 +876,7 @@ def small_gate(args, name, runtime, benchmark):
                        'Actual single-device accumulation; DDP equivalence NOT RUN',
               'ddp_accepted': False}
     if name.startswith('khdn_'):
+        result['strict_vs_explicit_oracle'] = oracle_parity
         gates = {}
         for module_name, module in model.named_modules():
             if hasattr(module, 'f_proj') and hasattr(module, 'A_log'):
@@ -896,7 +972,12 @@ def train_trial(args, name, trial, runtime, benchmark, result=None):
     def sample(count, execution_mode):
         nonlocal next_data, optimizer_steps
         batches = batches_at(next_data, count)
-        row = timed_sample(model, optimizer, batches, args, runtime, execution_mode)
+        if name in ('khdn_no_carry', 'khdn_y_carry'):
+            with KHDNExceptionGuard() as guard:
+                result['timing_exception_guard'] = guard.evidence()
+                row = timed_sample(model, optimizer, batches, args, runtime, execution_mode)
+        else:
+            row = timed_sample(model, optimizer, batches, args, runtime, execution_mode)
         row['start_global_microbatch'] = next_data
         next_data += count * runtime.world_size
         optimizer_steps += int(execution_mode == 'step')
@@ -1023,7 +1104,9 @@ def train_trial(args, name, trial, runtime, benchmark, result=None):
         result['status'] = 'COMPLETED; ACCEPTANCE PENDING'
         persist('completed')
         return result
-    except BaseException:
+    except BaseException as error:
+        if hasattr(error, 'khdn_evidence'):
+            result['khdn_failure_evidence'] = error.khdn_evidence
         result['status'] = 'FAILED; PARTIAL EVIDENCE ONLY'
         result['position'].update(next_global_microbatch=next_data, global_optimizer_step=optimizer_steps,
                                   counter_scope='completed sample calls; the failing call may have partially updated state')
@@ -1105,9 +1188,200 @@ def run_benchmark(args, payload, benchmark):
                 payload['rank_identities'] = identities
                 payload['rank_results'] = [str(rank_path(args.output, rank)) for rank in range(runtime.world_size)]
                 write_json(args.output, payload)
-    except BaseException:
+    except BaseException as error:
+        if hasattr(error, 'khdn_evidence'):
+            payload['khdn_failure_evidence'] = error.khdn_evidence
         payload['status'] = 'GPU HARNESS FAILED; configuration retained; no automatic retry or shape reduction'
         payload['failure'] = traceback.format_exc()
         write_json(output, payload)
         raise
     return 0
+
+
+def khdn_model_oracle_gate(args, name, benchmark):
+    """Use identical g32 KHDN models and the explicit dense Oracle, including learned-curvature gradients."""
+    gate_args = copy.copy(args)
+    gate_args.group_size, gate_args.learnable_curvature = 32, True
+    gate_args.batch, gate_args.seq_len, gate_args.vocab_size = 2, 2 * args.chunk_size + 1, 97
+    gate_args.head_dim = 32
+    result = {}
+    for layout in ('dense', 'packed'):
+        gate_args.data_layout = layout
+        batch = make_batch(gate_args, 0).to('cuda')
+        outputs = []
+        for method in (name, 'khdn_naive'):
+            model, info = benchmark.build_model(gate_args, benchmark.method_spec(method), small=True)
+            route = trace_route(model, batch, gate_args, method, benchmark)
+            outputs.append({'loss': torch.tensor(route['loss']), 'initial_weights_sha256': info['initial_weights_sha256'],
+                            'gradients': {key: value.grad.detach().float().cpu().clone()
+                                          for key, value in model.named_parameters() if value.requires_grad}})
+            if method == name:
+                result[layout] = {'actual_route': route, 'model': info}
+            del model
+        parity = benchmark.compare_model_results(*outputs)
+        required = ('f_proj.0.weight', 'f_proj.1.weight', 'A_log', 'dt_bias', 'curvature_raw')
+        for suffix in required:
+            if not any(key.endswith(suffix) for key in outputs[0]['gradients']):
+                raise AssertionError(f'KHDN Oracle gate did not exercise parameter gradient {suffix}')
+        result[layout]['parity'] = parity
+    source_gate = khdn_operator_gate(gate_args, name, khdn_operator_sources(gate_args, 2 * args.chunk_size + 1))
+    return {'cases': result, 'source_vjp_gate': source_gate, 'scope': 'same FP32 parameters/public autocast, g32, learned positive curvature, '
+            'identical weights and outer checkpoint; explicit naive dense-solve Oracle only in this untimed small gate',
+            'dense_fp64_truth_scope': 'separate operator gate; model Oracle follows public-source precision'}
+
+
+def khdn_operator_sources(args, length):
+    generator = torch.Generator(device='cuda').manual_seed(args.seed)
+    shape = (1, length, 1, args.head_dim)
+    q = torch.randn(shape, generator=generator, device='cuda')
+    k = torch.nn.functional.normalize(torch.randn(shape, generator=generator, device='cuda'), dim=-1)
+    v = .02 * torch.randn(shape, generator=generator, device='cuda')
+    beta = .1 + .8 * torch.rand(shape[:3], generator=generator, device='cuda')
+    ell = -.01 - .1 * torch.rand(shape, generator=generator, device='cuda')
+    state = .001 * torch.randn((1, 1, args.head_dim, args.head_dim), generator=generator, device='cuda')
+    return (q, k, v, beta, ell, state, q.new_tensor(args.curvature))
+
+
+def khdn_operator_call(entry, sources, args, name, *, oracle=False):
+    options = {} if oracle else {'chunk_size': args.chunk_size,
+                                 'carry_mode': 'y_carry' if name == 'khdn_y_carry' else 'no_carry'}
+    return entry(*sources[:5], curvature=sources[6], initial_state=sources[5], output_final_state=True,
+                 group_size=args.group_size, check_inputs=True, **options)
+
+
+def khdn_operator_gate(args, name, sources):
+    """Compare unrounded dense FP64 truth to the public FP32 route with the frozen operator budgets."""
+    import fla.ops.key_gated_hyperbolic_delta_rule as ops
+    actual_sources = tuple(value.detach().clone().requires_grad_() for value in sources)
+    truth_sources = tuple(value.detach().double().requires_grad_() for value in sources)
+    oracle_checkpoint = verify_checkpointed_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, sources, args, name)
+    truth = checkpointed_dense_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, truth_sources, args, name)
+    with KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry') as trace:
+        actual = khdn_operator_call(ops.chunk_key_gated_hyperbolic_delta_rule, actual_sources, args, name)
+        cotangents = tuple(torch.cos(torch.arange(value.numel(), device=value.device)).reshape(value.shape).to(value)
+                           for value in actual)
+        actual_grads = torch.autograd.grad(actual, actual_sources, cotangents)
+    try:
+        truth_grads = torch.autograd.grad(truth, truth_sources, tuple(value.double() for value in cotangents))
+        errors = {}
+        for category, values, references, names, budget in (
+            ('forward', actual, truth, ('output', 'state'), (2e-5, 2e-4, 1e-4)),
+            ('backward', actual_grads, truth_grads, ('q', 'k', 'v', 'beta', 'log_decay', 'S0', 'curvature'), (5e-5, 5e-4, 2e-4)),
+        ):
+            for key, value, reference in zip(names, values, references):
+                if not torch.isfinite(value).all() or not torch.isfinite(reference).all():
+                    raise AssertionError(f'KHDN nonfinite {category}/{key}')
+                difference = value.double() - reference
+                atol, rtol, ratio = budget
+                torch.testing.assert_close(value.double(), reference, atol=atol, rtol=rtol, msg=key)
+                rms = difference.square().mean().sqrt()
+                scale = reference.square().mean().sqrt().clamp_min(atol)
+                if rms > ratio * scale:
+                    raise AssertionError(f'KHDN {category}/{key} exceeds frozen relative-RMS budget')
+                errors[f'{category}/{key}'] = {'max_abs': float(difference.abs().max()), 'relative_rms': float(rms / scale),
+                                               'atol': atol, 'rtol': rtol, 'relative_rms_budget': ratio}
+    except BaseException as error:
+        error.khdn_evidence = trace.calls
+        raise
+    return {'route': trace.attest(), 'errors_against_dense_fp64_truth': errors,
+            'independent_oracle_checkpoint_verification': oracle_checkpoint,
+            'scope': 'same rounded FP32 sources promoted to dense FP64 truth; exceptional high-precision routes excluded'}
+
+
+def run_operator_sweep(args, payload):
+    """Bounded real entry-point sweep using fresh graphs and the shared synchronized sampling code."""
+    import fla.ops.key_gated_hyperbolic_delta_rule as ops
+    from benchmarks.hyperbolic_benchmark_utils import Method, _sample
+    payload['scope'] = 'operator only, B=H=1, K=V=head-dim; separate from full-model and DDP acceptance'
+    payload['operator_cases'] = []
+    initial_identity = payload['metadata']
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        for length in args.operator_lengths:
+            sources = khdn_operator_sources(args, length)
+            for name in args.methods:
+                case = {'method': name, 'shape': list(sources[0].shape), 'chunk_size': args.chunk_size,
+                        'group_size': args.group_size, 'mode': args.modes[0], 'status': 'GATE_PENDING'}
+                payload['operator_cases'].append(case)
+                write_json(args.output, payload)
+                case['correctness'] = khdn_operator_gate(args, name, sources)
+                if args.check_only:
+                    case['status'] = 'ACTUAL OPERATOR GATE PASSED; TIMING NOT RUN'
+                    write_json(args.output, payload)
+                    continue
+                method = Method(name, lambda leaves, name=name: khdn_operator_call(
+                    ops.chunk_key_gated_hyperbolic_delta_rule, leaves, args, name), {}, 'khdn', 'state_fwd_kernel')
+                case['warmup'], case['raw_samples'] = [], []
+                with KHDNExceptionGuard() as guard:
+                    case['exception_guard'] = guard.evidence()
+                    case['first_sample_including_possible_compilation'] = _sample(method, sources, args.modes[0])
+                    for _ in range(args.warmup):
+                        case['warmup'].append(_sample(method, sources, args.modes[0]))
+                    for _ in range(args.steps):
+                        case['raw_samples'].append(_sample(method, sources, args.modes[0]))
+                        write_json(args.output, payload)
+                    if args.profile:
+                        args.profile.mkdir(parents=True, exist_ok=True)
+                        path = args.profile / f'{name}.T{length}.C{args.chunk_size}.{args.modes[0]}.json'
+                        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                                torch.profiler.ProfilerActivity.CUDA]) as profiler:
+                            _sample(method, sources, args.modes[0])
+                        profiler.export_chrome_trace(str(path))
+                        case['profile_trace'] = str(path)
+                case['wall_ms'] = summarize([sample['wall_ms'] for sample in case['raw_samples']])
+                case['cuda_ms'] = summarize([sample['cuda_ms'] for sample in case['raw_samples']])
+                case['status'] = 'ACTUAL OPERATOR RUN COMPLETED; NOT MODEL/DDP ACCEPTANCE'
+                write_json(args.output, payload)
+        final_identity = metadata(args)
+        if any(final_identity.get(key) != initial_identity.get(key)
+               for key in ('source_tree_sha256', 'source_kind', 'source_manifest_sha256')):
+            raise RuntimeError('source changed during operator sweep; timing rejected')
+        payload['status'] = ('GPU OPERATOR CORRECTNESS GATES PASSED; TIMING NOT RUN' if args.check_only else
+                             'GPU OPERATOR SWEEP COMPLETED; NO FULL-MODEL/DDP ACCEPTANCE')
+    except BaseException as error:
+        if hasattr(error, 'khdn_evidence'):
+            payload['khdn_failure_evidence'] = error.khdn_evidence
+        payload['status'] = 'GPU OPERATOR SWEEP FAILED; PARTIAL EVIDENCE ONLY'
+        payload['failure'] = traceback.format_exc()
+        write_json(args.output, payload)
+        raise
+    write_json(args.output, payload)
+    return 0
+
+
+def checkpointed_dense_oracle(entry, sources, args, name):
+    """Keep canonical state and all seven source-gradient chains through independent dense temporal chunks."""
+    from torch.utils.checkpoint import checkpoint
+    q, k, v, beta, ell, state, curvature = sources
+    outputs = []
+    for start in range(0, q.shape[1], args.oracle_chunk_size):
+        end = min(q.shape[1], start + args.oracle_chunk_size)
+        block = (q[:, start:end], k[:, start:end], v[:, start:end], beta[:, start:end], ell[:, start:end], state, curvature)
+
+        def run(*inputs):
+            return khdn_operator_call(entry, inputs, args, name, oracle=True)
+        output, state = checkpoint(run, *block, use_reentrant=False, preserve_rng_state=False)
+        outputs.append(output)
+    return torch.cat(outputs, dim=1), state
+
+
+def verify_checkpointed_oracle(entry, sources, args, name):
+    """Prove the memory-bounded harness against the uncheckpointed dense Oracle on a bounded same-source witness."""
+    length = min(sources[0].shape[1], 2 * args.oracle_chunk_size + 1)
+    small = tuple(value[:, :length] if index < 5 else value for index, value in enumerate(sources))
+    direct_sources = tuple(value.detach().double().requires_grad_() for value in small)
+    checkpoint_sources = tuple(value.detach().double().requires_grad_() for value in small)
+    direct = khdn_operator_call(entry, direct_sources, args, name, oracle=True)
+    bounded = checkpointed_dense_oracle(entry, checkpoint_sources, args, name)
+    cotangents = tuple(torch.cos(torch.arange(value.numel(), device=value.device)).reshape(value.shape).to(value)
+                       for value in direct)
+    direct_gradients = torch.autograd.grad(direct, direct_sources, cotangents)
+    bounded_gradients = torch.autograd.grad(bounded, checkpoint_sources, cotangents)
+    errors = {}
+    for key, actual, reference in zip(('output', 'state', 'q', 'k', 'v', 'beta', 'log_decay', 'S0', 'curvature'),
+                                      (*bounded, *bounded_gradients), (*direct, *direct_gradients)):
+        torch.testing.assert_close(actual, reference, atol=1e-10, rtol=1e-9, msg=key)
+        errors[key] = float((actual - reference).detach().abs().max())
+    return {'sequence_length': length, 'temporal_chunk_size': args.oracle_chunk_size, 'errors': errors,
+            'scope': 'independent dense Oracle checkpointed versus uncheckpointed; same FP64 sources, all seven gradients',
+            'atol_rtol': [1e-10, 1e-9]}

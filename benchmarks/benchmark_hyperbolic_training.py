@@ -72,7 +72,14 @@ def parse_arguments(argv=None):
         parser.add_argument('--' + name, type=int, default=default)
     parser.add_argument('--dtype', choices=('bf16', 'fp32'), default='bf16', help='autocast dtype; parameters stay FP32')
     parser.add_argument('--rank', type=int, default=4)
-    parser.add_argument('--chunk-size', type=int, choices=(16, 32), default=16)
+    parser.add_argument('--chunk-size', type=int, choices=(16, 32, 64), default=16)
+    parser.add_argument('--khdn-strict', action='store_true',
+                        help='opt in to correctness-gated strict FP64 SIMT KHDN; no Tensor Core claim')
+    parser.add_argument('--operator-sweep', action='store_true',
+                        help='bounded KHDN operator-only correctness/profile/timing, separate from model/DDP')
+    parser.add_argument('--operator-lengths', type=int, nargs='+', default=[17, 33, 65])
+    parser.add_argument('--oracle-chunk-size', type=int, choices=(8, 16, 32, 64), default=16,
+                        help='nonreentrant independent dense-Oracle temporal checkpoint interval')
     parser.add_argument('--curvature', type=float, default=1.0)
     parser.add_argument('--learnable-curvature', action='store_true')
     parser.add_argument('--inner-checkpoint', action='store_true', help='enable protected inner checkpoint (default off)')
@@ -153,10 +160,26 @@ def parse_arguments(argv=None):
         scaling_plan(args, int(os.environ.get('WORLD_SIZE', '1')))
     except ValueError as error:
         parser.error(str(error))
+    if args.chunk_size == 64 and any(not name.startswith('khdn_') for name in args.methods):
+        parser.error('C64 is supported only for KHDN; legacy HDN benchmark routes remain C16/C32')
+    if any(name.startswith('khdn_') for name in args.methods):
+        if args.head_dim % args.group_size:
+            parser.error('KHDN group-size must divide head-dim; no automatic group shrinking')
+        if args.inner_checkpoint:
+            parser.error('KHDN has no protected inner checkpoint policy; omit --inner-checkpoint')
+    if args.operator_sweep and (not args.khdn_strict or args.scaling != 'single'
+                                or int(os.environ.get('WORLD_SIZE', '1')) != 1
+                                or any(name not in ('khdn_no_carry', 'khdn_y_carry') for name in args.methods)
+                                or args.resume or args.checkpoint_dir or args.memory_only or args.final_validation
+                                or args.modes == ['step'] or args.dtype != 'fp32'
+                                or len(args.operator_lengths) > 8
+                                or any(not 1 <= length <= 16384 for length in args.operator_lengths)):
+        parser.error('operator-sweep requires strict KHDN, W1/single, fp32, a phase mode, <=8 lengths in [1,16384], '
+                     'and no model resume/memory-only/final-validation')
     audit = audit_methods()
     for name in args.methods:
-        if name in ('khdn_no_carry', 'khdn_y_carry'):
-            parser.error('optimized KHDN remains blocked pending actual kernel/carry attestation')
+        if name in ('khdn_no_carry', 'khdn_y_carry') and not args.khdn_strict:
+            parser.error('optimized KHDN requires explicit --khdn-strict and actual kernel/carry attestation')
         if not audit[name]['available']:
             parser.error(f'{name}: {audit[name]["reason"]}')
         if name == 'khdn_naive' and not args.check_only:
@@ -522,7 +545,15 @@ def main(argv=None):
         payload['exact_parameter_counts'] = parameter_counts(args)
     if args.dry_run:
         payload['status'] = 'DRY RUN; GPU NOT RUN'
-        payload['model_configurations'] = {name: model_configuration(args, name) for name in args.methods}
+        if args.operator_sweep:
+            payload['scope'] = 'operator only; actual B=H=1, K=V=head-dim; GPU NOT RUN'
+            payload['operator_configurations'] = [
+                {'method': name, 'shape': [1, length, 1, args.head_dim], 'chunk_size': args.chunk_size,
+                 'group_size': args.group_size, 'mode': args.modes[0], 'public_dtype': 'torch.float32',
+                 'required_internal_route': 'strict_device_fp64_simt', 'oracle_temporal_chunk_size': args.oracle_chunk_size}
+                for length in args.operator_lengths for name in args.methods]
+        else:
+            payload['model_configurations'] = {name: model_configuration(args, name) for name in args.methods}
         print(json.dumps(payload, indent=2))
         return 0
     if not torch.cuda.is_available():
@@ -530,6 +561,9 @@ def main(argv=None):
         write_json(args.output, payload)
         print(payload['status'])
         return 2
+    if args.operator_sweep:
+        from benchmarks.hyperbolic_training_distributed import run_operator_sweep
+        return run_operator_sweep(args, payload)
     return run_benchmark(args, payload, sys.modules[__name__])
 
 

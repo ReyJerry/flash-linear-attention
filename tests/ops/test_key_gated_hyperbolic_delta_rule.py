@@ -157,6 +157,14 @@ def test_chunk_zero_curvature_source(entry):
     assert dc.item() != 0
 
 
+@pytest.mark.parametrize('length', [2048, 8192, 16384])
+@pytest.mark.parametrize('chunk_size', [16, 32, 64])
+@pytest.mark.parametrize('carry_mode', ['no_carry', 'y_carry'])
+def test_chunk_long(length, chunk_size, carry_mode):
+    sources, cu = make_case(length, 128, 128, 32, torch.float32)
+    compare_case('chunk_key_gated_hyperbolic_delta_rule', sources, cu, 32, chunk_size, carry_mode)
+
+
 def test_chunk_first_device_gate():
     sources, cu = make_case(7, 32, 64, 32, torch.float32)
     compare_case('chunk_key_gated_hyperbolic_delta_rule', sources, cu, 32, 16)

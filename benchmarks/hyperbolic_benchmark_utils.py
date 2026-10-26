@@ -9,15 +9,18 @@
 
 import contextlib
 import gc
+import hashlib
 import importlib
 import json
 import math
 import os
 import platform
+import re
 import statistics
 import subprocess
 import sys
 import time
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,20 +72,102 @@ def summarize(samples):
 def write_json(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + '\n')
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp')
+    with temporary.open('w') as stream:
+        stream.write(json.dumps(payload, indent=2) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
 
 
-def metadata(arguments):
-    root = Path(__file__).resolve().parents[1]
+def validated_source_snapshot(root, manifest_path):
+    """Verify the pack_snapshot.py identity and every declared byte before trusting archive provenance."""
+    root, manifest_path = Path(root).resolve(), Path(manifest_path).resolve()
+    raw = manifest_path.read_bytes()
+    manifest = json.loads(raw)
+    base, files, modes = (manifest[key] for key in ('base_commit', 'files', 'modes'))
+    if not isinstance(base, str) or re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', base) is None:
+        raise ValueError('source manifest base_commit must be a full declared commit hash')
+    if not files or set(files) != set(modes):
+        raise ValueError('source manifest file/mode inventory mismatch')
+    identity = {'base_commit': base, 'files': files, 'modes': modes}
+    snapshot = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    if snapshot != manifest['snapshot_sha256']:
+        raise ValueError('source manifest snapshot identity mismatch')
+    for name, expected in files.items():
+        relative = Path(name)
+        if relative.is_absolute() or '..' in relative.parts or '.git' in relative.parts:
+            raise ValueError(f'unsafe manifest path: {name}')
+        path = root / relative
+        if not path.resolve().is_relative_to(root):
+            raise ValueError(f'source manifest path escapes root: {name}')
+        if path.is_symlink():
+            actual = 'symlink:' + os.readlink(path)
+        elif path.is_file():
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            actual_mode = path.stat().st_mode & 0o777
+            declared = modes[name] & 0o777
+            if actual_mode not in (declared, declared & ~0o222):
+                raise ValueError(f'source mode mismatch: {name}')
+        else:
+            raise ValueError(f'source manifest file missing: {name}')
+        if actual != expected:
+            raise ValueError(f'source content mismatch: {name}')
+    actual_files = {str(path.relative_to(root)) for path in root.rglob('*')
+                    if (path.is_file() or path.is_symlink()) and '__pycache__' not in path.parts
+                    and '.git' not in path.relative_to(root).parts and path.resolve() != manifest_path}
+    if actual_files != set(files):
+        raise ValueError(f'source inventory mismatch: {sorted(actual_files.symmetric_difference(files))[:10]}')
+    overlay = manifest.get('selected_working_files', {})
+    for name, expected in overlay.items():
+        if (expected is None and name in files) or (expected is not None and files.get(name) != expected):
+            raise ValueError(f'declared source overlay mismatch: {name}')
+    return {'source_kind': 'immutable_source_manifest', 'revision': None, 'declared_base_commit': base,
+            'source_tree_sha256': snapshot, 'snapshot_sha256': snapshot,
+            'source_manifest_sha256': hashlib.sha256(raw).hexdigest(), 'source_manifest': str(manifest_path),
+            'declared_overlay_sha256': hashlib.sha256(json.dumps(overlay, sort_keys=True).encode()).hexdigest(),
+            'working_tree_dirty': None, 'dirty_patch_sha256': None, 'untracked_file_sha256': {},
+            'declared_file_count': len(files), 'git_history': 'not present or asserted by archive metadata',
+            'benchmark_source_sha256': {name: digest for name, digest in files.items()
+                                        if name.startswith('benchmarks/') and name.endswith('.py')}}
+
+
+def source_metadata(root):
+    manifest_path = os.environ.get('FLA_SOURCE_MANIFEST')
+    if manifest_path:
+        return validated_source_snapshot(root, manifest_path)
+    location = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=root,
+                              text=True, capture_output=True, check=False)
+    if location.returncode or Path(location.stdout.strip()).resolve() != root.resolve():
+        raise ValueError('source is not a Git checkout; set FLA_SOURCE_MANIFEST to its immutable snapshot.json')
     revision = subprocess.run(
         ['git', 'rev-parse', 'HEAD'], cwd=root, text=True, capture_output=True, check=True,
     ).stdout.strip()
     dirty = subprocess.run(['git', 'status', '--porcelain'], cwd=root, text=True, capture_output=True, check=True).stdout
+    patch = subprocess.run(['git', 'diff', '--binary', 'HEAD'], cwd=root, capture_output=True, check=True).stdout
+    untracked = subprocess.run(['git', 'ls-files', '--others', '--exclude-standard', '-z'],
+                               cwd=root, capture_output=True, check=True).stdout
+    sources = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+               for path in sorted(root.glob('benchmarks/*hyperbolic*.py'))}
+    untracked_hashes = {os.fsdecode(name): hashlib.sha256((root / os.fsdecode(name)).read_bytes()).hexdigest()
+                        for name in untracked.split(b'\0') if name and (root / os.fsdecode(name)).is_file()}
+    tree = hashlib.sha256()
+    for path in sorted([*root.glob('fla/**/*.py'), *root.glob('benchmarks/*.py')]):
+        tree.update(str(path.relative_to(root)).encode())
+        tree.update(path.read_bytes())
+    return {'source_kind': 'git_checkout', 'source_tree_sha256': tree.hexdigest(),
+            'dirty_patch_sha256': hashlib.sha256(patch).hexdigest(), 'untracked_file_sha256': untracked_hashes,
+            'benchmark_source_sha256': sources, 'revision': revision, 'working_tree_dirty': bool(dirty)}
+
+
+def metadata(arguments):
+    root = Path(__file__).resolve().parents[1]
     result = {
-        'revision': revision, 'working_tree_dirty': bool(dirty), 'arguments': vars(arguments).copy(),
+        **source_metadata(root), 'arguments': vars(arguments).copy(),
         'command': sys.argv, 'python': platform.python_version(), 'torch': torch.__version__,
         'cuda_runtime': torch.version.cuda, 'strict_tolerances': True,
-        'environment': {key: value for key, value in os.environ.items() if key.startswith(('FLA_', 'TRITON_'))},
+        'environment': {key: value for key, value in os.environ.items()
+                        if key.startswith(('FLA_', 'TRITON_', 'NCCL_', 'TORCH_NCCL_', 'CUDA_'))},
     }
     result['arguments'] = {key: str(value) if isinstance(value, Path) else value for key, value in result['arguments'].items()}
     if torch.cuda.is_available():
@@ -91,6 +176,8 @@ def metadata(arguments):
         result.update({
             'triton': triton.__version__, 'gpu': properties.name, 'compute_capability': [properties.major, properties.minor],
             'device_total_memory': properties.total_memory, 'cuda_device': torch.cuda.current_device(),
+            'gpu_uuid': str(getattr(properties, 'uuid', 'unavailable')),
+            'nccl': torch.cuda.nccl.version() if torch.distributed.is_nccl_available() else None,
             'tf32_matmul_allowed': torch.backends.cuda.matmul.allow_tf32,
         })
     return result

@@ -5,8 +5,9 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Staged Triton KHDN with explicit source ownership and strict device FP64 arithmetic."""
+"""Opt-in mixed KHDN candidate with accurate readout; strict e39 remains the default."""
 
+import math
 import time
 
 import torch
@@ -23,6 +24,24 @@ from fla.ops.key_gated_hyperbolic_delta_rule.chunk_kernels import (
 )
 from fla.ops.key_gated_hyperbolic_delta_rule.naive import _validate
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+
+def _reset_telemetry(telemetry, requested):
+    if telemetry is None:
+        return
+    for key in (
+        'backend', 'backward', 'arithmetic', 'tensor_cores', 'backward_precision', 'fallback_subblocks',
+        'carry_edges', 'common_preparations', 'direct_FS', 'chunk_lengths', 'saved_buffer_bytes',
+        'host_transfer_and_forward_seconds', 'host_details', 'backward_host_details', 'backward_host_seconds',
+        'backward_fallback_subblocks', 'shared_A_vjp', 'precision_requested', 'precision_route', 'precision_eligible',
+        'qualification_reason', 'qualification', 'readout_precision', 'state_control_precision',
+        'contraction_precision', 'backward_qualification_reason', 'strict_replay_details',
+        'exception_reason', 'backward_exception_reason', 'backward_precision_route',
+        'backward_adjoint_profile', 'backward_adjoint_limit',
+        'backward_output_cotangent_max', 'backward_state_cotangent_max',
+    ):
+        telemetry.pop(key, None)
+    telemetry.update(precision_requested=requested)
 
 
 def _buffers(count, shapes, device):
@@ -59,7 +78,10 @@ def _host_call(sources, options, telemetry):
     final = None if final is None else final.to(sources[0].device)
     torch.cuda.synchronize(sources[0].device)
     if telemetry is not None:
+        for key in ('qualification', 'readout_precision', 'state_control_precision', 'contraction_precision'):
+            telemetry.pop(key, None)
         telemetry.update(backend='host_reviewed_chunk_exception', backward='host_reviewed_manual_chunk_source_vjp',
+                         precision_route='host_exception', arithmetic='host_reviewed_chunk', tensor_cores=False,
                          fallback_subblocks=sum(len(p) for p in details['execution_plan']), carry_edges=details['carry_edges'],
                          host_transfer_and_forward_seconds=time.perf_counter() - start, host_details=details)
     return output, final
@@ -103,8 +125,87 @@ def _host_backward(sources, options, do, ds, needs, telemetry):
     torch.cuda.synchronize(sources[0].device)
     if telemetry is not None:
         telemetry.update(backward='host_reviewed_manual_chunk_source_vjp', backward_host_details=details,
+                         backward_precision_route='host_exception', backward_precision=details.get('backward_precision'),
                          backward_host_seconds=time.perf_counter() - start,
                          backward_fallback_subblocks=sum(len(p) for p in details['execution_plan']))
+    return result
+
+
+def _qualification_reason(sources, options):
+    """Select the empirical profile; matching version strings do not attest compiler binaries."""
+    q, k, v, beta, ell, state, curve = sources
+    if (q.dtype not in (torch.float32, torch.bfloat16)
+            or k.dtype != q.dtype or v.dtype != q.dtype
+            or any(x.dtype != torch.float32 for x in (beta, ell, state, curve))):
+        return 'unqualified_source_dtype'
+    if (options['c'] not in (16, 32, 64) or q.shape[3] not in (16, 128)
+            or options['g'] not in (16, 32) or v.shape[-1] not in (16, 128)
+            or q.shape[0] > 8 or q.shape[2] > 16
+            or not q.numel() or max(b-a for a, b in zip(options['bounds'], options['bounds'][1:])) > 2048):
+        return 'unqualified_geometry'
+    if torch.cuda.get_device_capability(q.device) != (9, 0):
+        return 'unqualified_device'
+    if torch.__version__ != '2.9.0+cu128' or triton.__version__ != '3.5.0':
+        return 'unqualified_runtime'
+    if any(not torch.isfinite(x).all().item() for x in sources):
+        return 'unqualified_nonfinite_source'
+    if any(x.numel() and x.detach().abs().max().item() > 8 for x in (q, k, v, state)):
+        return 'unqualified_source_magnitude'
+    scale = float(options['scale'])
+    if not math.isfinite(scale):
+        return 'unqualified_scale'
+    if abs(scale) * q.detach().abs().max().item() > 8:
+        return 'unqualified_effective_query_magnitude'
+    n = k.detach().double().square().sum(-1)
+    if ((n < .25) | (n > 4.)).any().item():
+        return 'unqualified_key_norm'
+    if ell.numel() and ell.detach().min().item() < -16.:
+        return 'unqualified_decay'
+    if curve.detach().item() > 1.:
+        return 'unqualified_curvature'
+    return None
+
+
+def _mixed_adjoint_qualification(sources, options, do, ds):
+    """Keep v1 and admit the separately measured small-model adjoint envelope."""
+    maxima = [x.detach().abs().max().item() if x.numel() else 0. for x in (do, ds)]
+    finite = all(math.isfinite(x) for x in maxima)
+    q, _, v, _, _, state, _ = sources
+    model_geometry = (
+        q.shape[0] <= 2 and q.shape[2] <= 2 and q.shape[3] == v.shape[3] == 128
+        and state.shape[0] <= 4 and options['g'] == 32 and options['c'] == 16
+        and options['carry'] == 'no_carry'
+        and max(b-a for a, b in zip(options['bounds'], options['bounds'][1:])) <= 35
+    )
+    legacy = finite and max(maxima) <= 8.
+    limit = 128. if model_geometry and not legacy else 8.
+    accepted = finite and max(maxima) <= limit
+    reason = None if accepted else (
+        'unqualified_cotangent_magnitude' if model_geometry or not finite
+        else 'unqualified_model_adjoint_geometry')
+    return reason, dict(
+        backward_adjoint_profile=('empirical_profile_v1' if legacy else 'model_adjoint_v1') if accepted else 'unqualified',
+        backward_adjoint_limit=limit, backward_output_cotangent_max=maxima[0],
+        backward_state_cotangent_max=maxima[1],
+    )
+
+
+def _strict_device_replay(sources, options, do, ds, needs, telemetry):
+    details = {}
+    strict_options = dict(options, mixed=False)
+    with torch.enable_grad():
+        replay = tuple(x.detach().requires_grad_(need) for x, need in zip(sources, needs))
+        output, final = _Chunk.apply(*replay, strict_options, details)
+        values, cots = (output,), (do,)
+        if final is not None:
+            values, cots = (*values, final), (*cots, ds)
+        partials = iter(torch.autograd.grad(values, [x for x in replay if x.requires_grad], cots))
+        result = tuple(next(partials) if need else None for need in needs)
+    if telemetry is not None:
+        telemetry.update(backward='strict_device_replay', backward_precision=details.get('backward_precision'),
+                         backward_precision_route='strict_device_replay',
+                         backward_qualification_reason='unqualified_cotangent_magnitude',
+                         strict_replay_details=details)
     return result
 
 
@@ -146,7 +247,8 @@ class _Chunk(torch.autograd.Function):
             group_af_fwd_kernel[(nc*h*ng, c)](p, groups, ng, c, num_warps=4)
         state_fwd_kernel[((len(seq_chunks)-1)*h*ng,)](
             v, state, output, final if final is not None else state, *metadata[:3], p, groups, saved_s, saved_y, carry,
-            h, kd, vd, gs, ng, c, kt, gt, options['final'], options['carry'] == 'y_carry', num_warps=4,
+            h, kd, vd, gs, ng, c, kt, gt, options['final'], options['carry'] == 'y_carry',
+            options.get('mixed', False), num_warps=4,
         )
         ctx.save_for_backward(*sources, *metadata, *p, *groups, saved_s, saved_y, *carry)
         ctx.options, ctx.telemetry, ctx.nc = options, telemetry, nc
@@ -154,9 +256,18 @@ class _Chunk(torch.autograd.Function):
         ctx.set_materialize_grads(False)
         if telemetry is not None:
             telemetry.update(backend='triton_chunk' if nc else 'empty_identity', fallback_subblocks=0, carry_edges=ctx.edges,
-                             arithmetic='device_float64', tensor_cores=False, common_preparations=nc*h,
+                             precision_route='experimental_mixed_readout' if options.get('mixed', False) else 'strict',
+                             arithmetic=('strict_readout_tf32x3_state_products'
+                                         if options.get('mixed', False) else 'device_float64'),
+                             tensor_cores=bool(options.get('mixed', False) and nc and min(c, kt, gt) >= 16),
+                             common_preparations=nc*h,
                              direct_FS=nc*h-ctx.edges, chunk_lengths=[z-a for a, z in zip(starts, ends)],
-                             saved_buffer_bytes=sum(x.numel()*x.element_size() for x in (*p, *groups, saved_s, saved_y, *carry)))
+                             saved_buffer_bytes=sum(x.numel()*x.element_size()
+                                                    for x in (*p, *groups, saved_s, saved_y, *carry)))
+            if options.get('mixed', False):
+                telemetry.update(qualification='empirical_profile_v1', readout_precision='fp64',
+                                 state_control_precision='fp64',
+                                 contraction_precision='17_selected_tf32x3_fp32_accumulate_sites')
         return output, final
 
     @staticmethod
@@ -185,6 +296,15 @@ class _Chunk(torch.autograd.Function):
                 ctx.telemetry['backward_exception_reason'] = 'cotangent_accuracy' if accuracy_replay else 'cotangent_range'
             result = _host_backward(sources, options, do, ds, ctx.needs_input_grad[:7], ctx.telemetry)
             return (*result, None, None)
+        if options.get('mixed', False):
+            adjoint_reason, adjoint_details = _mixed_adjoint_qualification(sources, options, do, ds)
+            if ctx.telemetry is not None:
+                ctx.telemetry.update(adjoint_details)
+            if adjoint_reason is not None:
+                result = _strict_device_replay(sources, options, do, ds, ctx.needs_input_grad[:7], ctx.telemetry)
+                if ctx.telemetry is not None:
+                    ctx.telemetry['backward_qualification_reason'] = adjoint_reason
+                return (*result, None, None)
         grads = [torch.empty_like(x, memory_format=torch.contiguous_format) for x in sources]
         # scalar curvature owners retain FP64 until the final requested-source cast
         dc = torch.empty((ctx.nc*h*ng,), device=q.device, dtype=torch.float64)
@@ -192,7 +312,7 @@ class _Chunk(torch.autograd.Function):
         shared = _buffers(ctx.nc*h*ng, shared_shapes, q.device)
         state_bwd_kernel[(state.shape[0]*h*ng,)](
             v, curvature, do, ds, grads[2], grads[5], dc, *metadata[:3], p, groups, saved_s, saved_y, shared, carry,
-            h, kd, vd, gs, ng, c, kt, gt, options['carry'] == 'y_carry', num_warps=4,
+            h, kd, vd, gs, ng, c, kt, gt, options['carry'] == 'y_carry', options.get('mixed', False), num_warps=4,
         )
         if ctx.nc:
             common_bwd_kernel[(ctx.nc*h,)](
@@ -205,7 +325,11 @@ class _Chunk(torch.autograd.Function):
             return (*result, None, None)
         if ctx.telemetry is not None:
             ctx.telemetry.update(backward='manual_triton_chunk_source_vjp' if ctx.nc else 'empty_identity',
-                                 backward_precision='device_float64', shared_A_vjp=ctx.nc*h)
+                                 backward_precision_route='experimental_mixed_readout' if options.get(
+                                     'mixed', False) else 'strict',
+                                 backward_precision=('strict_readout_tf32x3_state_products'
+                                                     if options.get('mixed', False) else 'device_float64'),
+                                 shared_A_vjp=ctx.nc*h)
         return (*[x if need else None for x, need in zip(grads, ctx.needs_input_grad[:7])], None, None)
 
 
@@ -225,12 +349,15 @@ def chunk_key_gated_hyperbolic_delta_rule(
     chunk_size: int = 32,
     carry_mode: str = 'no_carry',
     telemetry: dict | None = None,
+    precision_policy: str = 'strict',
 ):
-    """Evaluate the strict device chunk graph and its explicit first-order VJP.
+    """Evaluate e39 strict or the explicitly requested, empirically bounded mixed candidate.
 
     Output follows q.dtype; canonical state is FP32 unless a source is FP64.
     Exceptional ranges use the separately reported reviewed host implementation.
+    Telemetry describes the latest call; use a separate dictionary for each live autograd graph.
     """
+    _reset_telemetry(telemetry, precision_policy)
     bounds, scale = _validate(q, k, v, beta, log_decay, curvature, initial_state, scale, cu_seqlens, group_size, False)
     if not q.is_cuda:
         raise ValueError('The production KHDN entry requires CUDA tensors.')
@@ -245,6 +372,14 @@ def chunk_key_gated_hyperbolic_delta_rule(
              if initial_state is None else initial_state)
     sources = (q, k, v, beta, log_decay, state, c)
     options = dict(bounds=bounds, scale=scale, g=group_size, c=chunk_size, final=output_final_state, carry=carry_mode)
+    if precision_policy not in ('strict', 'mixed_readout'):
+        raise ValueError('precision_policy must be strict or mixed_readout.')
+    qualification = 'strict_requested' if precision_policy == 'strict' else _qualification_reason(sources, options)
+    options['mixed'] = qualification is None
+    if telemetry is not None:
+        telemetry.update(precision_eligible=qualification is None)
+        if qualification:
+            telemetry.update(qualification_reason=qualification)
     reason = _exception_reason(sources, group_size, scale)
     if reason:
         if telemetry is not None:

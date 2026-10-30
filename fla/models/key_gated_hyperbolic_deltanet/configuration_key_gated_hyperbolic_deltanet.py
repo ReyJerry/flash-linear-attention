@@ -65,6 +65,7 @@ class KeyGatedHyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         use_l2warp: bool = False,
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
+        precision_policy: str = 'strict',
         **kwargs,
     ):
         identity = kwargs.pop('model_type', self.model_type)
@@ -85,6 +86,11 @@ class KeyGatedHyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
             raise ValueError('group_size must be 1, 16 or 32 and divide head_v_dim.')
         if chunk_size not in (16, 32, 64) or attn_mode not in ('chunk', 'fused_recurrent', 'naive'):
             raise ValueError('Unsupported attn_mode or chunk_size (expected 16, 32 or 64).')
+        if precision_policy not in ('strict', 'mixed_readout'):
+            raise ValueError('precision_policy must be strict or mixed_readout.')
+        if precision_policy != 'strict' and attn_mode != 'chunk':
+            raise ValueError('mixed_readout precision requires attn_mode=chunk.')
+        self.precision_policy = precision_policy
         if carry_mode not in ('no_carry', 'y_carry'):
             raise ValueError('carry_mode must be no_carry or y_carry.')
         if decay_mode != 'key_channel' or decay_function != 'negative_exp_softplus' or readout != 'inclusive':

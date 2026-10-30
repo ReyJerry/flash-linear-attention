@@ -21,6 +21,9 @@ class _RecurrentTelemetry(dict):
     def __setitem__(self, key, value):
         self.update({key: value})
 
+    def pop(self, key, *args):
+        return self.target.pop(key, *args)
+
     def update(self, *args, **kwargs):
         values = dict(*args, **kwargs)
         if values.get('backend') == 'triton_chunk':

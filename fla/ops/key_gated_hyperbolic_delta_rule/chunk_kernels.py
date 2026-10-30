@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Strict device arithmetic for the reviewed positive-mass KHDN chunk graph."""
+"""Experimental strict readout and state/control with seventeen TF32x3 state-product sites."""
 
 import triton
 import triton.language as tl
@@ -20,6 +20,14 @@ def mm(a, b, M: tl.constexpr, N: tl.constexpr, R: tl.constexpr):
         y = tl.gather(b, tl.full((1, N), r, tl.int32), 0)
         acc = acc + x * y
     return acc
+
+
+@triton.jit
+def mm_state_product(a, b, M: tl.constexpr, N: tl.constexpr, R: tl.constexpr, MIXED: tl.constexpr):
+    if MIXED and M >= 16 and N >= 16 and R >= 16:
+        return tl.dot(a.to(tl.float32), b.to(tl.float32), out_dtype=tl.float32, input_precision="tf32x3").to(tl.float64)
+    else:
+        return mm(a, b, M, N, R)
 
 
 @triton.jit
@@ -239,7 +247,7 @@ def group_af_fwd_kernel(P, Gp, NG: tl.constexpr, C: tl.constexpr):
 
 @triton.jit
 def local_graph(P, Gp, ch, block, v, s, y, length,
-                C: tl.constexpr, K: tl.constexpr, G: tl.constexpr):
+                C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, MIXED: tl.constexpr = False):
     i = tl.arange(0, C)
     lower = load_matrix(P[10], ch, C, C)
     qer = load_matrix(P[7], ch, C, K)
@@ -258,7 +266,7 @@ def local_graph(P, Gp, ch, block, v, s, y, length,
     nu = load_vector(Gp[7], block, C)
     h = tl.sum(v * y, 1)
     w = af + tl.sum(jf * h[None, :], 1)
-    u = w[:, None] * v - nu[:, None] * mm(lower, y, C, G, C)
+    u = w[:, None] * v - nu[:, None] * mm_state_product(lower, y, C, G, C, MIXED)
     prev = tl.full((), 1, tl.float64)
     r = tl.full((C,), 0, tl.float64)
     t = tl.full((C,), 0, tl.float64)
@@ -278,7 +286,7 @@ def local_graph(P, Gp, ch, block, v, s, y, length,
     gl = at(gamma, length - 1, C)
     ss = at(nu, length - 1, C) * s
     us = tl.where(i[:, None] < length - 1, row(rho, length - 1, C, C)[:, None] * u, 0.)
-    rs = erase(kl, gl, tau[:, None] * ss) + mm(past, us, K, G, C)
+    rs = erase(kl, gl, tau[:, None] * ss) + mm_state_product(past, us, K, G, C, MIXED)
     ts = kl[:, None] * row(v, length - 1, C, G)[None, :] / at(n, length - 1, C)
     zl, tl_last = at(z, length - 1, C), at(t, length - 1, C)
     sn = rs / zl + (tl_last / zl) * ts
@@ -288,7 +296,8 @@ def local_graph(P, Gp, ch, block, v, s, y, length,
 @triton.jit
 def state_fwd_kernel(V0, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, Carry,
                      H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr,
-                     C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr):
+                     C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr,
+                     MIXED: tl.constexpr = False):
     shg = tl.program_id(0).to(tl.int64)
     group, head, seq = shg % NG, (shg // NG) % H, shg // (NG * H)
     a, g, i = tl.arange(0, K), tl.arange(0, G), tl.arange(0, C)
@@ -308,18 +317,18 @@ def state_fwd_kernel(V0, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS,
         if CARRY and chunk > first:
             y = yn
         else:
-            y = mm(f, s, C, G, K)
+            y = mm_state_product(f, s, C, G, K, MIXED)
         store_matrix(SavedS, block, s, K, G)
         store_matrix(SavedY, block, y, C, G)
         output, s, h, w, u, r, t, zp, ro, target, ss, us, rs, ts = local_graph(
-            P, Gp, ch, block, v, s, y, end - start, C, K, G)
+            P, Gp, ch, block, v, s, y, end - start, C, K, G, MIXED)
         if CARRY and chunk + 1 < last:
             e = load_matrix(Carry[0], ch, C, K)
             hc = load_matrix(Carry[1], ch, C, C)
             fn = load_matrix(P[5], ch + H, C, K)
             kl = row(load_matrix(P[1], ch, C, K), end - start - 1, C, K)
             nl = at(load_vector(P[18], ch, C), end - start - 1, C)
-            ry = mm(e, ss, C, G, K) + mm(hc, us, C, G, C)
+            ry = mm_state_product(e, ss, C, G, K, MIXED) + mm_state_product(hc, us, C, G, C, MIXED)
             ty = (tl.sum(fn * kl[None, :], 1) / nl)[:, None] * row(v, end - start - 1, C, G)[None, :]
             zz, tt = at(r + t, end - start - 1, C), at(t, end - start - 1, C)
             yn = ry / zz + (tt / zz) * ty
@@ -331,7 +340,7 @@ def state_fwd_kernel(V0, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS,
 @triton.jit
 def state_bwd_kernel(V0, Curvature, DO, DS, DV, DS0, DC, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, Sh, Carry,
                      H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr,
-                     C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr):
+                     C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, MIXED: tl.constexpr = False):
     shg = tl.program_id(0).to(tl.int64)
     group, head, seq = shg % NG, (shg // NG) % H, shg // (NG * H)
     a, g, i = tl.arange(0, K), tl.arange(0, G), tl.arange(0, C)
@@ -353,7 +362,7 @@ def state_bwd_kernel(V0, Curvature, DO, DS, DV, DS0, DC, Starts, Ends, SeqChunks
         s = load_matrix(SavedS, block, K, G)
         y = load_matrix(SavedY, block, C, G)
         output, sn, h, w, u, r, t, zp, ro, target, ss, us, rs, ts = local_graph(
-            P, Gp, ch, block, v, s, y, length, C, K, G)
+            P, Gp, ch, block, v, s, y, length, C, K, G, MIXED)
         qer = load_matrix(P[7], ch, C, K)
         to = load_matrix(P[13], ch, C, C)
         past = load_matrix(P[17], ch, K, C)
@@ -391,21 +400,22 @@ def state_bwd_kernel(V0, Curvature, DO, DS, DV, DS0, DC, Starts, Ends, SeqChunks
             fn = load_matrix(P[5], ch + H, C, K)
             klc = row(k, length - 1, C, K)
             nlc = at(n, length - 1, C)
-            ry = mm(e, ss, C, G, K) + mm(hc, us, C, G, C)
+            ry = mm_state_product(e, ss, C, G, K, MIXED) + mm_state_product(hc, us, C, G, C, MIXED)
             ty = (tl.sum(fn * klc[None, :], 1) / nlc)[:, None] * row(v, length - 1, C, G)[None, :]
-            adj += mm(tl.trans(fn), by, K, G, C)
+            adj += mm_state_product(tl.trans(fn), by, K, G, C, MIXED)
             norm_y = tl.sum(tl.sum(by * (ry / zz), 0), 0)
             dot_y = tl.sum(tl.sum(by * ty, 0), 0)
-            carry_gu = mm(tl.trans(hc), by, C, G, C)
-            gfnext = mm(by, tl.trans(sn), C, K, G)
+            carry_gu = mm_state_product(tl.trans(hc), by, C, G, C, MIXED)
+            gfnext = mm_state_product(by, tl.trans(sn), C, K, G, MIXED)
         norm_s = norm_y + tl.sum(tl.sum(bs * (rs / zz), 0), 0)
         dot_s = dot_y + tl.sum(tl.sum(bs * ts, 0), 0)
         gr += tl.where(i == length - 1, -(norm_s + (tt / zz) * dot_s) / zz, 0.)
         gt += tl.where(i == length - 1, ((rl / zz) * dot_s - norm_s) / zz, 0.)
         gu += tl.where(i[:, None] < length - 1,
-                       row(rho, length - 1, C, C)[:, None] * (mm(tl.trans(past), bs, C, G, K) + carry_gu) / zz, 0.)
+                       row(rho, length - 1, C, C)[:, None] * (
+                           mm_state_product(tl.trans(past), bs, C, G, K, MIXED) + carry_gu) / zz, 0.)
         residual_grad = adj / zz
-        gp = mm(residual_grad, tl.trans(us), K, C, G)
+        gp = mm_state_product(residual_grad, tl.trans(us), K, C, G, MIXED)
         kl = row(k, length - 1, C, K)
         tau = row(decay, length - 1, C, K)
         gl = at(gamma, length - 1, C)
@@ -438,8 +448,8 @@ def state_bwd_kernel(V0, Curvature, DO, DS, DV, DS0, DC, Starts, Ends, SeqChunks
         gw += tl.sum(gu * v, 1)
         gv += w[:, None] * gu
         scaled = nu[:, None] * gu
-        glower = -mm(scaled, tl.trans(y), C, C, G)
-        gy = -mm(tl.trans(lower), scaled, C, G, C)
+        glower = -mm_state_product(scaled, tl.trans(y), C, C, G, MIXED)
+        gy = -mm_state_product(tl.trans(lower), scaled, C, G, C, MIXED)
         zi = load_matrix(Gp[0], block, C, C)
         b = tl.sum(tl.trans(zi) * gw[None, :], 1)
         gzmatrix = -rho * b[:, None] * w[None, :]
@@ -453,11 +463,11 @@ def state_bwd_kernel(V0, Curvature, DO, DS, DV, DS0, DC, Starts, Ends, SeqChunks
         vv = load_matrix(Gp[3], block, C, C)
         ga = grmat * vv
         gram_grad = grmat * inv
-        gv += mm(gram_grad + tl.trans(gram_grad), v, C, G, C)
+        gv += mm_state_product(gram_grad + tl.trans(gram_grad), v, C, G, C, MIXED)
         gf = tl.full((C, K), 0, tl.float64)
         if not CARRY or chunk == first:
-            gf = mm(gy, tl.trans(s), C, K, G)
-            gs += mm(tl.trans(f), gy, K, G, C)
+            gf = mm_state_product(gy, tl.trans(s), C, K, G, MIXED)
+            gs += mm_state_product(tl.trans(f), gy, K, G, C, MIXED)
         by = gy
         store_matrix(Sh[14], block, gfnext, C, K)
         store_matrix(Sh[0], block, ga, C, C)

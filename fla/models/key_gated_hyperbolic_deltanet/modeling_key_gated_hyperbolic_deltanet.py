@@ -54,6 +54,7 @@ class KeyGatedHyperbolicDeltaNetBlock(GradientCheckpointingLayer):
                 group_size=config.group_size,
                 chunk_size=config.chunk_size,
                 carry_mode=config.carry_mode,
+                precision_policy=config.precision_policy,
                 decay_mode=config.decay_mode,
                 decay_rank=config.decay_rank,
                 decay_function=config.decay_function,

@@ -551,3 +551,199 @@ def test_chunk_cotangent_grouped():
 def test_chunk_cotangent_normal_long():
     sources, cu = make_case(2048, 128, 128, 32, torch.float32)
     compare_case('chunk_key_gated_hyperbolic_delta_rule', sources, cu, 32, 32, 'y_carry')
+
+
+@pytest.mark.parametrize('carry', ['no_carry', 'y_carry'])
+@pytest.mark.parametrize('length,exponent,magnitude,sign,decay', [
+    (16, 13, 1., 1., 0.), (16, 10, .25, 1., 0.), (16, 12, 1., -1., 0.),
+    (16, 13, 4., 1., 0.), (16, 14, -4., -1., 0.), (16, 15, 1., 1., 0.),
+    (16, 13, 1., 1., -.02), (35, 13, 1., 1., -.02),
+])
+def test_chunk_mixed_readout_cancellation(carry, length, exponent, magnitude, sign, decay):
+    q = torch.zeros((1, length, 1, 16), device=device)
+    q[..., 0], q[..., 1] = magnitude * (1 + 2.**-exponent), magnitude
+    k = torch.zeros_like(q)
+    k[..., 15] = 1.
+    v = torch.zeros_like(q)
+    beta = torch.zeros((1, length, 1), device=device)
+    ell = torch.full_like(q, decay)
+    state = torch.zeros((1, 1, 16, 16), device=device)
+    state[..., 0, :], state[..., 1, :] = sign * (1 - 2.**-exponent), -sign
+    sources = tuple(x.requires_grad_() for x in (q, k, v, beta, ell, state, q.new_zeros(())))
+    reference = tuple(x.detach().double().requires_grad_() for x in sources)
+    options = dict(group_size=16, scale=1., output_final_state=True)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], initial_state=reference[5], curvature=reference[6], **options)
+    info = {}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], initial_state=sources[5], curvature=sources[6], chunk_size=16,
+        carry_mode=carry, precision_policy='mixed_readout', telemetry=info, **options)
+    assert info['precision_route'] == 'experimental_mixed_readout'
+    cot = (torch.ones_like(actual[0]), torch.ones_like(actual[1]))
+    grads = torch.autograd.grad(actual, sources, cot)
+    expected_grads = torch.autograd.grad(expected, reference, tuple(x.double() for x in cot))
+    for name, a, e in zip(('output', 'state'), actual, expected):
+        compare_tensor(name, a, e)
+    for name, a, e in zip(('dq', 'dk', 'dv', 'dbeta', 'dell', 'dS0', 'dc'), grads, expected_grads):
+        compare_tensor(name, a, e, backward=True)
+
+
+@pytest.mark.parametrize('chunk', [16, 32, 64])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize('carry', ['no_carry', 'y_carry'])
+def test_chunk_mixed_readout_sources(chunk, dtype, carry):
+    sources, cu = make_case(2 * chunk + 3, 128, 128, 32, dtype)
+    reference = tuple(x.detach().double().requires_grad_() for x in sources)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], initial_state=reference[5], curvature=reference[6], group_size=32, output_final_state=True)
+    info = {}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], initial_state=sources[5], curvature=sources[6], group_size=32,
+        chunk_size=chunk, carry_mode=carry, output_final_state=True, precision_policy='mixed_readout', telemetry=info)
+    assert info['precision_route'] == 'experimental_mixed_readout'
+    torch.manual_seed(20261026)
+    cot = (torch.randn_like(sources[2]), torch.randn_like(sources[5]))
+    grads = torch.autograd.grad(actual, sources, cot)
+    expected_grads = torch.autograd.grad(expected, reference, tuple(x.double() for x in cot))
+    for name, a, e in zip(('output', 'state'), actual, expected):
+        compare_tensor(name, a, e)
+    for name, a, e in zip(('dq', 'dk', 'dv', 'dbeta', 'dell', 'dS0', 'dc'), grads, expected_grads):
+        compare_tensor(name, a, e, backward=True)
+
+
+@pytest.mark.parametrize('policy,dtype,chunk,magnitude,reason', [
+    ('strict', torch.float32, 16, 1., 'strict_requested'),
+    ('mixed_readout', torch.float32, 8, 1., 'unqualified_geometry'),
+    ('mixed_readout', torch.float16, 16, 1., 'unqualified_source_dtype'),
+    ('mixed_readout', torch.float32, 16, 9., 'unqualified_source_magnitude'),
+])
+def test_chunk_mixed_readout_strict_routes(policy, dtype, chunk, magnitude, reason):
+    sources, cu = make_case(19, 128, 128, 32, dtype)
+    if magnitude != 1.:
+        with torch.no_grad():
+            sources[0][..., 0] = magnitude
+    info = {}
+    options = dict(curvature=sources[6], initial_state=sources[5], group_size=32,
+                   output_final_state=True, chunk_size=chunk)
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(*sources[:5], **options, precision_policy=policy, telemetry=info)
+    strict = ops.chunk_key_gated_hyperbolic_delta_rule(*sources[:5], **options)
+    assert info['precision_route'] == 'strict' and info['qualification_reason'] == reason
+    for a, e in zip(actual, strict):
+        torch.testing.assert_close(a, e, atol=0, rtol=0)
+    cot = tuple(torch.ones_like(x) for x in actual)
+    actual_grads = torch.autograd.grad(actual, sources, cot)
+    strict_grads = torch.autograd.grad(strict, sources, cot)
+    for a, e in zip(actual_grads, strict_grads):
+        torch.testing.assert_close(a, e, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize('scale,reason', [
+    (2., None), (-2., None),
+    (math.nextafter(2., math.inf), 'unqualified_effective_query_magnitude'),
+    (-math.nextafter(2., math.inf), 'unqualified_effective_query_magnitude'),
+])
+def test_chunk_mixed_readout_scaled_query_profile(scale, reason):
+    import importlib
+    chunk_module = importlib.import_module('fla.ops.key_gated_hyperbolic_delta_rule.chunk')
+    sources, cu = make_case(19, 128, 128, 32, torch.float32)
+    with torch.no_grad():
+        sources[0].fill_(4.)
+    options = dict(c=16, g=32, bounds=[0, 19, 38], scale=scale)
+    assert chunk_module._qualification_reason(sources, options) == reason
+
+
+def test_chunk_mixed_readout_reused_telemetry_reports_executed_routes():
+    sources, _ = make_case(19, 128, 128, 32, torch.float32)
+    info = {'caller_tag': 'preserved'}
+    options = dict(curvature=sources[6], initial_state=sources[5], group_size=32,
+                   output_final_state=True, chunk_size=16, telemetry=info)
+    for policy, route in [('strict', 'strict'), ('mixed_readout', 'experimental_mixed_readout'), ('strict', 'strict')]:
+        actual = ops.chunk_key_gated_hyperbolic_delta_rule(*sources[:5], **options, precision_policy=policy)
+        assert info['precision_requested'] == policy and info['precision_route'] == route
+        assert info['caller_tag'] == 'preserved'
+        assert 'backward_precision_route' not in info and 'exception_reason' not in info
+        if policy == 'strict':
+            assert info['qualification_reason'] == 'strict_requested'
+            assert 'qualification' not in info and 'contraction_precision' not in info
+        else:
+            assert 'qualification_reason' not in info and info['precision_eligible']
+        torch.autograd.grad(actual, sources, tuple(torch.ones_like(x) for x in actual))
+        assert info['backward_precision_route'] == route
+
+
+def test_chunk_mixed_readout_host_exception_overrides_candidate_telemetry():
+    q = torch.ones(1, 1, 1, 16, device=device) * .1
+    k = torch.zeros_like(q)
+    k[..., 0] = 1.
+    v = torch.zeros_like(q)
+    v[..., 0] = math.sqrt(4.8)
+    beta = torch.full((1, 1, 1), .5, device=device)
+    ell = torch.zeros_like(q)
+    state = torch.zeros(1, 1, 16, 16, device=device)
+    curve = q.new_tensor(1.)
+    sources = tuple(x.requires_grad_() for x in (q, k, v, beta, ell, state, curve))
+    info = {'qualification': 'old', 'contraction_precision': 'old', 'backward_precision_route': 'old'}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], curvature=curve, initial_state=state, group_size=16, chunk_size=16,
+        output_final_state=True, precision_policy='mixed_readout', telemetry=info,
+    )
+    assert info['precision_requested'] == 'mixed_readout' and info['precision_eligible']
+    assert info['precision_route'] == 'host_exception' and info['exception_reason'] == 'feedback_margin'
+    assert info['tensor_cores'] is False and info['backend'] == 'host_reviewed_chunk_exception'
+    assert 'qualification' not in info and 'contraction_precision' not in info
+    assert 'backward_precision_route' not in info
+    reference = tuple(x.detach().double().requires_grad_() for x in sources)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], curvature=reference[6], initial_state=reference[5], group_size=16, output_final_state=True,
+    )
+    for name, a, r in zip(('output', 'state'), actual, expected):
+        compare_tensor(name, a, r)
+    cot = tuple(torch.ones_like(x) for x in actual)
+    gradients = torch.autograd.grad(actual, sources, cot)
+    truth = torch.autograd.grad(expected, reference, tuple(x.double() for x in cot))
+    for name, a, r in zip(('dq', 'dk', 'dv', 'dbeta', 'dell', 'dS0', 'dc'), gradients, truth):
+        compare_tensor(name, a, r, backward=True)
+    assert info['host_details'].get('backward_precision')
+    assert info['precision_route'] == 'host_exception'
+
+
+def test_recurrent_telemetry_adapter_clears_owned_fields_on_reuse():
+    sources, cu = make_case(3, 32, 32, 32, torch.float32)
+    info = {'qualification': 'old', 'exception_reason': 'old', 'backward_precision_route': 'old'}
+    actual = call('fused_recurrent_key_gated_hyperbolic_delta_rule', sources, cu, 32, 16, telemetry=info)
+    assert info['precision_route'] == 'strict' and info['backend'] == 'triton_recurrent'
+    assert 'qualification' not in info and 'exception_reason' not in info
+    assert 'backward_precision_route' not in info
+    torch.autograd.grad(actual, sources, tuple(torch.ones_like(x) for x in actual))
+    assert info['backward_precision_route'] == 'strict'
+
+
+@pytest.mark.parametrize('length,chunk,carry,amplitude,route,profile', [
+    (35, 16, 'no_carry', 8., 'experimental_mixed_readout', 'empirical_profile_v1'),
+    (35, 16, 'no_carry', 128., 'experimental_mixed_readout', 'model_adjoint_v1'),
+    (35, 16, 'no_carry', 128.00001525878906, 'strict_device_replay', 'unqualified'),
+    (36, 16, 'no_carry', 128., 'strict_device_replay', 'unqualified'),
+    (35, 32, 'no_carry', 128., 'strict_device_replay', 'unqualified'),
+    (35, 16, 'y_carry', 128., 'strict_device_replay', 'unqualified'),
+])
+def test_chunk_mixed_readout_adjoint_profile(length, chunk, carry, amplitude, route, profile):
+    sources, cu = make_case(length, 128, 128, 32, torch.float32)
+    reference = tuple(x.detach().double().requires_grad_() for x in sources)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], curvature=reference[6], initial_state=reference[5], group_size=32, output_final_state=True,
+    )
+    info = {}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], curvature=sources[6], initial_state=sources[5], group_size=32, output_final_state=True,
+        chunk_size=chunk, carry_mode=carry, precision_policy='mixed_readout', telemetry=info,
+    )
+    cot = tuple(torch.ones_like(x) * amplitude for x in actual)
+    gradients = torch.autograd.grad(actual, sources, cot)
+    truth = torch.autograd.grad(expected, reference, tuple(x.double() for x in cot))
+    for name, a, r in zip(('output', 'state'), actual, expected):
+        compare_tensor(name, a, r)
+    for name, a, r in zip(('dq', 'dk', 'dv', 'dbeta', 'dell', 'dS0', 'dc'), gradients, truth):
+        compare_tensor(name, a, r, backward=True)
+    assert info['precision_route'] == 'experimental_mixed_readout'
+    assert info['backward_precision_route'] == route and info['backward_adjoint_profile'] == profile
+    assert info['backward_output_cotangent_max'] == info['backward_state_cotangent_max'] == amplitude

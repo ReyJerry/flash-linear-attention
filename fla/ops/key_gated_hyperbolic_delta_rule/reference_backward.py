@@ -291,8 +291,21 @@ def _backward(tapes, sources, options, go, gs, telemetry, needs_input_grad=None)
             for dest, value in zip((0, 1, 3, 4), (qg * options['scale'], kg, bg, eg)):
                 flat_grads[dest][sl, head] += like(value, grads[dest])
             shared_count += 1
+    aliases = options.get('source_alias_groups', ())
+    alias_owners = {}
+    for group in aliases:
+        owner = next((index for index in group if needs_input_grad is None or needs_input_grad[index]), group[0])
+        total = grads[group[0]]
+        for index in group[1:]:
+            total = total + grads[index]
+        grads[owner] = total
+        for index in group:
+            alias_owners[index] = owner
     results = []
     for index, (source, grad) in enumerate(zip(sources, grads)):
+        if index in alias_owners and alias_owners[index] != index:
+            results.append(None)
+            continue
         if needs_input_grad is not None and not needs_input_grad[index]:
             results.append(None)
             continue
@@ -309,6 +322,10 @@ def _backward(tapes, sources, options, go, gs, telemetry, needs_input_grad=None)
                          backward_extended_subblocks=sum(len(t['blocks']) for t in tapes) if mp_context is not None else 0,
                          backward_cotangent_promotion=scaled_subnormal,
                          backward_extended_precision_bits=None if mp_context is None else mp_context.prec)
+    if telemetry is not None and aliases:
+        telemetry.update(source_alias_groups=[list(group) for group in aliases],
+                         source_gradient_aggregation=('mpmath_before_public_cast' if mp_context is not None
+                                                      else 'fp64_before_public_cast'))
     return tuple(results)
 
 

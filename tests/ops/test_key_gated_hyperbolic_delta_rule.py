@@ -720,7 +720,12 @@ def test_recurrent_telemetry_adapter_clears_owned_fields_on_reuse():
 
 @pytest.mark.parametrize('length,chunk,carry,amplitude,route,profile', [
     (35, 16, 'no_carry', 8., 'experimental_mixed_readout', 'empirical_profile_v1'),
-    (35, 16, 'no_carry', 128., 'experimental_mixed_readout', 'model_adjoint_v1'),
+    (35, 16, 'no_carry', 128., 'strict_device_replay', 'unqualified'),
+    (16, 16, 'no_carry', 128., 'experimental_mixed_readout', 'model_adjoint_v1'),
+    (32, 16, 'no_carry', 32., 'experimental_mixed_readout', 'model_joint_adjoint_v1'),
+    (32, 16, 'no_carry', 32.000003814697266, 'strict_device_replay', 'unqualified'),
+    (35, 16, 'no_carry', 21.333332061767578, 'experimental_mixed_readout', 'model_joint_adjoint_v1'),
+    (35, 16, 'no_carry', 21.33333396911621, 'strict_device_replay', 'unqualified'),
     (35, 16, 'no_carry', 128.00001525878906, 'strict_device_replay', 'unqualified'),
     (36, 16, 'no_carry', 128., 'strict_device_replay', 'unqualified'),
     (35, 32, 'no_carry', 128., 'strict_device_replay', 'unqualified'),
@@ -747,3 +752,233 @@ def test_chunk_mixed_readout_adjoint_profile(length, chunk, carry, amplitude, ro
     assert info['precision_route'] == 'experimental_mixed_readout'
     assert info['backward_precision_route'] == route and info['backward_adjoint_profile'] == profile
     assert info['backward_output_cotangent_max'] == info['backward_state_cotangent_max'] == amplitude
+
+
+@pytest.mark.parametrize('curve,chunk,carry,packed,dtype,route', [
+    (1.0000001192092896, 16, 'no_carry', False, torch.float32, 'experimental_mixed_readout'),
+    (1.5, 16, 'no_carry', True, torch.float32, 'experimental_mixed_readout'),
+    (2., 16, 'no_carry', False, torch.float32, 'experimental_mixed_readout'),
+    (2., 16, 'no_carry', True, torch.float32, 'experimental_mixed_readout'),
+    (2., 16, 'no_carry', False, torch.bfloat16, 'experimental_mixed_readout'),
+    (2., 16, 'no_carry', True, torch.bfloat16, 'experimental_mixed_readout'),
+    (2.000000238418579, 16, 'no_carry', False, torch.float32, 'strict'),
+    (2., 32, 'no_carry', False, torch.float32, 'strict'),
+    (2., 64, 'no_carry', False, torch.float32, 'strict'),
+    (2., 16, 'y_carry', False, torch.float32, 'strict'),
+])
+def test_chunk_mixed_readout_model_curvature(curve, chunk, carry, packed, dtype, route):
+    sources, cu = make_case(32 if packed else 16, 128, 128, 32, dtype, packed)
+    with torch.no_grad():
+        sources[6].fill_(curve)
+    reference = tuple(x.detach().double().requires_grad_() for x in sources)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], curvature=reference[6], initial_state=reference[5], group_size=32,
+        cu_seqlens=cu, output_final_state=True,
+    )
+    info = {}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], curvature=sources[6], initial_state=sources[5], group_size=32,
+        cu_seqlens=cu, chunk_size=chunk, carry_mode=carry, output_final_state=True,
+        precision_policy='mixed_readout', telemetry=info,
+    )
+    cot = tuple(torch.ones_like(x) * 128. for x in actual)
+    gradients = torch.autograd.grad(actual, sources, cot)
+    truth = torch.autograd.grad(expected, reference, tuple(x.double() for x in cot))
+    for name, a, r in zip(('output', 'state'), actual, expected):
+        compare_tensor(name, a, r)
+    for name, a, r in zip(('dq', 'dk', 'dv', 'dbeta', 'dell', 'dS0', 'dc'), gradients, truth):
+        compare_tensor(name, a, r, backward=True)
+    assert info['precision_route'] == info['backward_precision_route'] == route
+    if route == 'experimental_mixed_readout':
+        assert info['qualification'] == 'model_curvature_v1'
+        assert info['backward_adjoint_profile'] == 'model_adjoint_v1'
+    else:
+        assert info['qualification_reason'] == (
+            'unqualified_curvature' if curve > 2. else 'unqualified_curvature_geometry')
+        assert 'qualification' not in info
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+def test_chunk_mixed_readout_joint_adjoint_counterexample(dtype):
+    sources, _ = make_case(35, 128, 128, 32, dtype)
+    with torch.no_grad():
+        sources[6].fill_(1.)
+    reference = tuple(x.detach().double().requires_grad_() for x in sources)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], curvature=reference[6], initial_state=reference[5], group_size=32,
+        output_final_state=True, scale=1.,
+    )
+    info = {}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], curvature=sources[6], initial_state=sources[5], group_size=32,
+        chunk_size=16, carry_mode='no_carry', output_final_state=True, scale=1.,
+        precision_policy='mixed_readout', telemetry=info,
+    )
+    cot = tuple((torch.cos(torch.arange(x.numel(), dtype=torch.float64, device=x.device)).reshape(x.shape) * 128.).to(x)
+                for x in actual)
+    gradients = torch.autograd.grad(actual, sources, cot)
+    truth = torch.autograd.grad(expected, reference, tuple(x.double() for x in cot))
+    for name, a, r in zip(('output', 'state'), actual, expected):
+        compare_tensor(name, a, r)
+    for name, a, r in zip(('dq', 'dk', 'dv', 'dbeta', 'dell', 'dS0', 'dc'), gradients, truth):
+        compare_tensor(name, a, r, backward=True)
+    assert info['precision_route'] == 'experimental_mixed_readout'
+    assert info['backward_precision_route'] == 'strict_device_replay'
+    assert info['backward_qualification_reason'] == 'unqualified_joint_chunk_adjoint'
+    assert info['backward_adjoint_chunks'] == 3 and info['backward_adjoint_load'] == 768.
+    assert info['strict_replay_details']['precision_route'] == 'strict'
+    assert not info['strict_replay_details']['tensor_cores']
+
+
+@pytest.mark.parametrize('amplitude', [128., 128.00001525878906])
+@pytest.mark.parametrize('case', ['state_source', 'curvature_source', 'alias', 'state_only_q', 'no_final_curvature'])
+def test_chunk_mixed_readout_single_chunk_masks(case, amplitude):
+    sources, _ = make_case(16, 128, 128, 32, torch.float32)
+    sources = list(sources)
+    with torch.no_grad():
+        sources[6].fill_(2.)
+    if case == 'alias':
+        sources[0] = sources[1]
+    requested = [0] if case in ('alias', 'state_only_q') else [5] if case == 'state_source' else [6]
+    for source in sources:
+        source.requires_grad_(False)
+    for i in requested:
+        sources[i].requires_grad_(True)
+    reference = [x.detach().double().requires_grad_(i in requested) for i, x in enumerate(sources)]
+    if case == 'alias':
+        reference[1] = reference[0]
+    final = case != 'no_final_curvature'
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], curvature=reference[6], initial_state=reference[5], group_size=32,
+        output_final_state=final, scale=1.,
+    )
+    info = {}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], curvature=sources[6], initial_state=sources[5], group_size=32,
+        chunk_size=16, output_final_state=final, scale=1., precision_policy='mixed_readout', telemetry=info,
+    )
+    which = (1,) if case == 'state_only_q' else (0,) if not final else (0, 1)
+    cot = tuple(torch.ones_like(actual[i]) * amplitude for i in which)
+    gradients = torch.autograd.grad(tuple(actual[i] for i in which), [sources[i] for i in requested], cot)
+    truth = torch.autograd.grad(tuple(expected[i] for i in which), [reference[i] for i in requested],
+                                tuple(x.double() for x in cot))
+    for name, a, r in zip(('output', 'state'), actual, expected):
+        if a is not None:
+            compare_tensor(name, a, r)
+    for i, a, r in zip(requested, gradients, truth):
+        compare_tensor(str(i), a, r, backward=True)
+    if case == 'state_only_q':
+        assert torch.count_nonzero(gradients[0]) == 0
+    assert info['precision_route'] == 'experimental_mixed_readout'
+    assert info['backward_precision_route'] == ('experimental_mixed_readout' if amplitude <= 128. else 'strict_device_replay')
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize('amplitude', [128., 129.])
+@pytest.mark.parametrize('kind', ['same', 'nonleaf', 'noncontiguous', 'independent'])
+def test_chunk_source_alias_gradient(dtype, amplitude, kind):
+    sources, _ = make_case(16, 128, 128, 32, dtype)
+    sources = [x.detach() for x in sources]
+    sources[6].fill_(2.)
+    leaf = sources[1].requires_grad_()
+    shared = leaf * 1. if kind == 'nonleaf' else leaf
+    if kind == 'noncontiguous':
+        shared = leaf.transpose(-1, -2).contiguous().transpose(-1, -2)
+        assert not shared.is_contiguous()
+    sources[0] = sources[1] = shared
+    targets = [leaf]
+    if kind == 'independent':
+        sources[0] = shared.detach().requires_grad_()
+        sources[1] = shared.detach().requires_grad_()
+        assert sources[0] is not sources[1] and sources[0].data_ptr() == sources[1].data_ptr()
+        targets = sources[:2]
+    reference = [x.detach().double().requires_grad_(i in (0, 1)) for i, x in enumerate(sources)]
+    if kind != 'independent':
+        reference[1] = reference[0]
+    ref_targets = reference[:2] if kind == 'independent' else reference[:1]
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], curvature=reference[6], initial_state=reference[5], group_size=32,
+        scale=1., output_final_state=True,
+    )
+    info = {}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], curvature=sources[6], initial_state=sources[5], group_size=32,
+        scale=1., chunk_size=16, output_final_state=True, precision_policy='mixed_readout', telemetry=info,
+    )
+    cot = tuple((torch.cos(torch.arange(x.numel(), dtype=torch.float64)).reshape(x.shape) * amplitude).to(x) for x in actual)
+    gradients = torch.autograd.grad(actual, targets, cot)
+    truth = torch.autograd.grad(expected, ref_targets, tuple(x.double() for x in cot))
+    for name, a, r in zip(('output', 'state'), actual, expected):
+        compare_tensor(name, a, r)
+    for a, r in zip(gradients, truth):
+        compare_tensor('input_edge', a, r, backward=True)
+    assert info['source_alias_groups'] == ([] if kind == 'independent' else [[0, 1]])
+    if kind != 'independent':
+        assert info['source_gradient_aggregation'] == 'fp64_before_public_cast'
+    assert info['precision_route'] == 'experimental_mixed_readout'
+    assert info['backward_precision_route'] == ('experimental_mixed_readout' if amplitude <= 128. else 'strict_device_replay')
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize('entry', ['chunk_key_gated_hyperbolic_delta_rule', 'fused_recurrent_key_gated_hyperbolic_delta_rule'])
+@pytest.mark.parametrize('nonleaf', [False, True])
+def test_source_alias_host_cotangent_cancellation(dtype, entry, nonleaf):
+    leaf = torch.ones(1, 1, 1, 1, dtype=dtype, device=device, requires_grad=True)
+    shared = leaf * 1. if nonleaf else leaf
+    value = torch.full_like(shared, .2)
+    beta = torch.full((1, 1, 1), .5, dtype=torch.float32, device=device)
+    ell = torch.zeros_like(shared, dtype=torch.float32)
+    state = torch.full_like(shared, 2.**-100, dtype=torch.float32)
+    curve = torch.zeros((), dtype=torch.float32, device=device)
+    info = {}
+    extra = dict(chunk_size=1) if entry.startswith('chunk') else dict(checkpoint_size=1)
+    output, final = getattr(ops, entry)(
+        shared, shared, value, beta, ell, initial_state=state, curvature=curve, scale=1., group_size=1,
+        output_final_state=False, telemetry=info, **extra,
+    )
+    gradient, = torch.autograd.grad(output, leaf, torch.full_like(output, 2.**100))
+    assert final is None
+    torch.testing.assert_close(gradient, torch.full_like(gradient, .5), atol=0, rtol=0)
+    assert info['backward_precision_route'] == 'host_exception'
+    assert info['backward_exception_reason'] == 'cotangent_accuracy'
+    assert info['backward_host_details']['source_gradient_aggregation'] == 'mpmath_before_public_cast'
+    assert info['backward_host_details']['source_alias_groups'] == [[0, 1]]
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize('policy,amplitude,route', [
+    ('mixed_readout', 128., 'experimental_mixed_readout'),
+    ('mixed_readout', 129., 'strict_device_replay'),
+    ('strict', 129., 'strict'),
+])
+def test_source_alias_repeated_grad_request(dtype, policy, amplitude, route):
+    sources, _ = make_case(16, 128, 128, 32, dtype)
+    sources = list(sources)
+    with torch.no_grad():
+        sources[6].fill_(2.)
+    sources[0] = sources[1]
+    reference = [x.detach().double().requires_grad_() for x in sources]
+    reference[0] = reference[1]
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], curvature=reference[6], initial_state=reference[5], group_size=32,
+        scale=1., output_final_state=True,
+    )
+    info = {}
+    actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+        *sources[:5], curvature=sources[6], initial_state=sources[5], group_size=32,
+        scale=1., chunk_size=16, output_final_state=True, precision_policy=policy, telemetry=info,
+    )
+    cot = tuple((torch.cos(torch.arange(x.numel(), dtype=torch.float64)).reshape(x.shape) * amplitude).to(x)
+                for x in actual)
+    gradients = torch.autograd.grad(actual, sources, cot)
+    truth = torch.autograd.grad(expected, reference, tuple(x.double() for x in cot))
+    assert torch.equal(gradients[0], gradients[1])
+    for name, a, r in zip(('output', 'state'), actual, expected):
+        compare_tensor(name, a, r)
+    for name, a, r, source in zip(('dshared0', 'dshared1', 'dv', 'dbeta', 'dell', 'dS0', 'dc'), gradients, truth, sources):
+        assert a.dtype == source.dtype
+        compare_tensor(name, a, r, backward=True)
+    assert info['source_alias_groups'] == [[0, 1]]
+    assert info['source_gradient_aggregation'] == 'fp64_before_public_cast'
+    assert info['precision_route'] == ('strict' if policy == 'strict' else 'experimental_mixed_readout')
+    assert info['backward_precision_route'] == route

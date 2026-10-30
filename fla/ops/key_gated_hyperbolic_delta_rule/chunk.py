@@ -39,9 +39,34 @@ def _reset_telemetry(telemetry, requested):
         'exception_reason', 'backward_exception_reason', 'backward_precision_route',
         'backward_adjoint_profile', 'backward_adjoint_limit',
         'backward_output_cotangent_max', 'backward_state_cotangent_max',
+        'backward_adjoint_chunks', 'backward_adjoint_sum', 'backward_adjoint_load',
+        'source_alias_groups', 'source_gradient_aggregation',
     ):
         telemetry.pop(key, None)
     telemetry.update(precision_requested=requested)
+
+
+def _source_alias_groups(sources):
+    groups = {}
+    for index, source in enumerate(sources):
+        groups.setdefault(id(source), []).append(index)
+    return tuple(tuple(group) for group in groups.values() if len(group) > 1)
+
+
+def _merge_alias_gradients(grads, sources, needs, alias_groups):
+    result = [grad if need else None for grad, need in zip(grads, needs)]
+    for group in alias_groups:
+        owners = [index for index in group if needs[index]]
+        if not owners:
+            continue
+        total = grads[group[0]]
+        for index in group[1:]:
+            total = total + grads[index]
+        for index in group:
+            result[index] = None
+        owner = owners[0]
+        result[owner] = total.to(sources[owner].dtype)
+    return tuple(result)
 
 
 def _buffers(count, shapes, device):
@@ -63,7 +88,8 @@ def _host_arguments(sources, options, check_inputs):
     normalized, opts = _arguments(q, k, v, beta, ell, c, state, options['scale'], cu, options['g'],
                                   check_inputs, options['c'], options['carry'], 'zero_detached', None, True, 0)
     # the device contract requires FP64 preparation even when the CPU public dtype is FP32
-    opts.update(output_final_state=options['final'], working_dtype=torch.float64)
+    opts.update(output_final_state=options['final'], working_dtype=torch.float64,
+                source_alias_groups=options.get('source_alias_groups', ()))
     return normalized, opts
 
 
@@ -128,7 +154,19 @@ def _host_backward(sources, options, do, ds, needs, telemetry):
                          backward_precision_route='host_exception', backward_precision=details.get('backward_precision'),
                          backward_host_seconds=time.perf_counter() - start,
                          backward_fallback_subblocks=sum(len(p) for p in details['execution_plan']))
+        if options.get('source_alias_groups'):
+            telemetry['source_gradient_aggregation'] = details['source_gradient_aggregation']
     return result
+
+
+def _small_model_geometry(sources, options):
+    q, _, v, _, _, state, _ = sources
+    return (
+        q.shape[0] <= 2 and q.shape[2] <= 2 and q.shape[3] == v.shape[3] == 128
+        and state.shape[0] <= 4 and options['g'] == 32 and options['c'] == 16
+        and options['carry'] == 'no_carry'
+        and max(b-a for a, b in zip(options['bounds'], options['bounds'][1:])) <= 35
+    )
 
 
 def _qualification_reason(sources, options):
@@ -162,50 +200,69 @@ def _qualification_reason(sources, options):
     if ell.numel() and ell.detach().min().item() < -16.:
         return 'unqualified_decay'
     if curve.detach().item() > 1.:
-        return 'unqualified_curvature'
+        if curve.detach().item() > 2.:
+            return 'unqualified_curvature'
+        if (not _small_model_geometry(sources, options)
+                or max(b-a for a, b in zip(options['bounds'], options['bounds'][1:])) > options['c']):
+            return 'unqualified_curvature_geometry'
     return None
 
 
 def _mixed_adjoint_qualification(sources, options, do, ds):
-    """Keep v1 and admit the separately measured small-model adjoint envelope."""
+    """Keep v1 and bound combined multi-chunk adjoints within the small-model experiment."""
     maxima = [x.detach().abs().max().item() if x.numel() else 0. for x in (do, ds)]
     finite = all(math.isfinite(x) for x in maxima)
-    q, _, v, _, _, state, _ = sources
-    model_geometry = (
-        q.shape[0] <= 2 and q.shape[2] <= 2 and q.shape[3] == v.shape[3] == 128
-        and state.shape[0] <= 4 and options['g'] == 32 and options['c'] == 16
-        and options['carry'] == 'no_carry'
-        and max(b-a for a, b in zip(options['bounds'], options['bounds'][1:])) <= 35
-    )
+    model_geometry = _small_model_geometry(sources, options)
     legacy = finite and max(maxima) <= 8.
     limit = 128. if model_geometry and not legacy else 8.
-    accepted = finite and max(maxima) <= limit
+    chunks = max((b-a+options['c']-1) // options['c'] for a, b in zip(options['bounds'], options['bounds'][1:]))
+    joint_sum = sum(maxima)
+    joint_load = chunks * joint_sum
+    compound_ok = legacy or chunks <= 1 or joint_load <= 128.
+    accepted = finite and max(maxima) <= limit and compound_ok
     reason = None if accepted else (
-        'unqualified_cotangent_magnitude' if model_geometry or not finite
-        else 'unqualified_model_adjoint_geometry')
+        'unqualified_cotangent_magnitude' if not finite or model_geometry and max(maxima) > limit
+        else 'unqualified_model_adjoint_geometry' if not model_geometry
+        else 'unqualified_joint_chunk_adjoint')
     return reason, dict(
-        backward_adjoint_profile=('empirical_profile_v1' if legacy else 'model_adjoint_v1') if accepted else 'unqualified',
+        backward_adjoint_profile=(('empirical_profile_v1' if legacy else 'model_adjoint_v1' if chunks <= 1
+                                   else 'model_joint_adjoint_v1') if accepted else 'unqualified'),
         backward_adjoint_limit=limit, backward_output_cotangent_max=maxima[0],
-        backward_state_cotangent_max=maxima[1],
+        backward_state_cotangent_max=maxima[1], backward_adjoint_chunks=chunks,
+        backward_adjoint_sum=joint_sum, backward_adjoint_load=joint_load,
     )
 
 
 def _strict_device_replay(sources, options, do, ds, needs, telemetry):
     details = {}
     strict_options = dict(options, mixed=False)
+    aliases = options.get('source_alias_groups', ())
+    owners = list(range(len(sources)))
+    for group in aliases:
+        owner = next((index for index in group if needs[index]), group[0])
+        for index in group:
+            owners[index] = owner
     with torch.enable_grad():
-        replay = tuple(x.detach().requires_grad_(need) for x, need in zip(sources, needs))
+        leaves = {owner: sources[owner].detach().requires_grad_(any(needs[i] for i, root in enumerate(owners) if root == owner))
+                  for owner in set(owners)}
+        replay = tuple(leaves[owner] for owner in owners)
         output, final = _Chunk.apply(*replay, strict_options, details)
         values, cots = (output,), (do,)
         if final is not None:
             values, cots = (*values, final), (*cots, ds)
-        partials = iter(torch.autograd.grad(values, [x for x in replay if x.requires_grad], cots))
-        result = tuple(next(partials) if need else None for need in needs)
+        requested = [index for index, owner in enumerate(owners) if index == owner and leaves[owner].requires_grad]
+        partials = torch.autograd.grad(values, [replay[index] for index in requested], cots)
+        result = [None] * len(sources)
+        for index, partial in zip(requested, partials):
+            result[index] = partial
+        result = tuple(result)
     if telemetry is not None:
         telemetry.update(backward='strict_device_replay', backward_precision=details.get('backward_precision'),
                          backward_precision_route='strict_device_replay',
                          backward_qualification_reason='unqualified_cotangent_magnitude',
                          strict_replay_details=details)
+        if aliases:
+            telemetry['source_gradient_aggregation'] = details['source_gradient_aggregation']
     return result
 
 
@@ -265,7 +322,8 @@ class _Chunk(torch.autograd.Function):
                              saved_buffer_bytes=sum(x.numel()*x.element_size()
                                                     for x in (*p, *groups, saved_s, saved_y, *carry)))
             if options.get('mixed', False):
-                telemetry.update(qualification='empirical_profile_v1', readout_precision='fp64',
+                telemetry.update(qualification=('model_curvature_v1' if curvature.detach().item() > 1.
+                                                else 'empirical_profile_v1'), readout_precision='fp64',
                                  state_control_precision='fp64',
                                  contraction_precision='17_selected_tf32x3_fp32_accumulate_sites')
         return output, final
@@ -305,7 +363,11 @@ class _Chunk(torch.autograd.Function):
                 if ctx.telemetry is not None:
                     ctx.telemetry['backward_qualification_reason'] = adjoint_reason
                 return (*result, None, None)
-        grads = [torch.empty_like(x, memory_format=torch.contiguous_format) for x in sources]
+        aliases = options.get('source_alias_groups', ())
+        needs = ctx.needs_input_grad[:7]
+        wide = {index for group in aliases if any(needs[i] for i in group) for index in group}
+        grads = [torch.empty_like(x, dtype=torch.float64 if index in wide else x.dtype,
+                                  memory_format=torch.contiguous_format) for index, x in enumerate(sources)]
         # scalar curvature owners retain FP64 until the final requested-source cast
         dc = torch.empty((ctx.nc*h*ng,), device=q.device, dtype=torch.float64)
         _, _, shared_shapes = _shapes(c, kt)
@@ -320,7 +382,8 @@ class _Chunk(torch.autograd.Function):
                 h, kd, ng, c, kt, options['scale'], num_warps=4,
             )
         grads[6] = dc.sum().to(curvature.dtype)
-        if any(need and not torch.isfinite(x).all().item() for x, need in zip(grads, ctx.needs_input_grad[:7])):
+        grads = _merge_alias_gradients(grads, sources, needs, aliases)
+        if any(x is not None and not torch.isfinite(x).all().item() for x in grads):
             result = _host_backward(sources, options, do, ds, ctx.needs_input_grad[:7], ctx.telemetry)
             return (*result, None, None)
         if ctx.telemetry is not None:
@@ -330,7 +393,9 @@ class _Chunk(torch.autograd.Function):
                                  backward_precision=('strict_readout_tf32x3_state_products'
                                                      if options.get('mixed', False) else 'device_float64'),
                                  shared_A_vjp=ctx.nc*h)
-        return (*[x if need else None for x, need in zip(grads, ctx.needs_input_grad[:7])], None, None)
+            if aliases:
+                ctx.telemetry['source_gradient_aggregation'] = 'fp64_before_public_cast'
+        return (*grads, None, None)
 
 
 def chunk_key_gated_hyperbolic_delta_rule(
@@ -371,7 +436,11 @@ def chunk_key_gated_hyperbolic_delta_rule(
     state = (torch.zeros((len(bounds)-1, q.shape[2], q.shape[3], v.shape[-1]), device=q.device, dtype=dtype)
              if initial_state is None else initial_state)
     sources = (q, k, v, beta, log_decay, state, c)
-    options = dict(bounds=bounds, scale=scale, g=group_size, c=chunk_size, final=output_final_state, carry=carry_mode)
+    aliases = _source_alias_groups(sources)
+    options = dict(bounds=bounds, scale=scale, g=group_size, c=chunk_size, final=output_final_state, carry=carry_mode,
+                   source_alias_groups=aliases)
+    if telemetry is not None:
+        telemetry['source_alias_groups'] = [list(group) for group in aliases]
     if precision_policy not in ('strict', 'mixed_readout'):
         raise ValueError('precision_policy must be strict or mixed_readout.')
     qualification = 'strict_requested' if precision_policy == 'strict' else _qualification_reason(sources, options)

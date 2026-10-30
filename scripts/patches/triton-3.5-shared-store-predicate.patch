@@ -1,0 +1,39 @@
+--- a/lib/Conversion/TritonGPUToLLVM/Utility.cpp
++++ b/lib/Conversion/TritonGPUToLLVM/Utility.cpp
+@@ -560,6 +560,19 @@
+ 
+   bool isStore = !valsArray.empty();
+   auto b = TritonLLVMOpBuilder(loc, rewriter);
++  auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
++  Value storePred = b.true_val();
++  if (isStore) {
++    auto freeMasks = cvt.getFreeVariableMasks();
++    auto laneMask = freeMasks.lookup(str_attr("lane"));
++    auto warpMask = freeMasks.lookup(str_attr("warp"));
++    if (laneMask)
++      storePred = b.and_(storePred,
++          b.icmp_eq(b.and_(laneId, b.i32_val(laneMask)), b.i32_val(0)));
++    if (warpMask)
++      storePred = b.and_(storePred,
++          b.icmp_eq(b.and_(warpId, b.i32_val(warpMask)), b.i32_val(0)));
++  }
+ 
+   auto emitLdSt = [&](RewriterBase &rewriter, Location loc,
+                       ArrayRef<Value> vals, Value shmemAddr, int idx,
+@@ -569,7 +582,7 @@
+       Value valsVec =
+           packLLVector(loc, ArrayRef<Value>(vals).slice(idx, length), rewriter);
+       targetInfo.storeDShared(rewriter, loc, shmemAddr, std::nullopt, valsVec,
+-                              /*pred=*/b.true_val());
++                              /*pred=*/storePred);
+       return {};
+     } else {
+       assert(vals.empty());
+@@ -579,7 +592,6 @@
+       return unpackLLVector(loc, valsVec, rewriter);
+     }
+   };
+-  auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+   return lowerLdSt(loc, ctx, cvt, valsArray, llvmElemTy, smemBase,
+                    calcPaddedOffset, affineOffset, maskSpanAffineOffset, laneId,
+                    warpId, rewriter, targetInfo, {}, emitLdSt);

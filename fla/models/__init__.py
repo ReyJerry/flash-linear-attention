@@ -30,6 +30,13 @@ from fla.models.hyperbolic_deltanet import (
     HyperbolicDeltaNetModel,
 )
 from fla.models.kda import KDAConfig, KDAForCausalLM, KDAModel
+from fla.models.key_gated_hyperbolic_deltanet import (
+    KeyGatedHyperbolicDeltaNetBlock,
+    KeyGatedHyperbolicDeltaNetConfig,
+    KeyGatedHyperbolicDeltaNetForCausalLM,
+    KeyGatedHyperbolicDeltaNetModel,
+    KeyGatedHyperbolicDeltaNetPreTrainedModel,
+)
 from fla.models.lightnet import LightNetConfig, LightNetForCausalLM, LightNetModel
 from fla.models.linear_attn import LinearAttentionConfig, LinearAttentionForCausalLM, LinearAttentionModel
 from fla.models.log_linear_mamba2 import LogLinearMamba2Config, LogLinearMamba2ForCausalLM, LogLinearMamba2Model
@@ -120,6 +127,11 @@ __all__ = [
     'KDAConfig',
     'KDAForCausalLM',
     'KDAModel',
+    'KeyGatedHyperbolicDeltaNetBlock',
+    'KeyGatedHyperbolicDeltaNetConfig',
+    'KeyGatedHyperbolicDeltaNetForCausalLM',
+    'KeyGatedHyperbolicDeltaNetModel',
+    'KeyGatedHyperbolicDeltaNetPreTrainedModel',
     'LightNetConfig',
     'LightNetForCausalLM',
     'LightNetModel',

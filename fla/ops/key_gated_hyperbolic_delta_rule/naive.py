@@ -124,29 +124,31 @@ def naive_recurrent_key_gated_hyperbolic_delta_rule(
     if isinstance(curvature, torch.Tensor):
         sources += (curvature,)
     dtype = torch.float64 if any(x.dtype == torch.float64 for x in sources) else torch.float32
-    qf, kf, vf, bf, lf = (x.to(dtype).reshape(B * T, *x.shape[2:]) for x in (q, k, v, beta, log_decay))
-    c = torch.as_tensor(curvature, dtype=dtype, device=q.device)
-    kappa = c / group_size
-    h0 = q.new_zeros(len(bounds) - 1, H, K, V, dtype=dtype) if initial_state is None else initial_state.to(dtype)
-    eye = torch.eye(group_size, dtype=dtype, device=q.device)
-    outputs, finals = [], []
-    for n, (bos, eos) in enumerate(zip(bounds, bounds[1:])):
-        state = h0[n].reshape(H, K, G, group_size).permute(0, 2, 1, 3)
-        for t in range(bos, eos):
-            kt = kf[t]
-            vt = vf[t].reshape(H, G, group_size)
-            decayed = lf[t].exp()[:, None, :, None] * state
-            residual = vt - torch.einsum('hk,hgkv->hgv', kt, decayed)
-            norm2 = kt.square().sum(-1)
-            matrix = norm2[:, None, None, None] * eye - kappa * vt.unsqueeze(-1) * vt.unsqueeze(-2)
-            update = bf[t, :, None, None] * torch.linalg.solve(matrix, residual.unsqueeze(-1)).squeeze(-1)
-            denominator = 1 + kappa * (vt * update).sum(-1)
-            state = (decayed + kt[:, None, :, None] * update.unsqueeze(-2)) / denominator[:, :, None, None]
-            outputs.append(scale * torch.einsum('hk,hgkv->hgv', qf[t], state).reshape(H, V))
-        finals.append(state.permute(0, 2, 1, 3).reshape(H, K, V))
-    # empty reductions connect zero VJPs without summing potentially large source values
-    anchor = sum(x.reshape(-1)[:0].sum() for x in (qf, kf, vf, bf, lf, h0, c))
-    output = torch.stack(outputs) if outputs else vf
-    output = (output + anchor).reshape(B, T, H, V).to(q.dtype)
-    final_state = torch.stack(finals) + anchor if output_final_state else None
-    return output, final_state
+    # explicit source promotion must also govern autocast-eligible contractions
+    with torch.autocast(device_type=q.device.type, enabled=False):
+        qf, kf, vf, bf, lf = (x.to(dtype).reshape(B * T, *x.shape[2:]) for x in (q, k, v, beta, log_decay))
+        c = torch.as_tensor(curvature, dtype=dtype, device=q.device)
+        kappa = c / group_size
+        h0 = q.new_zeros(len(bounds) - 1, H, K, V, dtype=dtype) if initial_state is None else initial_state.to(dtype)
+        eye = torch.eye(group_size, dtype=dtype, device=q.device)
+        outputs, finals = [], []
+        for n, (bos, eos) in enumerate(zip(bounds, bounds[1:])):
+            state = h0[n].reshape(H, K, G, group_size).permute(0, 2, 1, 3)
+            for t in range(bos, eos):
+                kt = kf[t]
+                vt = vf[t].reshape(H, G, group_size)
+                decayed = lf[t].exp()[:, None, :, None] * state
+                residual = vt - torch.einsum('hk,hgkv->hgv', kt, decayed)
+                norm2 = kt.square().sum(-1)
+                matrix = norm2[:, None, None, None] * eye - kappa * vt.unsqueeze(-1) * vt.unsqueeze(-2)
+                update = bf[t, :, None, None] * torch.linalg.solve(matrix, residual.unsqueeze(-1)).squeeze(-1)
+                denominator = 1 + kappa * (vt * update).sum(-1)
+                state = (decayed + kt[:, None, :, None] * update.unsqueeze(-2)) / denominator[:, :, None, None]
+                outputs.append(scale * torch.einsum('hk,hgkv->hgv', qf[t], state).reshape(H, V))
+            finals.append(state.permute(0, 2, 1, 3).reshape(H, K, V))
+        # empty reductions connect zero VJPs without summing potentially large source values
+        anchor = sum(x.reshape(-1)[:0].sum() for x in (qf, kf, vf, bf, lf, h0, c))
+        output = torch.stack(outputs) if outputs else vf
+        output = (output + anchor).reshape(B, T, H, V).to(q.dtype)
+        final_state = torch.stack(finals) + anchor if output_final_state else None
+        return output, final_state

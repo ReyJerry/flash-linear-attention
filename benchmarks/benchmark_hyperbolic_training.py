@@ -21,9 +21,9 @@ import hashlib
 import inspect
 import json
 import math
+import os
 import sys
 import time
-import traceback
 from collections import Counter
 from pathlib import Path
 
@@ -41,6 +41,7 @@ from benchmarks.hyperbolic_benchmark_utils import (  # noqa: E402
 )
 
 METHOD_NAMES = ('hdn_tc', 'hdn_staged', 'protected_value', 'protected_shared_inverse', 'protected_staged', 'gdn')
+EXTRA_METHOD_NAMES = ('kda', 'comba', 'gdn2', 'khdn_no_carry', 'khdn_y_carry', 'khdn_naive')
 FLAGS = {
     'FLA_CI_ENV': '0', 'FLA_HYPERBOLIC_TC_FAST': '0', 'FLA_HYPERBOLIC_STAGED': '0',
     'FLA_HYPERBOLIC_SHARED_INVERSE': '0', 'FLA_HYPERBOLIC_PROTECTED_STAGED': '0',
@@ -57,20 +58,30 @@ def method_spec(name):
         flags['FLA_HYPERBOLIC_SHARED_INVERSE'] = '1'
     if name == 'protected_staged':
         flags['FLA_HYPERBOLIC_PROTECTED_STAGED'] = '1'
-    group = 'gdn' if name == 'gdn' else ('protected' if name.startswith('protected_') else 'hdn')
-    baseline = {'hdn': 'hdn_tc', 'protected': 'protected_value', 'gdn': None}[group]
+    group = (name if name in ('gdn', 'kda', 'comba', 'gdn2') else
+             'khdn' if name.startswith('khdn_') else 'protected' if name.startswith('protected_') else 'hdn')
+    baseline = {'hdn': 'hdn_tc', 'protected': 'protected_value', 'khdn': 'khdn_no_carry'}.get(group)
     return {'name': name, 'group': group, 'environment': flags, 'baseline': baseline if baseline != name else None}
 
 
 def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--methods', choices=METHOD_NAMES, nargs='+', default=list(METHOD_NAMES))
+    parser.add_argument('--methods', choices=METHOD_NAMES + EXTRA_METHOD_NAMES, nargs='+', default=list(METHOD_NAMES))
     for name, default in (('batch', 8), ('seq-len', 2048), ('layers', 24), ('hidden-size', 2048),
                           ('heads', 16), ('head-dim', 128), ('intermediate-size', 5184), ('vocab-size', 32000)):
         parser.add_argument('--' + name, type=int, default=default)
     parser.add_argument('--dtype', choices=('bf16', 'fp32'), default='bf16', help='autocast dtype; parameters stay FP32')
     parser.add_argument('--rank', type=int, default=4)
-    parser.add_argument('--chunk-size', type=int, choices=(16, 32), default=16)
+    parser.add_argument('--chunk-size', type=int, choices=(16, 32, 64), default=16)
+    parser.add_argument('--khdn-strict', action='store_true',
+                        help='opt in to correctness-gated strict FP64 SIMT KHDN; no Tensor Core claim')
+    parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout'),
+                        help='explicit KHDN policy; mixed_readout is experimental and rejects fallback/replay')
+    parser.add_argument('--operator-sweep', action='store_true',
+                        help='bounded KHDN operator-only correctness/profile/timing, separate from model/DDP')
+    parser.add_argument('--operator-lengths', type=int, nargs='+', default=[17, 33, 65])
+    parser.add_argument('--oracle-chunk-size', type=int, choices=(8, 16, 32, 64), default=16,
+                        help='nonreentrant independent dense-Oracle temporal checkpoint interval')
     parser.add_argument('--curvature', type=float, default=1.0)
     parser.add_argument('--learnable-curvature', action='store_true')
     parser.add_argument('--inner-checkpoint', action='store_true', help='enable protected inner checkpoint (default off)')
@@ -87,7 +98,35 @@ def parse_arguments(argv=None):
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--profile', type=Path, help='directory for one post-measurement Chrome trace per method')
     parser.add_argument('--output', type=Path, default=Path('profile/hyperbolic-opt/training-benchmark.json'))
+    parser.add_argument('--scaling', choices=('single', 'strong', 'weak'), default='single')
+    parser.add_argument('--accumulation', type=int, help='single mode only; strong/weak accumulation is fixed')
+    parser.add_argument('--local-rank', '--local_rank', type=int, default=None,
+                        help='GPU index; --rank retains protection rank')
+    parser.add_argument('--ddp-timeout', type=int, default=300, help='process group timeout in seconds')
+    parser.add_argument('--task-timeout', type=int, default=14400, help='per-process task deadline in seconds')
+    parser.add_argument('--clip-grad', type=float, default=1.0, help='global assembled gradient norm; 0 disables clipping')
+    parser.add_argument('--trials', type=int, default=1,
+                        help='independent reinitializations; final validation needs at least 3')
+    parser.add_argument('--final-validation', action='store_true', help='require >=10 warmup, >=30 samples, >=3 trials')
+    parser.add_argument('--modes', nargs='+', choices=('fwd', 'bwd', 'fwd_bwd', 'step'), default=['step'])
+    parser.add_argument('--data-layout', choices=('dense', 'padding', 'packed'), default='dense')
+    parser.add_argument('--group-size', type=int, choices=(1, 16, 32), default=32)
+    parser.add_argument('--checkpoint-dir', type=Path,
+                        help='checkpoint root; default OUTPUT_STEM.checkpoints; saves and reloads each trial')
+    parser.add_argument('--resume', type=Path, help='checkpoint directory containing one checkpoint per rank')
+    parser.add_argument('--parameter-counts', action='store_true',
+                        help='exact recipe inventory; cross-check native meta constructors when dependencies are available')
+    parser.add_argument('--loss-backend', choices=('native', 'plain'), default='native',
+                        help='plain disables both fused loss flags for controlled common-CE experiments')
+    parser.add_argument('--memory-only', action='store_true',
+                        help='one fresh-process method/trial; defer health diagnostics until after memory samples')
     args = parser.parse_args(argv)
+    if args.khdn_strict and args.khdn_precision_policy == 'mixed_readout':
+        parser.error('--khdn-strict conflicts with --khdn-precision-policy mixed_readout')
+    if args.khdn_strict:
+        args.khdn_precision_policy = 'strict'
+    if args.khdn_precision_policy == 'mixed_readout' and 'khdn_naive' in args.methods:
+        parser.error('khdn_naive always executes strict; mixed_readout requires a chunk method')
     dimensions = (args.batch, args.layers, args.hidden_size, args.heads, args.intermediate_size)
     if min(dimensions) <= 0 or args.seq_len < 2 or args.vocab_size < 4:
         parser.error('model dimensions must be positive; seq-len>=2 and vocab-size>=4')
@@ -103,6 +142,57 @@ def parse_arguments(argv=None):
         parser.error('lr must be finite and positive; weight-decay must be finite and nonnegative')
     if len(args.methods) != len(set(args.methods)):
         parser.error('methods must not contain duplicates')
+    from benchmarks.hyperbolic_training_distributed import audit_methods, scaling_plan
+    if min(args.ddp_timeout, args.task_timeout, args.trials) < 1:
+        parser.error('timeouts and trials must be positive')
+    if not math.isfinite(args.clip_grad) or args.clip_grad < 0:
+        parser.error('clip-grad must be finite and nonnegative')
+    if len(args.modes) != 1:
+        parser.error('select exactly one mode per invocation; mixed modes share unsafe training trajectories')
+    if args.modes != ['step'] and (args.resume or args.checkpoint_dir):
+        parser.error('phase-only measurements cannot resume or publish a training checkpoint; use --modes step')
+    if args.memory_only and (len(args.methods) != 1 or args.trials != 1 or args.modes != ['step']
+                             or args.profile or args.resume or args.check_only or args.final_validation):
+        parser.error('memory-only requires one method/trial, step mode, and no profile/resume/check-only/final-validation')
+    if args.final_validation and (args.warmup < 10 or args.steps < 30 or args.trials < 3):
+        parser.error('final validation requires >=10 warmup, >=30 samples and >=3 independent trials')
+    if args.resume and (args.trials != 1 or len(args.methods) != 1):
+        parser.error('resume requires one method and one trial')
+    if args.local_rank is not None and args.local_rank < 0:
+        parser.error('local-rank must be nonnegative')
+    if any(name.startswith('protected_') for name in args.methods) and args.data_layout != 'dense':
+        parser.error('protected memory supports dense unpadded inputs only; choose --data-layout dense')
+    if args.profile and args.scaling != 'single':
+        parser.error('profile is a separate single-device run; do not mix it with DDP throughput')
+    try:
+        scaling_plan(args, int(os.environ.get('WORLD_SIZE', '1')))
+    except ValueError as error:
+        parser.error(str(error))
+    if args.chunk_size == 64 and any(not name.startswith('khdn_') for name in args.methods):
+        parser.error('C64 is supported only for KHDN; legacy HDN benchmark routes remain C16/C32')
+    if any(name.startswith('khdn_') for name in args.methods):
+        if args.head_dim % args.group_size:
+            parser.error('KHDN group-size must divide head-dim; no automatic group shrinking')
+        if args.inner_checkpoint:
+            parser.error('KHDN has no protected inner checkpoint policy; omit --inner-checkpoint')
+    if args.operator_sweep and (args.khdn_precision_policy != 'strict' or args.scaling != 'single'
+                                or int(os.environ.get('WORLD_SIZE', '1')) != 1
+                                or any(name not in ('khdn_no_carry', 'khdn_y_carry') for name in args.methods)
+                                or args.resume or args.checkpoint_dir or args.memory_only or args.final_validation
+                                or args.modes == ['step'] or args.dtype != 'fp32'
+                                or len(args.operator_lengths) > 8
+                                or any(not 1 <= length <= 16384 for length in args.operator_lengths)):
+        parser.error('operator-sweep requires strict KHDN, W1/single, fp32, a phase mode, <=8 lengths in [1,16384], '
+                     'and no model resume/memory-only/final-validation')
+    audit = audit_methods()
+    for name in args.methods:
+        if name in ('khdn_no_carry', 'khdn_y_carry') and args.khdn_precision_policy is None:
+            parser.error('optimized KHDN requires explicit --khdn-strict or --khdn-precision-policy '
+                         'and actual kernel/carry attestation')
+        if not audit[name]['available']:
+            parser.error(f'{name}: {audit[name]["reason"]}')
+        if name == 'khdn_naive' and not args.check_only:
+            parser.error('khdn_naive is allowed only for tiny --check-only correctness; full-model naive timing is forbidden')
     return args
 
 
@@ -114,9 +204,18 @@ def model_configuration(args, name, *, small=False):
         intermediate_size=64 if small else args.intermediate_size, vocab_size=97 if small else args.vocab_size,
         max_position_embeddings=max(args.seq_len, 2 * args.chunk_size + 1),
         use_cache=False, use_short_conv=not args.no_short_conv,
-        fuse_norm=True, fuse_swiglu=True, fuse_cross_entropy=True, fuse_linear_cross_entropy=False,
+        fuse_norm=True, fuse_swiglu=True, fuse_cross_entropy=args.loss_backend != 'plain', fuse_linear_cross_entropy=False,
     )
-    if name != 'gdn':
+    if name.startswith('khdn_'):
+        if small:
+            common.update(hidden_size=64, num_heads=2, head_dim=32, intermediate_size=128)
+            if args.khdn_precision_policy == 'mixed_readout':
+                common.update(hidden_size=256, head_dim=128, intermediate_size=512)
+        common.update(group_size=args.group_size, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
+                      chunk_size=args.chunk_size, carry_mode='y_carry' if name == 'khdn_y_carry' else 'no_carry',
+                      attn_mode='naive' if name == 'khdn_naive' else 'chunk',
+                      precision_policy='strict' if name == 'khdn_naive' else (args.khdn_precision_policy or 'strict'))
+    elif name not in ('gdn', 'kda', 'comba', 'gdn2'):
         common.update(tensor_core=True, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
                       protection_rank=args.rank if name.startswith('protected_') else 0,
                       protected_checkpoint=args.inner_checkpoint, chunk_size=args.chunk_size)
@@ -136,12 +235,9 @@ def weight_digest(model):
 
 def build_model(args, spec, *, small=False):
     torch.manual_seed(args.seed)
-    if spec['name'] == 'gdn':
-        from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM
-        model = GatedDeltaNetForCausalLM(GatedDeltaNetConfig(**model_configuration(args, spec['name'], small=small)))
-    else:
-        from fla.models.hyperbolic_deltanet import HyperbolicDeltaNetConfig, HyperbolicDeltaNetForCausalLM
-        model = HyperbolicDeltaNetForCausalLM(HyperbolicDeltaNetConfig(**model_configuration(args, spec['name'], small=small)))
+    from benchmarks.hyperbolic_training_distributed import model_class
+    config_class, causal_class = model_class(spec['name'])
+    model = causal_class(config_class(**model_configuration(args, spec['name'], small=small)))
     model.float().train()
     digest = weight_digest(model)
     if not args.no_layer_checkpoint:
@@ -378,8 +474,8 @@ def train_method(args, spec, data, expected_hash):
             raise AssertionError(f'{spec["name"]}: initial weights differ from its HDN comparison group')
         route = traced_backward(model, data[0], args, spec)
         model.zero_grad(set_to_none=True)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                      weight_decay=args.weight_decay, betas=(0.9, 0.95), fused=True)
+        from benchmarks.hyperbolic_training_distributed import make_optimizer
+        optimizer = make_optimizer(model, args)
         warmup = [optimizer_step(model, optimizer, data[index], args) for index in range(args.warmup)]
         torch.cuda.reset_peak_memory_stats()
         start_allocated, start_reserved = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
@@ -417,14 +513,18 @@ def train_method(args, spec, data, expected_hash):
 
 def add_comparisons(results):
     for name, result in results.items():
+        result['legacy_summary_scope'] = 'trial0 only; raw later trials are not aggregate confirmation'
+        result['legacy_comparison_scope'] = 'trial0 only; main owns cross-trial confirmation'
+        if 'summary_ms' not in result:
+            continue
         baseline = method_spec(name)['baseline']
-        if baseline in results:
+        if baseline in results and 'summary_ms' in results[baseline]:
             result['speedup_against_baseline'] = {
                 'baseline': baseline,
                 **{key: results[baseline]['summary_ms'][key]['median'] / result['summary_ms'][key]['median']
                    for key in ('fwd_cuda_ms', 'bwd_cuda_ms', 'optimizer_cuda_ms', 'total_cuda_ms', 'total_wall_ms')},
             }
-        if 'gdn' in results and name != 'gdn':
+        if 'gdn' in results and 'summary_ms' in results['gdn'] and name != 'gdn':
             result['training_throughput_fraction_of_gdn'] = (
                 results['gdn']['summary_ms']['total_wall_ms']['median'] / result['summary_ms']['total_wall_ms']['median']
             )
@@ -432,6 +532,9 @@ def add_comparisons(results):
 
 def main(argv=None):
     args = parse_arguments(argv)
+    if torch.cuda.is_available():
+        local_rank = args.local_rank if args.local_rank is not None else int(os.environ.get('LOCAL_RANK', '0'))
+        torch.cuda.set_device(local_rank)
     specs = [method_spec(name) for name in args.methods]
     payload = {
         'status': 'CONFIGURED', 'metadata': metadata(args), 'methods': specs,
@@ -447,9 +550,22 @@ def main(argv=None):
                                     'finiteness and actual routes, without asserting full-size trajectory equivalence.',
         },
     }
+    from benchmarks.hyperbolic_training_distributed import audit_methods, parameter_counts, run_benchmark, scaling_plan
+    payload['availability_audit'] = audit_methods()
+    payload['scaling'] = scaling_plan(args, int(os.environ.get('WORLD_SIZE', '1')))
+    if args.parameter_counts:
+        payload['exact_parameter_counts'] = parameter_counts(args)
     if args.dry_run:
         payload['status'] = 'DRY RUN; GPU NOT RUN'
-        payload['model_configurations'] = {name: model_configuration(args, name) for name in args.methods}
+        if args.operator_sweep:
+            payload['scope'] = 'operator only; actual B=H=1, K=V=head-dim; GPU NOT RUN'
+            payload['operator_configurations'] = [
+                {'method': name, 'shape': [1, length, 1, args.head_dim], 'chunk_size': args.chunk_size,
+                 'group_size': args.group_size, 'mode': args.modes[0], 'public_dtype': 'torch.float32',
+                 'required_internal_route': 'strict_device_fp64_simt', 'oracle_temporal_chunk_size': args.oracle_chunk_size}
+                for length in args.operator_lengths for name in args.methods]
+        else:
+            payload['model_configurations'] = {name: model_configuration(args, name) for name in args.methods}
         print(json.dumps(payload, indent=2))
         return 0
     if not torch.cuda.is_available():
@@ -457,36 +573,10 @@ def main(argv=None):
         write_json(args.output, payload)
         print(payload['status'])
         return 2
-    torch.backends.cuda.matmul.allow_tf32 = False
-    payload['metadata'] = metadata(args)
-    try:
-        payload['correctness'] = small_model_gate(args)
-        payload['status'] = 'GPU SMALL MODEL GATE PASSED'
-        write_json(args.output, payload)
-        if not args.check_only:
-            total = args.warmup + args.steps + args.stability_steps
-            data = torch.randint(3, args.vocab_size, (total, args.batch, args.seq_len),
-                                 generator=torch.Generator().manual_seed(args.data_seed)).cuda()
-            payload['data_sha256'] = hashlib.sha256(data.cpu().numpy().tobytes()).hexdigest()
-            payload['measurements'] = {}
-            hashes = {}
-            for spec in specs:
-                result = train_method(args, spec, data, hashes.get(spec['group']))
-                hashes[spec['group']] = result['model']['initial_weights_sha256']
-                payload['measurements'][spec['name']] = result
-                add_comparisons(payload['measurements'])
-                payload['status'] = 'GPU TRAINING BENCHMARK PARTIALLY COMPLETED'
-                write_json(args.output, payload)
-                print(f'{spec["name"]}: {result["tokens_per_second"]["median"]:.1f} tokens/s (median wall time)')
-            payload['status'] = 'GPU SMALL MODEL GATE AND FULL TRAINING BENCHMARK COMPLETED'
-        write_json(args.output, payload)
-    except Exception:
-        payload['status'] = 'GPU VALIDATION OR TRAINING BENCHMARK FAILED'
-        payload['failure'] = traceback.format_exc()
-        write_json(args.output, payload)
-        raise
-    print(f'Results: {args.output}')
-    return 0
+    if args.operator_sweep:
+        from benchmarks.hyperbolic_training_distributed import run_operator_sweep
+        return run_operator_sweep(args, payload)
+    return run_benchmark(args, payload, sys.modules[__name__])
 
 
 if __name__ == '__main__':

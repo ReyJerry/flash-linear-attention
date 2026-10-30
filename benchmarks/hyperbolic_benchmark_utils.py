@@ -474,7 +474,7 @@ def _mlir_without_location(line):
     raise AssertionError('KHDN unterminated/multiline location syntax in compiled IR')
 
 
-def _mlir_contraction_types(ir):
+def _parse_mlir_contraction_types(ir):
     source = _compiler_without_comments(ir)
     value = r'%[-\w.$]+(?:#\d+)?'
     encoding = r'#[\w.]+(?:<\{[^{}<>\n]*\}>)?'
@@ -493,6 +493,11 @@ def _mlir_contraction_types(ir):
         dtype = re.fullmatch(r'(f\d+|bf16)', match[3])
         element = dtype[1] if dtype else re.match(r'(?:tensor|vector)<(?:\d+x)+(f\d+|bf16)', match[3])[1]
         types.append(element)
+    return types
+
+
+def _mlir_contraction_types(ir):
+    types = _parse_mlir_contraction_types(ir)
     if not types or any(dtype != 'f64' for dtype in types):
         raise AssertionError('KHDN strict contraction operand/accumulator dtype missing or not FP64 in compiled IR')
     return types
@@ -524,6 +529,10 @@ def _strict_compiler_evidence(compiled):
                               'instructions, conversions, library calls or per-source operation counts'}
 
 
+def _khdn_kernel_source_hash(kernel):
+    return hashlib.sha256(inspect.getsource(kernel.fn).encode()).hexdigest()
+
+
 class _ObservedKHDNKernel:
     def __init__(self, kernel, trace):
         self.kernel, self.trace = kernel, trace
@@ -543,14 +552,17 @@ class _ObservedKHDNKernel:
             values = dict(zip(names, args))
             values.update({key: value for key, value in kwargs.items() if key in names})
             compiled = launch(*args, **kwargs)
+            from benchmarks.khdn_compiler_precision import compiled_precision_inventory
             row = {'kernel': self.kernel.fn.__name__, 'phase': current[1],
                    'arguments': {key: _tensor_descriptions(value) for key, value in values.items()},
-                   'compiler': _strict_compiler_evidence(compiled), 'thread': threading.get_ident(),
-                   'gemm_source_sites': [{**site, 'operand_dtypes': ['float64', 'float64'],
-                                          'accumulator_dtype': 'float64',
-                                          'evidence': 'supported compiled IR multiply/add/FMA type clauses are f64; '
-                                                      'source-site attribution is not an execution count'}
-                                         for site in self.contractions]}
+                   'compiler': {'raw_assembly': {name: getattr(compiled, 'asm', {}).get(name) for name in ('ttir', 'ptx')}},
+                   'kernel_source_sha256': _khdn_kernel_source_hash(self.kernel),
+                   'thread': threading.get_ident(), 'gemm_source_sites': self.contractions}
+            current[0]['launches'].append(row)
+            inventory = compiled_precision_inventory(compiled)
+            row['compiled_precision_inventory'] = inventory
+            row['compiler'] = ({'ptx_sha256': inventory['ptx_sha256'], 'contraction_ir_sha256': inventory['ttir_sha256']}
+                               if values.get('MIXED') is True else _strict_compiler_evidence(compiled))
             if row['kernel'] == 'group_fwd_kernel':
                 row['prepared_diagnostics'] = _khdn_buffer_diagnostics(values)
             if row['kernel'] == 'state_fwd_kernel':
@@ -561,7 +573,6 @@ class _ObservedKHDNKernel:
                 row['terminal_rows'] = int(terminal.sum())
                 row['future_carry_tail_zero'] = all(bool((buffer[terminal] == 0).all()) for buffer in values['Carry'])
                 row['observed_edges'] = int((nxt >= 0).sum()) * heads
-            current[0]['launches'].append(row)
             return compiled
         return observed
 
@@ -569,17 +580,26 @@ class _ObservedKHDNKernel:
 class KHDNTrace:
     """Retain real operator telemetry through autograd and observe its compiled launches, outside timing."""
 
-    def __init__(self, chunk_size, group_size, carry_mode, expected_backward_calls=1):
+    def __init__(self, chunk_size, group_size, carry_mode, expected_backward_calls=1, precision_policy='strict'):
         self.chunk_size, self.group_size, self.carry_mode = chunk_size, group_size, carry_mode
+        if precision_policy not in ('strict', 'mixed_readout'):
+            raise ValueError('unknown KHDN precision policy')
+        self.precision_policy = precision_policy
         self.expected_backward_calls = expected_backward_calls
         self.saved, self.calls, self.by_telemetry = [], [], {}
         self.hooks, self.layer_names = [], []
         self.local = threading.local()
 
     def bind_model(self, model):
-        for name, attention in model.named_modules():
-            if not hasattr(attention, 'f_proj') or not hasattr(attention, 'A_log'):
-                continue
+        if model.config.precision_policy != self.precision_policy:
+            raise AssertionError('KHDN model precision policy differs from request')
+        attentions = [(name, attention) for name, attention in model.named_modules()
+                      if hasattr(attention, 'f_proj') and hasattr(attention, 'A_log')]
+        if any(attention.precision_policy != self.precision_policy for _, attention in attentions):
+            raise AssertionError('KHDN layer precision policy differs from request')
+        if len(attentions) != self.expected_backward_calls:
+            raise AssertionError('KHDN trained-layer count differs from model configuration')
+        for name, attention in attentions:
             self.layer_names.append(name)
 
             def before(module, args, layer=name):
@@ -589,8 +609,6 @@ class KHDNTrace:
                 self.local.layer = 'operator'
             self.hooks.extend((attention.register_forward_pre_hook(before),
                                attention.register_forward_hook(after, always_call=True)))
-        if len(self.layer_names) != self.expected_backward_calls:
-            raise AssertionError('KHDN trained-layer count differs from model configuration')
         return self
 
     def _entry(self, function):
@@ -620,7 +638,7 @@ class KHDNTrace:
             state = values['initial_state']
             radius2 = (0. if state is None else float((c_value / values['group_size'] * state.detach().double().reshape(
                 *state.shape[:-1], -1, values['group_size']).square().sum((-3, -1))).max()))
-            row = {'requested': {key: values[key] for key in ('chunk_size', 'group_size', 'carry_mode', 'check_inputs')},
+            row = {'requested': {key: values[key] for key in ('chunk_size', 'group_size', 'carry_mode', 'check_inputs', 'precision_policy')},
                    'sources': {key: _tensor_descriptions(values[key]) for key in
                                ('q', 'k', 'v', 'beta', 'log_decay', 'curvature', 'initial_state')},
                    'sequence_bounds': bounds, 'expected_chunk_lengths': lengths,
@@ -641,6 +659,8 @@ class KHDNTrace:
             previous = getattr(self.local, 'current', None)
             self.local.current = (row, 'forward')
             try:
+                if values['precision_policy'] != self.precision_policy:
+                    raise AssertionError('KHDN operator entry precision policy differs from request')
                 returned = function(*bound.args, **bound.kwargs)
                 row['returned'] = _tensor_descriptions(returned)
                 row['forward_complete'] = True
@@ -666,10 +686,20 @@ class KHDNTrace:
 
         @functools.wraps(original_forward.__func__)
         def forward(ctx, *args, **kwargs):
-            row = self.local.current[0]
+            previous = self.local.current
+            row = previous[0]
+            if args[-1] is not row['telemetry']:
+                nested = {'telemetry': args[-1], 'launches': [], 'backward_calls': 0}
+                row.setdefault('strict_replay_calls', []).append(nested)
+                row = nested
+                self.by_telemetry[id(args[-1])] = row
+            self.local.current = (row, 'forward')
             row['executed_options'] = dict(args[-2])
             row['executed_sources'] = [_tensor_descriptions(value) for value in args[:7]]
-            return original_forward.__func__(ctx, *args, **kwargs)
+            try:
+                return original_forward.__func__(ctx, *args, **kwargs)
+            finally:
+                self.local.current = previous
 
         @functools.wraps(original_backward.__func__)
         def backward(ctx, *args, **kwargs):
@@ -700,8 +730,13 @@ class KHDNTrace:
 
     def attest(self):
         try:
+            for row in self.calls:
+                for launch in row['launches']:
+                    kernel = getattr(self.kernel_module, launch['kernel'])
+                    if launch['kernel_source_sha256'] != _khdn_kernel_source_hash(kernel):
+                        raise AssertionError('KHDN kernel source changed during trace')
             evidence = attest_khdn(self.calls, self.chunk_size, self.group_size, self.carry_mode,
-                                   self.expected_backward_calls, self.layer_names or None)
+                                   self.expected_backward_calls, self.layer_names or None, self.precision_policy)
         except BaseException as error:
             error.khdn_evidence = self.calls
             raise
@@ -711,7 +746,14 @@ class KHDNTrace:
         return evidence
 
 
-def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_calls=1, expected_layers=None):
+def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_calls=1, expected_layers=None,
+                precision_policy='strict'):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    if precision_policy not in ('strict', 'mixed_readout'):
+        raise AssertionError('unknown KHDN precision policy')
+    mixed = precision_policy == 'mixed_readout'
+    arithmetic = 'strict_readout_tf32x3_state_products' if mixed else 'device_float64'
+    route = 'experimental_mixed_readout' if mixed else 'strict'
     if not calls or sum(row['backward_calls'] for row in calls) != expected_backward_calls:
         raise AssertionError('KHDN missing operator/backward observations for the actual model depth')
     if expected_layers is not None:
@@ -731,15 +773,22 @@ def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_cal
         if (not options or options.get('bounds') != row['sequence_bounds']
                 or any(options.get(key) != value for key, value in policies)):
             raise AssertionError('KHDN executed C/g/carry metadata missing or different')
+        if (requested.get('precision_policy') != precision_policy or options.get('mixed') is not mixed
+                or telemetry.get('precision_requested') != precision_policy
+                or telemetry.get('precision_eligible') is not mixed):
+            raise AssertionError(f'KHDN requested/executed precision policy differs: {telemetry}')
         if any(source['device'].split(':')[0] != 'cuda' for source in row['executed_sources']):
             raise AssertionError('KHDN substituted host source')
         interrupted = row.get('forward_interrupted') == '_StopRecomputationError' and not row['backward_calls']
-        if (telemetry.get('exception_reason') or (not interrupted and telemetry.get('fallback_subblocks') != 0)
+        if (telemetry.get('exception_reason') or telemetry.get('backward_exception_reason')
+                or telemetry.get('strict_replay_details') or row.get('strict_replay_calls')
+                or (not interrupted and telemetry.get('fallback_subblocks') != 0)
                 or telemetry.get('backward_fallback_subblocks', 0) != 0
                 or (not interrupted and (telemetry.get('backend') != 'triton_chunk'
-                                         or telemetry.get('arithmetic') != 'device_float64'
-                                         or telemetry.get('tensor_cores') is not False))):
-            raise AssertionError('KHDN strict device route/fallback/precision attestation failed')
+                                         or telemetry.get('precision_route') != route
+                                         or telemetry.get('arithmetic') != arithmetic
+                                         or telemetry.get('tensor_cores') is not mixed))):
+            raise AssertionError(f'KHDN {precision_policy} device route/fallback/precision attestation failed: {telemetry}')
         if not interrupted and telemetry.get('chunk_lengths') != row['expected_chunk_lengths']:
             raise AssertionError('KHDN chunk lengths/tail metadata differs from actual sequence bounds')
         edges = row['expected_edges'] if carry_mode == 'y_carry' else 0
@@ -778,12 +827,14 @@ def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_cal
                     raise AssertionError('KHDN missing/invalid consumed denominator or positive mass diagnostics')
             if launch['kernel'] == 'state_fwd_kernel' and not launch.get('y_diagnostics', {}).get('all_saved_state_y_finite'):
                 raise AssertionError('KHDN missing/invalid saved state/Y diagnostics')
+            attest_compiled_policy(launch, precision_policy)
             compiler = launch['compiler']
-            if (not compiler.get('ptx_sha256') or compiler.get('fp64_arithmetic_instructions', 0) <= 0
-                    or compiler.get('tensor_core_instructions') != 0
-                    or not compiler.get('contraction_ir_sha256')
-                    or compiler.get('multiply_add_operand_accumulator_dtypes') != ['float64']):
-                raise AssertionError('KHDN missing strict compiled arithmetic evidence')
+            if not (mixed and launch['kernel'] in ('state_fwd_kernel', 'state_bwd_kernel')):
+                if (not compiler.get('ptx_sha256') or compiler.get('fp64_arithmetic_instructions', 0) <= 0
+                        or compiler.get('tensor_core_instructions') != 0
+                        or not compiler.get('contraction_ir_sha256')
+                        or compiler.get('multiply_add_operand_accumulator_dtypes') != ['float64']):
+                    raise AssertionError('KHDN missing strict compiled arithmetic evidence')
         carry = [launch for launch in launches if launch['kernel'] == 'carry_fwd_kernel']
         if carry_mode == 'y_carry':
             if len(carry) != 1 or carry[0].get('observed_edges') != edges or not carry[0].get('future_carry_tail_zero'):
@@ -792,21 +843,26 @@ def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_cal
             raise AssertionError('KHDN no_carry unexpectedly launched carry preparation')
         if row['backward_calls']:
             if (row.get('backward_options') != options or telemetry.get('backward') != 'manual_triton_chunk_source_vjp'
-                    or telemetry.get('backward_precision') != 'device_float64'):
+                    or telemetry.get('backward_precision_route') != route
+                    or telemetry.get('backward_precision') != arithmetic):
                 raise AssertionError('KHDN missing/manual backward route or precision differs')
-    return {'route': 'strict_device_fp64_simt', 'tensor_core_claim': False, 'operator_calls': calls,
+    return {'route': route if mixed else 'strict_device_fp64_simt',
+            'precision_requested': precision_policy, 'tensor_core_claim': mixed,
+            'numerical_policy_qualified': False, 'performance_accepted': False, 'operator_calls': calls,
             'backward_calls': sum(row['backward_calls'] for row in calls),
             'backward_layer_coverage': dict(Counter(row.get('layer', 'operator') for row in calls if row['backward_calls'])),
             'checkpoint_recompute_observed': any('recompute_fn' in row.get('checkpoint_frames', [])
                                                  or row.get('forward_interrupted') == '_StopRecomputationError' for row in calls),
             'policy_scope': 'actual options and launch arguments; no invented gauge/feedback policy flags',
-            'gemm_precision_scope': 'SIMT FP64 contractions; per-source sites, public/buffer dtypes, compiled IR and PTX evidence'}
+            'gemm_precision_scope': 'per-family compiled arithmetic, public/buffer dtypes and source sites; '
+                                    'source sites are not executed counts; no numerical/performance qualification'}
 
 
 class KHDNExceptionGuard:
-    """Reject exception/recurrent/reference entries without touching the normal timed operator path."""
+    """Reject fallback/replay entries and mixed ineligibility during measured execution."""
 
-    def __init__(self):
+    def __init__(self, precision_policy='strict'):
+        self.precision_policy = precision_policy
         self.saved, self.events = [], []
 
     def __enter__(self):
@@ -815,7 +871,20 @@ class KHDNExceptionGuard:
         naive = importlib.import_module(KHDN_PREFIX + '.naive')
         targets = (module._host_call, module._host_backward, recurrent.fused_recurrent_key_gated_hyperbolic_delta_rule,
                    naive.naive_recurrent_key_gated_hyperbolic_delta_rule)
+        targets = (*targets, module._strict_device_replay)
         replacements = {}
+        if self.precision_policy == 'mixed_readout':
+            qualify = module._qualification_reason
+
+            @functools.wraps(qualify)
+            def require_mixed(*args, **kwargs):
+                reason = qualify(*args, **kwargs)
+                if reason is not None:
+                    self.events.append({'entry': '_qualification_reason', 'reason': reason,
+                                        'thread': threading.get_ident()})
+                    raise RuntimeError(f'KHDN native mixed measurement rejected strict fallback: {reason}')
+                return reason
+            replacements[id(qualify)] = require_mixed
         for function in targets:
             def reject(*args, _name=function.__name__, **kwargs):
                 self.events.append({'entry': _name, 'thread': threading.get_ident()})
@@ -831,8 +900,10 @@ class KHDNExceptionGuard:
 
     def evidence(self):
         return {'method': 'raise_before_host_forward_or_backward_or_recurrent_or_reference',
-                'events': self.events, 'normal_path_wrappers': 0,
-                'scope': 'exception entries replaced outside timer; original core range checks remain timed'}
+                'events': self.events, 'precision_requested': self.precision_policy,
+                'normal_path_wrappers': int(self.precision_policy == 'mixed_readout'),
+                'scope': 'exception/replay entries and mixed eligibility rejection installed outside timer; '
+                         'original core range checks and mixed eligibility checks remain timed'}
 
 
 def _khdn_buffer_diagnostics(values):
@@ -855,12 +926,14 @@ def _khdn_y_diagnostics(values):
         last = min(first + 32, s.shape[0])
         owners = torch.arange(first, last, device=s.device) // ng
         expected = torch.bmm(p[5][owners], s[first:last])
-        torch.testing.assert_close(y[first:last], expected, atol=1e-10, rtol=1e-9)
+        if not values.get('MIXED', False):
+            torch.testing.assert_close(y[first:last], expected, atol=1e-10, rtol=1e-9)
         maximum = max(maximum, float((y[first:last] - expected).abs().max()))
         finite = finite and bool(torch.isfinite(s[first:last]).all() & torch.isfinite(y[first:last]).all())
     return {'all_saved_state_y_finite': finite,
             'saved_y_vs_actual_F_times_S_max_abs': maximum,
-            'diagnostic_atol_rtol': [1e-10, 1e-9],
+            'diagnostic_atol_rtol': None if values.get('MIXED', False) else [1e-10, 1e-9],
+            'residual_only_not_numerical_gate': bool(values.get('MIXED', False)),
             'scope': 'untimed FP64 buffer projection in at most 32 chunk/head/group blocks; no timed projection'}
 
 
@@ -884,9 +957,11 @@ def _khdn_contraction_sites(kernel, kernel_module):
                               'implementation': 'SIMT reduction; compiled launch arithmetic recorded separately'})
             if not isinstance(node.func, ast.Name):
                 continue
-            if node.func.id == 'mm':
+            if node.func.id in ('mm', 'mm_state_product'):
                 sites.append({'owner': name, 'line_in_function_source': node.lineno, 'call': ast.unparse(node),
-                              'implementation': 'SIMT multiply/add loop; compiled launch arithmetic recorded separately'})
+                              'implementation': ('selected FP32 TF32x3 or FP64 SIMT by MIXED and dimensions'
+                                                 if node.func.id == 'mm_state_product' else 'FP64 SIMT multiply/add loop'),
+                              'evidence_scope': 'static source site; not an executed count or per-site compiler attribution'})
             elif hasattr(getattr(kernel_module, node.func.id, None), 'fn'):
                 pending.append(node.func.id)
     return sites

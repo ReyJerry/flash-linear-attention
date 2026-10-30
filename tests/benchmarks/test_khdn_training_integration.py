@@ -18,13 +18,17 @@ import torch
 
 from benchmarks import benchmark_hyperbolic_training as benchmark
 from benchmarks import hyperbolic_benchmark_utils as utils
+from benchmarks.khdn_compiler_precision import compiled_precision_inventory
 
 
 def evidence(carry='y_carry', edges=2):
     kernels = [*utils.KHDN_STAGES, *(['carry_fwd_kernel'] if carry == 'y_carry' else [])]
     launches = []
     for name in kernels:
-        launch = {'kernel': name, 'arguments': {'C': 16, 'GS': 32, 'CARRY': carry == 'y_carry'},
+        launch = {'kernel': name, 'arguments': {'C': 16, 'GS': 32, 'CARRY': carry == 'y_carry', 'MIXED': False},
+                  'kernel_source_sha256': 'a' * 64,
+                  'compiled_precision_inventory': compiled_precision_inventory(SimpleNamespace(asm={
+                      'ttir': '%x = arith.mulf %a, %b : tensor<16x16xf64>', 'ptx': 'fma.rn.f64 a,b,c,d;'})),
                   'compiler': {'ptx_sha256': 'synthetic-cpu-fixture', 'fp64_arithmetic_instructions': 1,
                                'tensor_core_instructions': 0, 'contraction_ir_sha256': 'synthetic-cpu-fixture',
                                'multiply_add_operand_accumulator_dtypes': ['float64']}}
@@ -36,11 +40,13 @@ def evidence(carry='y_carry', edges=2):
         if name == 'state_fwd_kernel':
             launch['y_diagnostics'] = {'all_saved_state_y_finite': True}
         launches.append(launch)
-    options = dict(c=16, g=32, carry=carry, bounds=[0, 33], final=False, scale=1.)
-    return [{'requested': dict(chunk_size=16, group_size=32, carry_mode=carry),
+    options = dict(c=16, g=32, carry=carry, bounds=[0, 33], final=False, scale=1., mixed=False)
+    return [{'requested': dict(chunk_size=16, group_size=32, carry_mode=carry, precision_policy='strict'),
              'executed_options': options, 'backward_options': options.copy(),
              'executed_sources': [{'device': 'cuda:0', 'dtype': 'torch.float32'} for _ in range(7)],
              'telemetry': dict(backend='triton_chunk', arithmetic='device_float64', tensor_cores=False,
+                               precision_requested='strict', precision_eligible=False, precision_route='strict',
+                               backward_precision_route='strict',
                                fallback_subblocks=0, chunk_lengths=[16, 16, 1],
                                carry_edges=edges if carry == 'y_carry' else 0,
                                direct_FS=3 - edges if carry == 'y_carry' else 3,
@@ -118,11 +124,12 @@ def test_no_carry_rejects_carry_launch_and_all_model_layers_need_backward():
 def test_checkpoint_interruption_keeps_observed_launches_without_fabricating_telemetry():
     calls = evidence()
     replay = copy.deepcopy(calls[0])
-    replay.update(backward_calls=0, forward_interrupted='_StopRecomputationError', telemetry={})
+    replay.update(backward_calls=0, forward_interrupted='_StopRecomputationError',
+                  telemetry={'precision_requested': 'strict', 'precision_eligible': False})
     replay['launches'] = [row for row in replay['launches'] if not row['kernel'].endswith('bwd_kernel')]
     calls.append(replay)
     result = utils.attest_khdn(calls, 16, 32, 'y_carry')
-    assert result['checkpoint_recompute_observed'] and calls[1]['telemetry'] == {}
+    assert result['checkpoint_recompute_observed'] and 'precision_route' not in calls[1]['telemetry']
     calls[1]['launches'].pop(2)
     with pytest.raises(AssertionError, match='kernel launch'):
         utils.attest_khdn(calls, 16, 32, 'y_carry')
@@ -182,7 +189,7 @@ def fake_core(monkeypatch):
     module._Chunk = FakeChunk
 
     def entry(q, k, v, beta, log_decay, curvature=1., initial_state=None, output_final_state=False, scale=1.,
-              cu_seqlens=None, group_size=32, check_inputs=False, chunk_size=16, carry_mode='no_carry', telemetry=None):
+              cu_seqlens=None, group_size=32, check_inputs=False, chunk_size=16, carry_mode='no_carry', telemetry=None, precision_policy='strict'):
         ctx = SimpleNamespace()
         package.last_ctx = ctx
         options = dict(c=chunk_size, g=group_size, carry=carry_mode, bounds=[0, q.shape[1]])
@@ -204,6 +211,11 @@ def fake_core(monkeypatch):
     package.chunk_key_gated_hyperbolic_delta_rule = entry
     alias.imported_entry = entry
     module._host_call, module._host_backward = host_forward, host_backward
+
+    def _strict_device_replay(*args, **kwargs):
+        return 'cpu-fake-strict-replay'
+    module._strict_device_replay = _strict_device_replay
+    module._qualification_reason = lambda *args, **kwargs: None
     alias.imported_host = host_forward
     recurrent = ModuleType(utils.KHDN_PREFIX + '.fused_recurrent')
     recurrent.fused_recurrent_key_gated_hyperbolic_delta_rule = recurrent_entry
@@ -212,6 +224,7 @@ def fake_core(monkeypatch):
     for item in (module, kernels, package, alias, recurrent, naive):
         monkeypatch.setitem(sys.modules, item.__name__, item)
     monkeypatch.setattr(utils, '_khdn_contraction_sites', lambda *args: [])
+    monkeypatch.setattr(utils, '_khdn_kernel_source_hash', lambda *args: 'a' * 64)
     monkeypatch.setattr(utils, '_khdn_buffer_diagnostics', lambda *args: {'cpu_fixture': True})
     monkeypatch.setattr(utils, '_khdn_y_diagnostics', lambda *args: {'cpu_fixture': True})
     return SimpleNamespace(module=module, package=package, kernels=kernels, alias=alias, recurrent=recurrent, naive=naive)
@@ -345,6 +358,7 @@ def test_model_binding_labels_actual_attention_entries_and_removes_hooks(fake_co
     class Attention(torch.nn.Module):
         def __init__(self):
             super().__init__()
+            self.precision_policy = 'strict'
             self.f_proj = torch.nn.Identity()
             self.A_log = torch.nn.Parameter(torch.zeros(1))
 
@@ -354,6 +368,7 @@ def test_model_binding_labels_actual_attention_entries_and_removes_hooks(fake_co
     class Model(torch.nn.Module):
         def __init__(self):
             super().__init__()
+            self.config = SimpleNamespace(precision_policy='strict')
             self.layers = torch.nn.ModuleList([Attention(), Attention()])
 
     model = Model()
@@ -472,7 +487,7 @@ def test_route_binds_original_and_recompute_to_actual_batch(monkeypatch, layout,
         calls.append(replay)
 
     class Trace:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             self.calls, self.layer_names = calls, ['layer0']
 
         def bind_model(self, model):
@@ -526,3 +541,275 @@ def test_token_domain_rejects_boundary_substitution_with_same_flattened_count():
     inputs['cu_seqlens'] = torch.tensor([0, 11])
     with pytest.raises(AssertionError, match='actual batch'):
         training.khdn_batch_layout(inputs)
+
+
+def mixed_evidence(carry='y_carry'):
+    calls = evidence(carry)
+    row = calls[0]
+    row['requested']['precision_policy'] = 'mixed_readout'
+    row['executed_options']['mixed'] = row['backward_options']['mixed'] = True
+    row['telemetry'].update(precision_requested='mixed_readout', precision_eligible=True,
+                            precision_route='experimental_mixed_readout', tensor_cores=True,
+                            arithmetic='strict_readout_tf32x3_state_products',
+                            backward_precision_route='experimental_mixed_readout',
+                            backward_precision='strict_readout_tf32x3_state_products')
+    for launch in row['launches']:
+        if launch['kernel'] not in ('state_fwd_kernel', 'state_bwd_kernel'):
+            continue
+        launch['arguments']['MIXED'] = True
+        raw = {'ttir': '%x = arith.mulf %a, %b : f64\n'
+                       '%o = tt.dot %a, %b, %c, inputPrecision = tf32x3 : '
+                       'tensor<16x16xf32> * tensor<16x16xf32> -> tensor<16x16xf32>',
+               'ptx': 'fma.rn.f64 a,b,c,d;\nmma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 r,a,b,c;'}
+        launch['compiled_precision_inventory'] = compiled_precision_inventory(SimpleNamespace(asm=raw))
+        launch['compiler'] = launch['compiled_precision_inventory']
+    return calls
+
+
+@pytest.mark.parametrize('carry', ['no_carry', 'y_carry'])
+def test_explicit_mixed_acceptance_is_family_bound_and_cannot_substitute_strict(carry):
+    calls = mixed_evidence(carry)
+    result = utils.attest_khdn(calls, 16, 32, carry, precision_policy='mixed_readout')
+    assert result['route'] == 'experimental_mixed_readout'
+    assert result['numerical_policy_qualified'] is False and result['performance_accepted'] is False
+    with pytest.raises(AssertionError):
+        utils.attest_khdn(calls, 16, 32, carry)
+    with pytest.raises(AssertionError):
+        utils.attest_khdn(evidence(carry), 16, 32, carry, precision_policy='mixed_readout')
+
+
+@pytest.mark.parametrize('mutation', [
+    lambda row: row['requested'].update(precision_policy='strict'),
+    lambda row: row['executed_options'].update(mixed=False),
+    lambda row: row['backward_options'].update(mixed=False),
+    lambda row: row['telemetry'].update(precision_requested='strict'),
+    lambda row: row['telemetry'].update(precision_eligible=False, qualification_reason='unqualified_curvature'),
+    lambda row: row['telemetry'].update(precision_route='strict'),
+    lambda row: row['telemetry'].update(precision_route='host_exception', exception_reason='feedback_margin'),
+    lambda row: row['telemetry'].update(backward_precision_route='strict_device_replay',
+                                        strict_replay_details={'backward_precision_route': 'strict'}),
+    lambda row: row['telemetry'].update(backward_precision_route='host_exception'),
+    lambda row: row['telemetry'].pop('backward_precision_route'),
+    lambda row: row['telemetry'].update(backward_precision='device_float64'),
+    lambda row: row['launches'][4]['arguments'].update(MIXED=False),
+    lambda row: row['launches'][0]['arguments'].update(MIXED=True),
+    lambda row: row['launches'][3]['compiled_precision_inventory'].update(ptx_sha256='b' * 64),
+    lambda row: row['consumed'].update(feedback_delta_max=.3),
+    lambda row: row['consumed'].update(log_decay_max=0),
+    lambda row: row['executed_options'].update(bounds=[0, 32]),
+    lambda row: row.update(backward_calls=0),
+])
+def test_mixed_rejects_fallback_replay_precision_and_original_domain_substitutions(mutation):
+    calls = mixed_evidence()
+    mutation(calls[0])
+    with pytest.raises(AssertionError):
+        utils.attest_khdn(calls, 16, 32, 'y_carry', precision_policy='mixed_readout')
+
+
+@pytest.mark.parametrize('flags,expected', [
+    (['--khdn-strict'], 'strict'),
+    (['--khdn-precision-policy', 'strict'], 'strict'),
+    (['--khdn-strict', '--khdn-precision-policy', 'strict'], 'strict'),
+    (['--khdn-precision-policy', 'mixed_readout'], 'mixed_readout'),
+])
+def test_explicit_policy_cli_model_and_strict_oracle_binding(flags, expected):
+    from benchmarks import hyperbolic_training_distributed as training
+    args = benchmark.parse_arguments(['--methods', 'khdn_no_carry', *flags])
+    assert benchmark.model_configuration(args, 'khdn_no_carry')['precision_policy'] == expected
+    oracle = benchmark.model_configuration(args, 'khdn_naive')
+    assert oracle['attn_mode'] == 'naive' and oracle['precision_policy'] == 'strict'
+
+    def entry(*args, **kwargs):
+        return kwargs
+    source = (None,) * 7
+    assert training.khdn_operator_call(entry, source, args, 'khdn_no_carry')['precision_policy'] == expected
+    assert 'precision_policy' not in training.khdn_operator_call(entry, source, args, 'khdn_naive', oracle=True)
+
+
+@pytest.mark.parametrize('policy,width,head_dim,ffn', [('strict', 64, 32, 128), ('mixed_readout', 256, 128, 512)])
+def test_small_model_precision_gate_keeps_oracle_and_candidate_geometry_identical(policy, width, head_dim, ffn):
+    args = benchmark.parse_arguments(['--methods', 'khdn_no_carry', '--khdn-precision-policy', policy])
+    candidate = benchmark.model_configuration(args, 'khdn_no_carry', small=True)
+    oracle = benchmark.model_configuration(args, 'khdn_naive', small=True)
+    for value in (candidate, oracle):
+        assert (value['hidden_size'], value['head_dim'], value['intermediate_size']) == (width, head_dim, ffn)
+        assert value['num_hidden_layers'] == 2 and value['num_heads'] == 2 and value['group_size'] == 32
+    for key in candidate.keys() - {'attn_mode', 'precision_policy'}:
+        assert candidate[key] == oracle[key]
+    assert candidate['precision_policy'] == policy and oracle['precision_policy'] == 'strict'
+
+
+@pytest.mark.parametrize('flags', [
+    ['--methods', 'khdn_no_carry'],
+    ['--methods', 'khdn_no_carry', '--khdn-strict', '--khdn-precision-policy', 'mixed_readout'],
+    ['--methods', 'khdn_naive', '--check-only', '--khdn-precision-policy', 'mixed_readout'],
+])
+def test_policy_cli_rejects_implicit_mixed_or_ambiguous_or_naive_request(flags):
+    with pytest.raises(SystemExit):
+        benchmark.parse_arguments(flags)
+
+
+def test_native_mixed_guard_stops_ineligible_and_replay_without_changing_eligibility(fake_core):
+    def original(*args, **kwargs):
+        return 'unqualified_curvature'
+    fake_core.module._qualification_reason = original
+    with utils.KHDNExceptionGuard('mixed_readout') as guard:
+        with pytest.raises(RuntimeError, match='unqualified_curvature'):
+            fake_core.module._qualification_reason(None, None)
+        with pytest.raises(RuntimeError, match='_strict_device_replay'):
+            fake_core.module._strict_device_replay()
+        assert guard.events[0]['reason'] == 'unqualified_curvature'
+        assert guard.events[1]['entry'] == '_strict_device_replay'
+    assert fake_core.module._qualification_reason is original
+
+
+def test_trace_rejects_operator_policy_substitution_before_execution(fake_core):
+    q = torch.ones(1, 3, 1, 32)
+    inputs = dict(q=q, k=q, v=q * .01, beta=q[..., 0] * .5, log_decay=q * -.1,
+                  curvature=torch.tensor(.6), initial_state=torch.zeros(1, 1, 32, 32))
+    with pytest.raises(AssertionError, match='entry precision'), utils.KHDNTrace(
+        16, 32, 'no_carry', precision_policy='mixed_readout',
+    ) as trace:
+        fake_core.package.chunk_key_gated_hyperbolic_delta_rule(**inputs)
+    assert trace.calls[0]['requested']['precision_policy'] == 'strict'
+    assert not trace.calls[0]['launches']
+
+
+def test_mixed_projection_residual_does_not_relax_strict_saved_y_gate():
+    p = [None] * 6
+    p[5] = torch.ones(1, 2, 2, dtype=torch.float64)
+    values = {'P': p, 'SavedS': torch.ones(1, 2, 2, dtype=torch.float64),
+              'SavedY': torch.full((1, 2, 2), 2.001, dtype=torch.float64), 'NG': 1, 'MIXED': False}
+    with pytest.raises(AssertionError):
+        utils._khdn_y_diagnostics(values)
+    values['MIXED'] = True
+    observed = utils._khdn_y_diagnostics(values)
+    assert observed['residual_only_not_numerical_gate'] is True
+    assert observed['saved_y_vs_actual_F_times_S_max_abs'] > .0009
+    assert observed['diagnostic_atol_rtol'] is None
+
+
+def test_mixed_checkpoint_interruption_binds_entry_and_compiled_policy_without_fabricating_completion():
+    calls = mixed_evidence()
+    replay = copy.deepcopy(calls[0])
+    replay.update(backward_calls=0, forward_interrupted='_StopRecomputationError',
+                  telemetry={'precision_requested': 'mixed_readout', 'precision_eligible': True})
+    replay['launches'] = [row for row in replay['launches'] if not row['kernel'].endswith('bwd_kernel')]
+    calls.append(replay)
+    result = utils.attest_khdn(calls, 16, 32, 'y_carry', precision_policy='mixed_readout')
+    assert result['checkpoint_recompute_observed'] and 'precision_route' not in replay['telemetry']
+    replay['launches'][3]['arguments']['MIXED'] = False
+    with pytest.raises(AssertionError, match='MIXED'):
+        utils.attest_khdn(calls, 16, 32, 'y_carry', precision_policy='mixed_readout')
+
+
+@pytest.mark.parametrize('substitution', ['config', 'layer'])
+def test_trace_model_policy_substitution_fails_before_installing_hooks(substitution):
+    class Attention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.f_proj = torch.nn.Identity()
+            self.A_log = torch.nn.Parameter(torch.zeros(1))
+            self.precision_policy = 'mixed_readout'
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(precision_policy='mixed_readout')
+    model.layers = torch.nn.ModuleList([Attention(), Attention()])
+    target = model.config if substitution == 'config' else model.layers[1]
+    target.precision_policy = 'strict'
+    with pytest.raises(AssertionError, match='precision policy'):
+        utils.KHDNTrace(16, 32, 'no_carry', 2, 'mixed_readout').bind_model(model)
+    assert all(not layer._forward_hooks and not layer._forward_pre_hooks for layer in model.layers)
+
+
+@pytest.mark.parametrize('policy,head_dim', [('strict', 32), ('mixed_readout', 128)])
+def test_seven_source_witness_follows_actual_small_model_geometry(monkeypatch, policy, head_dim):
+    from benchmarks import hyperbolic_training_distributed as training
+    args = benchmark.parse_arguments(['--methods', 'khdn_no_carry', '--khdn-precision-policy', policy])
+    configurations, witnesses = [], []
+    suffixes = ('f_proj.0.weight', 'f_proj.1.weight', 'A_log', 'dt_bias', 'curvature_raw')
+
+    def build(args, spec, small=False):
+        config = benchmark.model_configuration(args, spec['name'], small=small)
+        configurations.append(config)
+        model = SimpleNamespace(named_parameters=lambda: [
+            (key, SimpleNamespace(requires_grad=True, grad=torch.zeros(1))) for key in suffixes])
+        return model, {'initial_weights_sha256': 'cpu_same_weights', 'configuration': config}
+
+    monkeypatch.setattr(benchmark, 'build_model', build)
+    monkeypatch.setattr(training, 'make_batch', lambda *a, **k: SimpleNamespace(to=lambda *a: None))
+    monkeypatch.setattr(training, 'trace_route', lambda *a, **k: {'loss': 0.})
+    monkeypatch.setattr(training, 'khdn_model_oracle_precision',
+                        lambda: training.contextlib.nullcontext({'calls': [{'cpu_fixture': True}]}))
+    monkeypatch.setattr(training, 'khdn_operator_sources', lambda args, length: (args.head_dim, args.group_size, length))
+    monkeypatch.setattr(training, 'khdn_operator_gate', lambda args, name, sources: witnesses.append(sources))
+    training.khdn_model_oracle_gate(args, 'khdn_no_carry', benchmark)
+    assert witnesses == [(head_dim, 32, 2 * args.chunk_size + 1)]
+    assert [config['head_dim'] for config in configurations] == [head_dim] * 4
+    assert [config['precision_policy'] for config in configurations] == [policy, 'strict', policy, 'strict']
+
+
+@pytest.mark.parametrize('backward_index,stage', [(2, 'accumulated_update'), (18, 'accumulated_update'),
+                                                  (33, 'uninterrupted_recovery'), (34, 'resumed_recovery')])
+@pytest.mark.parametrize('fallback', ['ineligible', 'replay', 'host'])
+def test_small_gate_stops_later_and_postupdate_fallback_with_evidence(fake_core, monkeypatch, backward_index, stage, fallback):
+    from benchmarks import hyperbolic_training_distributed as training
+    args = benchmark.parse_arguments(
+        ['--methods', 'khdn_no_carry', '--khdn-precision-policy', 'mixed_readout', '--dtype', 'fp32'])
+    counts = {'backwards': 0, 'updates': 0}
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = torch.nn.Embedding(97, 4)
+            self.proj = torch.nn.Linear(4, 97)
+
+        def forward(self, input_ids, labels, num_items_in_batch, **kwargs):
+            logits = self.proj(self.emb(input_ids))
+            loss = torch.nn.functional.cross_entropy(logits[:, :-1].reshape(-1, 97), labels[:, 1:].reshape(-1),
+                                                     reduction='sum') / num_items_in_batch
+
+            def inject(gradient):
+                counts['backwards'] += 1
+                if counts['backwards'] == backward_index:
+                    if fallback == 'ineligible':
+                        fake_core.module._qualification_reason(None, None)
+                    elif fallback == 'replay':
+                        fake_core.module._strict_device_replay()
+                    else:
+                        fake_core.module._host_backward()
+                return gradient
+            loss.register_hook(inject)
+            return SimpleNamespace(loss=loss)
+
+    class Runtime:
+        device, rank, world_size = torch.device('cpu'), 0, 1
+
+        def wrap(self, model):
+            return model
+
+        def global_count(self, batches):
+            return sum(batch.valid_labels for batch in batches)
+
+    def ineligible(*args, **kwargs):
+        return 'unqualified_curvature'
+
+    original_step = training.clip_and_step
+
+    def step(*args, **kwargs):
+        original_step(*args, **kwargs)
+        counts['updates'] += 1
+
+    fake_core.module._qualification_reason = ineligible
+    monkeypatch.setattr(benchmark, 'build_model', lambda *a, **k: (Model(), {'configuration': {'scope': 'CPU guard test'}}))
+    monkeypatch.setattr(training, 'trace_route', lambda *a, **k: {'scope': 'CPU substitute'})
+    monkeypatch.setattr(training, 'khdn_model_oracle_gate', lambda *a, **k: {})
+    monkeypatch.setattr(training, 'clip_and_step', step)
+    with pytest.raises(RuntimeError, match='fallback|substitution') as caught:
+        training.small_gate(args, 'khdn_no_carry', Runtime(), benchmark)
+    records = caught.value.khdn_evidence['update_route_guards']
+    assert records[-1]['stage'] == stage and records[-1]['guard']['events']
+    assert counts['backwards'] == backward_index
+    assert counts['updates'] == (0 if backward_index < 33 else 2 if backward_index == 33 else 3)
+    if fallback == 'ineligible':
+        assert records[-1]['guard']['events'][0]['reason'] == 'unqualified_curvature'
+    assert fake_core.module._qualification_reason is ineligible

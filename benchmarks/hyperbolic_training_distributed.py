@@ -759,7 +759,8 @@ def trace_route(model, batch, args, name, benchmark):
     model.zero_grad(set_to_none=True)
     strict = name in ('khdn_no_carry', 'khdn_y_carry')
     context = (KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
-                         model.config.num_hidden_layers) if strict else NativeTrainingTrace(name) if name in ('kda', 'comba') else
+                         model.config.num_hidden_layers, precision_policy=args.khdn_precision_policy or 'strict') if strict else
+               NativeTrainingTrace(name) if name in ('kda', 'comba') else
                benchmark.GDNBackendTrace() if name == 'gdn' else
                contextlib.nullcontext() if name == 'khdn_naive' else benchmark.KernelTrace())
     if strict:
@@ -830,6 +831,24 @@ def parameters(model):
     return {name: p.detach().clone() for name, p in unwrap(model).named_parameters()}
 
 
+@contextlib.contextmanager
+def khdn_update_guard(args, name, stage, records):
+    """Retain route rejection evidence for untimed numerical updates and recovery."""
+    if name not in ('khdn_no_carry', 'khdn_y_carry'):
+        yield
+        return
+    with KHDNExceptionGuard(precision_policy=args.khdn_precision_policy or 'strict') as guard:
+        record = {'stage': stage, 'guard': guard.evidence()}
+        records.append(record)
+        try:
+            yield
+        except BaseException as error:
+            record['failure'] = repr(error)
+            error.khdn_evidence = {'update_route_guards': records,
+                                   'operator_calls': getattr(error, 'khdn_evidence', None)}
+            raise
+
+
 def small_gate(args, name, runtime, benchmark):
     """Compare real serial accumulation and DDP gradients/updates before timing any full model."""
     spec = benchmark.method_spec(name)
@@ -856,9 +875,11 @@ def small_gate(args, name, runtime, benchmark):
                      for index in sample_indices(0, runtime.rank, runtime.world_size, 16 // runtime.world_size)]
     ddp_optimizer, serial_optimizer = make_optimizer(ddp, args), make_optimizer(serial, args)
     initial = parameters(model)
-    backward_step(ddp, local_batches, args, total, runtime.world_size)
-    for batch in global_batches:
-        weighted_loss(serial, batch.to(runtime.device), args, total, 1).backward()
+    update_guards = []
+    with khdn_update_guard(args, name, 'accumulated_update', update_guards):
+        backward_step(ddp, local_batches, args, total, runtime.world_size)
+        for batch in global_batches:
+            weighted_loss(serial, batch.to(runtime.device), args, total, 1).backward()
     errors = error_metrics(gradients(ddp), gradients(serial),
                            atol=benchmark.GRADIENT_TOLERANCE[0], rtol=benchmark.GRADIENT_TOLERANCE[1])
     clip_and_step(ddp, ddp_optimizer, args)
@@ -869,6 +890,7 @@ def small_gate(args, name, runtime, benchmark):
     benchmark.parameter_health(model)
     result = {'model': info, 'route': route, 'world_size': runtime.world_size, 'global_valid_labels': total,
               'all_parameter_gradient_errors': errors, 'all_parameter_update_errors': updates,
+              'update_route_guards': update_guards,
               'zero_label_final_global_microbatch': 15,
               'global_samples': [{'id': b.sample_id, 'sha256': b.sha256, 'valid_labels': b.valid_labels}
                                  for b in global_batches],
@@ -876,7 +898,8 @@ def small_gate(args, name, runtime, benchmark):
                        'Actual single-device accumulation; DDP equivalence NOT RUN',
               'ddp_accepted': False}
     if name.startswith('khdn_'):
-        result['strict_vs_explicit_oracle'] = oracle_parity
+        result['strict_vs_explicit_oracle' if args.khdn_precision_policy != 'mixed_readout'
+               else 'mixed_vs_explicit_strict_oracle'] = oracle_parity
         gates = {}
         for module_name, module in model.named_modules():
             if hasattr(module, 'f_proj') and hasattr(module, 'A_log'):
@@ -895,7 +918,8 @@ def small_gate(args, name, runtime, benchmark):
         contract = {'small_model': info['configuration'], 'world_size': runtime.world_size, 'method': name}
         save_checkpoint(checkpoint, ddp, ddp_optimizer, step=1, contract=contract, rank=runtime.rank)
         ddp_optimizer.zero_grad(set_to_none=True)
-        backward_step(ddp, recovery_batches, args, recovery_total, runtime.world_size)
+        with khdn_update_guard(args, name, 'uninterrupted_recovery', update_guards):
+            backward_step(ddp, recovery_batches, args, recovery_total, runtime.world_size)
         clip_and_step(ddp, ddp_optimizer, args)
         uninterrupted, uninterrupted_rng = parameters(ddp), capture_rng()
         next_data, step = load_checkpoint(checkpoint, ddp, ddp_optimizer, contract=contract,
@@ -903,7 +927,8 @@ def small_gate(args, name, runtime, benchmark):
         if next_data != 1 or step != 1:
             raise AssertionError('checkpoint did not restore data and optimizer positions')
         ddp_optimizer.zero_grad(set_to_none=True)
-        backward_step(ddp, recovery_batches, args, recovery_total, runtime.world_size)
+        with khdn_update_guard(args, name, 'resumed_recovery', update_guards):
+            backward_step(ddp, recovery_batches, args, recovery_total, runtime.world_size)
         clip_and_step(ddp, ddp_optimizer, args)
         recovery = error_metrics(parameters(ddp), uninterrupted, atol=2e-5, rtol=2e-4)
         resumed_rng = capture_rng()
@@ -973,7 +998,7 @@ def train_trial(args, name, trial, runtime, benchmark, result=None):
         nonlocal next_data, optimizer_steps
         batches = batches_at(next_data, count)
         if name in ('khdn_no_carry', 'khdn_y_carry'):
-            with KHDNExceptionGuard() as guard:
+            with KHDNExceptionGuard(precision_policy=args.khdn_precision_policy or 'strict') as guard:
                 result['timing_exception_guard'] = guard.evidence()
                 row = timed_sample(model, optimizer, batches, args, runtime, execution_mode)
         else:
@@ -1198,12 +1223,54 @@ def run_benchmark(args, payload, benchmark):
     return 0
 
 
+def khdn_model_oracle_call(entry, q, k, v, beta, log_decay, **options):
+    """Evaluate independent FP64 truth while preserving public dtypes and all source edges."""
+    sources = dict(q=q, k=k, v=v, beta=beta, log_decay=log_decay,
+                   initial_state=options.get('initial_state'), curvature=options.get('curvature'))
+    state_dtype = (torch.float64 if any(isinstance(value, torch.Tensor) and value.dtype == torch.float64
+                                        for value in sources.values()) else torch.float32)
+    promoted = dict(options)
+    promoted.update({key: value.double() for key, value in sources.items() if isinstance(value, torch.Tensor)})
+    output, state = entry(**promoted)
+    if output.dtype != torch.float64 or state is not None and state.dtype != torch.float64:
+        raise AssertionError('Model Oracle must compute its output and state in FP64')
+    return output.to(q.dtype), None if state is None else state.to(state_dtype)
+
+
+@contextlib.contextmanager
+def khdn_model_oracle_precision():
+    """Scope FP64 reference arithmetic across untimed forward and checkpoint backward."""
+    import inspect
+
+    package = importlib.import_module('fla.ops.key_gated_hyperbolic_delta_rule')
+    original = package.naive_recurrent_key_gated_hyperbolic_delta_rule
+    source = Path(inspect.getfile(original))
+    evidence = {'reference_source': str(source), 'reference_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                'internal_dtype': 'torch.float64', 'public_boundary': 'original output/state dtypes', 'calls': []}
+
+    def oracle(q, k, v, beta, log_decay, **options):
+        output, state = khdn_model_oracle_call(original, q, k, v, beta, log_decay, **options)
+        sources = dict(q=q, k=k, v=v, beta=beta, log_decay=log_decay,
+                       initial_state=options.get('initial_state'), curvature=options.get('curvature'))
+        evidence['calls'].append({'shape': list(q.shape),
+                                  'source_dtypes': {key: str(value.dtype) if isinstance(value, torch.Tensor) else None
+                                                    for key, value in sources.items()},
+                                  'output_dtype': str(output.dtype), 'state_dtype': str(state.dtype) if state is not None else None})
+        return output, state
+
+    package.naive_recurrent_key_gated_hyperbolic_delta_rule = oracle
+    try:
+        yield evidence
+    finally:
+        package.naive_recurrent_key_gated_hyperbolic_delta_rule = original
+
+
 def khdn_model_oracle_gate(args, name, benchmark):
     """Use identical g32 KHDN models and the explicit dense Oracle, including learned-curvature gradients."""
     gate_args = copy.copy(args)
     gate_args.group_size, gate_args.learnable_curvature = 32, True
     gate_args.batch, gate_args.seq_len, gate_args.vocab_size = 2, 2 * args.chunk_size + 1, 97
-    gate_args.head_dim = 32
+    gate_args.head_dim = benchmark.model_configuration(gate_args, name, small=True)['head_dim']
     result = {}
     for layout in ('dense', 'packed'):
         gate_args.data_layout = layout
@@ -1211,7 +1278,13 @@ def khdn_model_oracle_gate(args, name, benchmark):
         outputs = []
         for method in (name, 'khdn_naive'):
             model, info = benchmark.build_model(gate_args, benchmark.method_spec(method), small=True)
-            route = trace_route(model, batch, gate_args, method, benchmark)
+            oracle_context = khdn_model_oracle_precision() if method == 'khdn_naive' else contextlib.nullcontext()
+            with oracle_context as oracle_evidence:
+                route = trace_route(model, batch, gate_args, method, benchmark)
+            if method == 'khdn_naive':
+                if not oracle_evidence['calls']:
+                    raise AssertionError('Model Oracle did not execute the explicit FP64 reference')
+                result[layout]['oracle_precision'] = oracle_evidence
             outputs.append({'loss': torch.tensor(route['loss']), 'initial_weights_sha256': info['initial_weights_sha256'],
                             'gradients': {key: value.grad.detach().float().cpu().clone()
                                           for key, value in model.named_parameters() if value.requires_grad}})
@@ -1227,7 +1300,8 @@ def khdn_model_oracle_gate(args, name, benchmark):
     source_gate = khdn_operator_gate(gate_args, name, khdn_operator_sources(gate_args, 2 * args.chunk_size + 1))
     return {'cases': result, 'source_vjp_gate': source_gate, 'scope': 'same FP32 parameters/public autocast, g32, learned positive curvature, '
             'identical weights and outer checkpoint; explicit naive dense-solve Oracle only in this untimed small gate',
-            'dense_fp64_truth_scope': 'separate operator gate; model Oracle follows public-source precision'}
+            'dense_fp64_truth_scope': 'independent operator and model Oracle; model reference internally promotes prepared '
+            'sources differentiably to FP64 and restores public output/state dtypes; outer autocast and parameters unchanged'}
 
 
 def khdn_operator_sources(args, length):
@@ -1244,7 +1318,8 @@ def khdn_operator_sources(args, length):
 
 def khdn_operator_call(entry, sources, args, name, *, oracle=False):
     options = {} if oracle else {'chunk_size': args.chunk_size,
-                                 'carry_mode': 'y_carry' if name == 'khdn_y_carry' else 'no_carry'}
+                                 'carry_mode': 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
+                                 'precision_policy': args.khdn_precision_policy or 'strict'}
     return entry(*sources[:5], curvature=sources[6], initial_state=sources[5], output_final_state=True,
                  group_size=args.group_size, check_inputs=True, **options)
 
@@ -1256,7 +1331,8 @@ def khdn_operator_gate(args, name, sources):
     truth_sources = tuple(value.detach().double().requires_grad_() for value in sources)
     oracle_checkpoint = verify_checkpointed_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, sources, args, name)
     truth = checkpointed_dense_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, truth_sources, args, name)
-    with KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry') as trace:
+    with KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
+                   precision_policy=args.khdn_precision_policy or 'strict') as trace:
         actual = khdn_operator_call(ops.chunk_key_gated_hyperbolic_delta_rule, actual_sources, args, name)
         cotangents = tuple(torch.cos(torch.arange(value.numel(), device=value.device)).reshape(value.shape).to(value)
                            for value in actual)
@@ -1312,7 +1388,7 @@ def run_operator_sweep(args, payload):
                 method = Method(name, lambda leaves, name=name: khdn_operator_call(
                     ops.chunk_key_gated_hyperbolic_delta_rule, leaves, args, name), {}, 'khdn', 'state_fwd_kernel')
                 case['warmup'], case['raw_samples'] = [], []
-                with KHDNExceptionGuard() as guard:
+                with KHDNExceptionGuard(precision_policy=args.khdn_precision_policy or 'strict') as guard:
                     case['exception_guard'] = guard.evidence()
                     case['first_sample_including_possible_compilation'] = _sample(method, sources, args.modes[0])
                     for _ in range(args.warmup):

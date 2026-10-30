@@ -75,6 +75,8 @@ def parse_arguments(argv=None):
     parser.add_argument('--chunk-size', type=int, choices=(16, 32, 64), default=16)
     parser.add_argument('--khdn-strict', action='store_true',
                         help='opt in to correctness-gated strict FP64 SIMT KHDN; no Tensor Core claim')
+    parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout'),
+                        help='explicit KHDN policy; mixed_readout is experimental and rejects fallback/replay')
     parser.add_argument('--operator-sweep', action='store_true',
                         help='bounded KHDN operator-only correctness/profile/timing, separate from model/DDP')
     parser.add_argument('--operator-lengths', type=int, nargs='+', default=[17, 33, 65])
@@ -119,6 +121,12 @@ def parse_arguments(argv=None):
     parser.add_argument('--memory-only', action='store_true',
                         help='one fresh-process method/trial; defer health diagnostics until after memory samples')
     args = parser.parse_args(argv)
+    if args.khdn_strict and args.khdn_precision_policy == 'mixed_readout':
+        parser.error('--khdn-strict conflicts with --khdn-precision-policy mixed_readout')
+    if args.khdn_strict:
+        args.khdn_precision_policy = 'strict'
+    if args.khdn_precision_policy == 'mixed_readout' and 'khdn_naive' in args.methods:
+        parser.error('khdn_naive always executes strict; mixed_readout requires a chunk method')
     dimensions = (args.batch, args.layers, args.hidden_size, args.heads, args.intermediate_size)
     if min(dimensions) <= 0 or args.seq_len < 2 or args.vocab_size < 4:
         parser.error('model dimensions must be positive; seq-len>=2 and vocab-size>=4')
@@ -167,7 +175,7 @@ def parse_arguments(argv=None):
             parser.error('KHDN group-size must divide head-dim; no automatic group shrinking')
         if args.inner_checkpoint:
             parser.error('KHDN has no protected inner checkpoint policy; omit --inner-checkpoint')
-    if args.operator_sweep and (not args.khdn_strict or args.scaling != 'single'
+    if args.operator_sweep and (args.khdn_precision_policy != 'strict' or args.scaling != 'single'
                                 or int(os.environ.get('WORLD_SIZE', '1')) != 1
                                 or any(name not in ('khdn_no_carry', 'khdn_y_carry') for name in args.methods)
                                 or args.resume or args.checkpoint_dir or args.memory_only or args.final_validation
@@ -178,8 +186,9 @@ def parse_arguments(argv=None):
                      'and no model resume/memory-only/final-validation')
     audit = audit_methods()
     for name in args.methods:
-        if name in ('khdn_no_carry', 'khdn_y_carry') and not args.khdn_strict:
-            parser.error('optimized KHDN requires explicit --khdn-strict and actual kernel/carry attestation')
+        if name in ('khdn_no_carry', 'khdn_y_carry') and args.khdn_precision_policy is None:
+            parser.error('optimized KHDN requires explicit --khdn-strict or --khdn-precision-policy '
+                         'and actual kernel/carry attestation')
         if not audit[name]['available']:
             parser.error(f'{name}: {audit[name]["reason"]}')
         if name == 'khdn_naive' and not args.check_only:
@@ -200,9 +209,12 @@ def model_configuration(args, name, *, small=False):
     if name.startswith('khdn_'):
         if small:
             common.update(hidden_size=64, num_heads=2, head_dim=32, intermediate_size=128)
+            if args.khdn_precision_policy == 'mixed_readout':
+                common.update(hidden_size=256, head_dim=128, intermediate_size=512)
         common.update(group_size=args.group_size, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
                       chunk_size=args.chunk_size, carry_mode='y_carry' if name == 'khdn_y_carry' else 'no_carry',
-                      attn_mode='naive' if name == 'khdn_naive' else 'chunk')
+                      attn_mode='naive' if name == 'khdn_naive' else 'chunk',
+                      precision_policy='strict' if name == 'khdn_naive' else (args.khdn_precision_policy or 'strict'))
     elif name not in ('gdn', 'kda', 'comba', 'gdn2'):
         common.update(tensor_core=True, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
                       protection_rank=args.rank if name.startswith('protected_') else 0,

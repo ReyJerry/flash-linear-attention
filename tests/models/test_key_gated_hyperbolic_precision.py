@@ -34,18 +34,19 @@ def configuration(**kwargs):
     return KeyGatedHyperbolicDeltaNetConfig(**values)
 
 
-def test_default_legacy_and_new_configuration_roundtrip(tmp_path):
+@pytest.mark.parametrize('policy', ['mixed_readout', 'bf16_fs6'])
+def test_default_legacy_and_new_configuration_roundtrip(tmp_path, policy):
     default = configuration()
     assert default.precision_policy == 'strict'
     old = default.to_dict()
     old.pop('precision_policy')
     assert KeyGatedHyperbolicDeltaNetConfig.from_dict(old).precision_policy == 'strict'
-    chosen = configuration(precision_policy='mixed_readout')
+    chosen = configuration(precision_policy=policy)
     chosen.save_pretrained(tmp_path)
-    assert json.loads((tmp_path/'config.json').read_text())['precision_policy'] == 'mixed_readout'
+    assert json.loads((tmp_path/'config.json').read_text())['precision_policy'] == policy
     loaded = KeyGatedHyperbolicDeltaNetConfig.from_pretrained(tmp_path)
     model = KeyGatedHyperbolicDeltaNetForCausalLM(loaded)
-    assert all(block.attn.precision_policy == 'mixed_readout' for block in model.model.layers)
+    assert all(block.attn.precision_policy == policy for block in model.model.layers)
 
 
 @pytest.mark.parametrize('policy', ['unknown', True, None])
@@ -56,15 +57,16 @@ def test_invalid_policy_rejected_by_both_entries(policy):
         KeyGatedHyperbolicDeltaNet(precision_policy=policy)
 
 
+@pytest.mark.parametrize('policy', ['mixed_readout', 'bf16_fs6'])
 @pytest.mark.parametrize('mode', ['naive', 'fused_recurrent'])
-def test_explicit_unsupported_mode_is_not_silently_treated_as_mixed(mode):
+def test_explicit_unsupported_mode_is_not_silently_treated_as_mixed(mode, policy):
     with pytest.raises(ValueError, match='requires'):
-        configuration(attn_mode=mode, precision_policy='mixed_readout')
+        configuration(attn_mode=mode, precision_policy=policy)
     with pytest.raises(ValueError, match='requires'):
-        KeyGatedHyperbolicDeltaNet(mode=mode, precision_policy='mixed_readout')
+        KeyGatedHyperbolicDeltaNet(mode=mode, precision_policy=policy)
 
 
-@pytest.mark.parametrize('policy', ['strict', 'mixed_readout'])
+@pytest.mark.parametrize('policy', ['strict', 'mixed_readout', 'bf16_fs6'])
 def test_real_model_layers_forward_explicit_policy_and_preserve_parameter_gradients(monkeypatch, policy):
     calls = []
 
@@ -91,7 +93,8 @@ def test_real_model_layers_forward_explicit_policy_and_preserve_parameter_gradie
     assert all(param.grad is not None and torch.isfinite(param.grad).all() for param in model.parameters())
 
 
-def test_mixed_prefill_configuration_uses_strict_recurrent_decode(monkeypatch):
+@pytest.mark.parametrize('policy', ['mixed_readout', 'bf16_fs6'])
+def test_mixed_prefill_configuration_uses_strict_recurrent_decode(monkeypatch, policy):
     calls = []
 
     def observed(*args, **kwargs):
@@ -101,7 +104,7 @@ def test_mixed_prefill_configuration_uses_strict_recurrent_decode(monkeypatch):
 
     monkeypatch.setattr(ops, 'fused_recurrent_key_gated_hyperbolic_delta_rule', observed)
     layer = KeyGatedHyperbolicDeltaNet(hidden_size=64, head_dim=32, num_heads=2, group_size=32,
-                                       mode='chunk', precision_policy='mixed_readout',
+                                       mode='chunk', precision_policy=policy,
                                        use_short_conv=False, fuse_norm=False, layer_idx=0).eval()
     with torch.no_grad():
         result = layer(torch.randn(1, 1, 64))[0]

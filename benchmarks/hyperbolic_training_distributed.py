@@ -34,6 +34,7 @@ from torch.nn.parallel import DistributedDataParallel
 from benchmarks.hyperbolic_benchmark_utils import (
     KHDNExceptionGuard,
     KHDNTrace,
+    KHDNUpdateTrace,
     environment,
     metadata,
     summarize,
@@ -766,7 +767,9 @@ def trace_route(model, batch, args, name, benchmark):
     if strict:
         expected_layout = khdn_batch_layout(batch.inputs)
         context.bind_model(model)
-    with context as trace, observe_key_gates(model, name if not strict else '') as gates:
+        context.expected_checkpoint = not args.no_layer_checkpoint
+    guard = KHDNExceptionGuard('bf16_fs6') if strict and args.khdn_precision_policy == 'bf16_fs6' else contextlib.nullcontext()
+    with guard, context as trace, observe_key_gates(model, name if not strict else '') as gates:
         loss = weighted_loss(model, batch, args, max(1, batch.valid_labels), 1)
         loss.backward()
         torch.cuda.synchronize()
@@ -832,16 +835,28 @@ def parameters(model):
 
 
 @contextlib.contextmanager
-def khdn_update_guard(args, name, stage, records):
+def khdn_update_guard(args, name, stage, records, *, model=None, batches=None, source_binding=None, arm='candidate'):
     """Retain route rejection evidence for untimed numerical updates and recovery."""
     if name not in ('khdn_no_carry', 'khdn_y_carry'):
         yield
         return
     with KHDNExceptionGuard(precision_policy=args.khdn_precision_policy or 'strict') as guard:
         record = {'stage': stage, 'guard': guard.evidence()}
+        if args.khdn_precision_policy == 'bf16_fs6':
+            record['arm'] = arm
         records.append(record)
         try:
-            yield
+            if args.khdn_precision_policy == 'bf16_fs6':
+                if model is None or not batches or not source_binding:
+                    raise AssertionError('KHDN update missing positive model/batch/source contracts')
+                observer = KHDNUpdateTrace(unwrap(model), batches, [khdn_batch_layout(b.inputs) for b in batches],
+                                           expected_checkpoint=not args.no_layer_checkpoint,
+                                           expected_source_binding=source_binding, arm=arm)
+                with observer:
+                    yield
+                record['positive_observation'] = observer.attest()
+            else:
+                yield
         except BaseException as error:
             record['failure'] = repr(error)
             error.khdn_evidence = {'update_route_guards': records,
@@ -876,10 +891,21 @@ def small_gate(args, name, runtime, benchmark):
     ddp_optimizer, serial_optimizer = make_optimizer(ddp, args), make_optimizer(serial, args)
     initial = parameters(model)
     update_guards = []
-    with khdn_update_guard(args, name, 'accumulated_update', update_guards):
-        backward_step(ddp, local_batches, args, total, runtime.world_size)
-        for batch in global_batches:
-            weighted_loss(serial, batch.to(runtime.device), args, total, 1).backward()
+    binding = route.get('source_binding')
+    if args.khdn_precision_policy == 'bf16_fs6':
+        serial_batches = [batch.to(runtime.device) for batch in global_batches]
+        with khdn_update_guard(args, name, 'accumulated_update', update_guards,
+                               model=ddp, batches=local_batches, source_binding=binding, arm='ddp'):
+            backward_step(ddp, local_batches, args, total, runtime.world_size)
+        with khdn_update_guard(args, name, 'accumulated_update', update_guards,
+                               model=serial, batches=serial_batches, source_binding=binding, arm='serial'):
+            for batch in serial_batches:
+                weighted_loss(serial, batch, args, total, 1).backward()
+    else:
+        with khdn_update_guard(args, name, 'accumulated_update', update_guards):
+            backward_step(ddp, local_batches, args, total, runtime.world_size)
+            for batch in global_batches:
+                weighted_loss(serial, batch.to(runtime.device), args, total, 1).backward()
     errors = error_metrics(gradients(ddp), gradients(serial),
                            atol=benchmark.GRADIENT_TOLERANCE[0], rtol=benchmark.GRADIENT_TOLERANCE[1])
     clip_and_step(ddp, ddp_optimizer, args)
@@ -898,8 +924,10 @@ def small_gate(args, name, runtime, benchmark):
                        'Actual single-device accumulation; DDP equivalence NOT RUN',
               'ddp_accepted': False}
     if name.startswith('khdn_'):
-        result['strict_vs_explicit_oracle' if args.khdn_precision_policy != 'mixed_readout'
-               else 'mixed_vs_explicit_strict_oracle'] = oracle_parity
+        oracle_key = {'mixed_readout': 'mixed_vs_explicit_strict_oracle',
+                      'bf16_fs6': 'bf16_fs6_vs_explicit_strict_oracle'}.get(
+                          args.khdn_precision_policy, 'strict_vs_explicit_oracle')
+        result[oracle_key] = oracle_parity
         gates = {}
         for module_name, module in model.named_modules():
             if hasattr(module, 'f_proj') and hasattr(module, 'A_log'):
@@ -918,7 +946,8 @@ def small_gate(args, name, runtime, benchmark):
         contract = {'small_model': info['configuration'], 'world_size': runtime.world_size, 'method': name}
         save_checkpoint(checkpoint, ddp, ddp_optimizer, step=1, contract=contract, rank=runtime.rank)
         ddp_optimizer.zero_grad(set_to_none=True)
-        with khdn_update_guard(args, name, 'uninterrupted_recovery', update_guards):
+        with khdn_update_guard(args, name, 'uninterrupted_recovery', update_guards,
+                               model=ddp, batches=recovery_batches, source_binding=binding, arm='ddp'):
             backward_step(ddp, recovery_batches, args, recovery_total, runtime.world_size)
         clip_and_step(ddp, ddp_optimizer, args)
         uninterrupted, uninterrupted_rng = parameters(ddp), capture_rng()
@@ -927,7 +956,8 @@ def small_gate(args, name, runtime, benchmark):
         if next_data != 1 or step != 1:
             raise AssertionError('checkpoint did not restore data and optimizer positions')
         ddp_optimizer.zero_grad(set_to_none=True)
-        with khdn_update_guard(args, name, 'resumed_recovery', update_guards):
+        with khdn_update_guard(args, name, 'resumed_recovery', update_guards,
+                               model=ddp, batches=recovery_batches, source_binding=binding, arm='ddp'):
             backward_step(ddp, recovery_batches, args, recovery_total, runtime.world_size)
         clip_and_step(ddp, ddp_optimizer, args)
         recovery = error_metrics(parameters(ddp), uninterrupted, atol=2e-5, rtol=2e-4)
@@ -1331,8 +1361,9 @@ def khdn_operator_gate(args, name, sources):
     truth_sources = tuple(value.detach().double().requires_grad_() for value in sources)
     oracle_checkpoint = verify_checkpointed_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, sources, args, name)
     truth = checkpointed_dense_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, truth_sources, args, name)
-    with KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
-                   precision_policy=args.khdn_precision_policy or 'strict') as trace:
+    guard = KHDNExceptionGuard('bf16_fs6') if args.khdn_precision_policy == 'bf16_fs6' else contextlib.nullcontext()
+    with guard, KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
+                          precision_policy=args.khdn_precision_policy or 'strict') as trace:
         actual = khdn_operator_call(ops.chunk_key_gated_hyperbolic_delta_rule, actual_sources, args, name)
         cotangents = tuple(torch.cos(torch.arange(value.numel(), device=value.device)).reshape(value.shape).to(value)
                            for value in actual)

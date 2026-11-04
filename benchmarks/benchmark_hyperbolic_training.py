@@ -75,8 +75,8 @@ def parse_arguments(argv=None):
     parser.add_argument('--chunk-size', type=int, choices=(16, 32, 64), default=16)
     parser.add_argument('--khdn-strict', action='store_true',
                         help='opt in to correctness-gated strict FP64 SIMT KHDN; no Tensor Core claim')
-    parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout'),
-                        help='explicit KHDN policy; mixed_readout is experimental and rejects fallback/replay')
+    parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout', 'bf16_fs6'),
+                        help='explicit KHDN policy; experimental policies reject fallback/replay')
     parser.add_argument('--operator-sweep', action='store_true',
                         help='bounded KHDN operator-only correctness/profile/timing, separate from model/DDP')
     parser.add_argument('--operator-lengths', type=int, nargs='+', default=[17, 33, 65])
@@ -121,12 +121,16 @@ def parse_arguments(argv=None):
     parser.add_argument('--memory-only', action='store_true',
                         help='one fresh-process method/trial; defer health diagnostics until after memory samples')
     args = parser.parse_args(argv)
-    if args.khdn_strict and args.khdn_precision_policy == 'mixed_readout':
-        parser.error('--khdn-strict conflicts with --khdn-precision-policy mixed_readout')
+    if args.khdn_strict and args.khdn_precision_policy not in (None, 'strict'):
+        parser.error('--khdn-strict conflicts with an experimental --khdn-precision-policy')
     if args.khdn_strict:
         args.khdn_precision_policy = 'strict'
-    if args.khdn_precision_policy == 'mixed_readout' and 'khdn_naive' in args.methods:
-        parser.error('khdn_naive always executes strict; mixed_readout requires a chunk method')
+    if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6') and 'khdn_naive' in args.methods:
+        parser.error('khdn_naive always executes strict; experimental policies require a chunk method')
+    if args.khdn_precision_policy == 'bf16_fs6' and (
+            args.methods != ['khdn_no_carry'] or args.chunk_size != 16 or args.group_size != 32 or args.head_dim != 128
+            or args.dtype != 'bf16' or args.loss_backend != 'plain' or args.no_short_conv or args.no_layer_checkpoint):
+        parser.error('bf16_fs6 requires khdn_no_carry, C16/K=V128/g32, BF16 autocast, ShortConv, checkpoint and plain CE')
     dimensions = (args.batch, args.layers, args.hidden_size, args.heads, args.intermediate_size)
     if min(dimensions) <= 0 or args.seq_len < 2 or args.vocab_size < 4:
         parser.error('model dimensions must be positive; seq-len>=2 and vocab-size>=4')
@@ -209,12 +213,14 @@ def model_configuration(args, name, *, small=False):
     if name.startswith('khdn_'):
         if small:
             common.update(hidden_size=64, num_heads=2, head_dim=32, intermediate_size=128)
-            if args.khdn_precision_policy == 'mixed_readout':
+            if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6'):
                 common.update(hidden_size=256, head_dim=128, intermediate_size=512)
         common.update(group_size=args.group_size, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
                       chunk_size=args.chunk_size, carry_mode='y_carry' if name == 'khdn_y_carry' else 'no_carry',
                       attn_mode='naive' if name == 'khdn_naive' else 'chunk',
                       precision_policy='strict' if name == 'khdn_naive' else (args.khdn_precision_policy or 'strict'))
+        if small and args.khdn_precision_policy == 'bf16_fs6':
+            common['learnable_curvature'] = True
     elif name not in ('gdn', 'kda', 'comba', 'gdn2'):
         common.update(tensor_core=True, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
                       protection_rank=args.rank if name.startswith('protected_') else 0,

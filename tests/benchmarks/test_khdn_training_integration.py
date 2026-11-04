@@ -216,6 +216,7 @@ def fake_core(monkeypatch):
         return 'cpu-fake-strict-replay'
     module._strict_device_replay = _strict_device_replay
     module._qualification_reason = lambda *args, **kwargs: None
+    module._bf16_fs6_qualification_reason = lambda *args, **kwargs: module._qualification_reason(*args, **kwargs)
     alias.imported_host = host_forward
     recurrent = ModuleType(utils.KHDN_PREFIX + '.fused_recurrent')
     recurrent.fused_recurrent_key_gated_hyperbolic_delta_rule = recurrent_entry
@@ -751,10 +752,12 @@ def test_seven_source_witness_follows_actual_small_model_geometry(monkeypatch, p
 @pytest.mark.parametrize('backward_index,stage', [(2, 'accumulated_update'), (18, 'accumulated_update'),
                                                   (33, 'uninterrupted_recovery'), (34, 'resumed_recovery')])
 @pytest.mark.parametrize('fallback', ['ineligible', 'replay', 'host'])
-def test_small_gate_stops_later_and_postupdate_fallback_with_evidence(fake_core, monkeypatch, backward_index, stage, fallback):
+@pytest.mark.parametrize('policy', ['mixed_readout'])
+def test_small_gate_stops_later_and_postupdate_fallback_with_evidence(fake_core, monkeypatch, backward_index, stage, fallback, policy):
     from benchmarks import hyperbolic_training_distributed as training
     args = benchmark.parse_arguments(
-        ['--methods', 'khdn_no_carry', '--khdn-precision-policy', 'mixed_readout', '--dtype', 'fp32'])
+        ['--methods', 'khdn_no_carry', '--khdn-precision-policy', policy, '--dtype',
+         'bf16' if policy == 'bf16_fs6' else 'fp32', '--chunk-size', '16', '--loss-backend', 'plain'])
     counts = {'backwards': 0, 'updates': 0}
 
     class Model(torch.nn.Module):
@@ -772,7 +775,9 @@ def test_small_gate_stops_later_and_postupdate_fallback_with_evidence(fake_core,
                 counts['backwards'] += 1
                 if counts['backwards'] == backward_index:
                     if fallback == 'ineligible':
-                        fake_core.module._qualification_reason(None, None)
+                        helper = (fake_core.module._bf16_fs6_qualification_reason if policy == 'bf16_fs6'
+                                  else fake_core.module._qualification_reason)
+                        helper(None, None)
                     elif fallback == 'replay':
                         fake_core.module._strict_device_replay()
                     else:

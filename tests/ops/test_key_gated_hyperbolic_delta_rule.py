@@ -876,7 +876,8 @@ def test_chunk_mixed_readout_single_chunk_masks(case, amplitude):
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize('amplitude', [128., 129.])
 @pytest.mark.parametrize('kind', ['same', 'nonleaf', 'noncontiguous', 'independent'])
-def test_chunk_source_alias_gradient(dtype, amplitude, kind):
+@pytest.mark.parametrize('policy', ['mixed_readout', 'bf16_fs6'])
+def test_chunk_source_alias_gradient(dtype, amplitude, kind, policy):
     sources, _ = make_case(16, 128, 128, 32, dtype)
     sources = [x.detach() for x in sources]
     sources[6].fill_(2.)
@@ -903,7 +904,7 @@ def test_chunk_source_alias_gradient(dtype, amplitude, kind):
     info = {}
     actual = ops.chunk_key_gated_hyperbolic_delta_rule(
         *sources[:5], curvature=sources[6], initial_state=sources[5], group_size=32,
-        scale=1., chunk_size=16, output_final_state=True, precision_policy='mixed_readout', telemetry=info,
+        scale=1., chunk_size=16, output_final_state=True, precision_policy=policy, telemetry=info,
     )
     cot = tuple((torch.cos(torch.arange(x.numel(), dtype=torch.float64)).reshape(x.shape) * amplitude).to(x) for x in actual)
     gradients = torch.autograd.grad(actual, targets, cot)
@@ -915,8 +916,8 @@ def test_chunk_source_alias_gradient(dtype, amplitude, kind):
     assert info['source_alias_groups'] == ([] if kind == 'independent' else [[0, 1]])
     if kind != 'independent':
         assert info['source_gradient_aggregation'] == 'fp64_before_public_cast'
-    assert info['precision_route'] == 'experimental_mixed_readout'
-    assert info['backward_precision_route'] == ('experimental_mixed_readout' if amplitude <= 128. else 'strict_device_replay')
+    assert info['precision_route'] == f'experimental_{policy}'
+    assert info['backward_precision_route'] == (f'experimental_{policy}' if amplitude <= 128. else 'strict_device_replay')
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])

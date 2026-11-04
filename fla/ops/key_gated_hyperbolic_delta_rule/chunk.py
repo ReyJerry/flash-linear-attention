@@ -208,6 +208,17 @@ def _qualification_reason(sources, options):
     return None
 
 
+def _bf16_fs6_qualification_reason(sources, options):
+    reason = _qualification_reason(sources, options)
+    if reason is not None:
+        return reason
+    q, _, v = sources[:3]
+    if (options['carry'] != 'no_carry' or options['c'] != 16 or options['g'] != 32
+            or q.shape[-1] != 128 or v.shape[-1] != 128):
+        return 'unqualified_bf16_fs6_geometry'
+    return None
+
+
 def _mixed_adjoint_qualification(sources, options, do, ds):
     """Keep v1 and bound combined multi-chunk adjoints within the small-model experiment."""
     maxima = [x.detach().abs().max().item() if x.numel() else 0. for x in (do, ds)]
@@ -236,6 +247,7 @@ def _mixed_adjoint_qualification(sources, options, do, ds):
 def _strict_device_replay(sources, options, do, ds, needs, telemetry):
     details = {}
     strict_options = dict(options, mixed=False)
+    strict_options.pop('bf16_fs6', None)
     aliases = options.get('source_alias_groups', ())
     owners = list(range(len(sources)))
     for group in aliases:
@@ -305,7 +317,7 @@ class _Chunk(torch.autograd.Function):
         state_fwd_kernel[((len(seq_chunks)-1)*h*ng,)](
             v, state, output, final if final is not None else state, *metadata[:3], p, groups, saved_s, saved_y, carry,
             h, kd, vd, gs, ng, c, kt, gt, options['final'], options['carry'] == 'y_carry',
-            options.get('mixed', False), num_warps=4,
+            options.get('mixed', False), BF16_FS6=options.get('bf16_fs6', False), num_warps=4,
         )
         ctx.save_for_backward(*sources, *metadata, *p, *groups, saved_s, saved_y, *carry)
         ctx.options, ctx.telemetry, ctx.nc = options, telemetry, nc
@@ -321,7 +333,11 @@ class _Chunk(torch.autograd.Function):
                              direct_FS=nc*h-ctx.edges, chunk_lengths=[z-a for a, z in zip(starts, ends)],
                              saved_buffer_bytes=sum(x.numel()*x.element_size()
                                                     for x in (*p, *groups, saved_s, saved_y, *carry)))
-            if options.get('mixed', False):
+            if options.get('bf16_fs6', False):
+                telemetry.update(precision_route='experimental_bf16_fs6', arithmetic='bf16_fs6_projection',
+                                 tensor_cores=bool(nc), qualification='bf16_fs6_v1', readout_precision='fp64',
+                                 state_control_precision='fp64', contraction_precision='bf16_fs6_fp32_digit_accumulation')
+            elif options.get('mixed', False):
                 telemetry.update(qualification=('model_curvature_v1' if curvature.detach().item() > 1.
                                                 else 'empirical_profile_v1'), readout_precision='fp64',
                                  state_control_precision='fp64',
@@ -354,7 +370,7 @@ class _Chunk(torch.autograd.Function):
                 ctx.telemetry['backward_exception_reason'] = 'cotangent_accuracy' if accuracy_replay else 'cotangent_range'
             result = _host_backward(sources, options, do, ds, ctx.needs_input_grad[:7], ctx.telemetry)
             return (*result, None, None)
-        if options.get('mixed', False):
+        if options.get('mixed', False) or options.get('bf16_fs6', False):
             adjoint_reason, adjoint_details = _mixed_adjoint_qualification(sources, options, do, ds)
             if ctx.telemetry is not None:
                 ctx.telemetry.update(adjoint_details)
@@ -393,6 +409,8 @@ class _Chunk(torch.autograd.Function):
                                  backward_precision=('strict_readout_tf32x3_state_products'
                                                      if options.get('mixed', False) else 'device_float64'),
                                  shared_A_vjp=ctx.nc*h)
+            if options.get('bf16_fs6', False):
+                ctx.telemetry['backward_precision_route'] = 'experimental_bf16_fs6'
             if aliases:
                 ctx.telemetry['source_gradient_aggregation'] = 'fp64_before_public_cast'
         return (*grads, None, None)
@@ -441,10 +459,15 @@ def chunk_key_gated_hyperbolic_delta_rule(
                    source_alias_groups=aliases)
     if telemetry is not None:
         telemetry['source_alias_groups'] = [list(group) for group in aliases]
-    if precision_policy not in ('strict', 'mixed_readout'):
-        raise ValueError('precision_policy must be strict or mixed_readout.')
-    qualification = 'strict_requested' if precision_policy == 'strict' else _qualification_reason(sources, options)
-    options['mixed'] = qualification is None
+    if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6'):
+        raise ValueError('precision_policy must be strict, mixed_readout, or bf16_fs6.')
+    if precision_policy == 'bf16_fs6':
+        qualification = _bf16_fs6_qualification_reason(sources, options)
+        if qualification is None:
+            options['bf16_fs6'] = True
+    else:
+        qualification = 'strict_requested' if precision_policy == 'strict' else _qualification_reason(sources, options)
+    options['mixed'] = precision_policy == 'mixed_readout' and qualification is None
     if telemetry is not None:
         telemetry.update(precision_eligible=qualification is None)
         if qualification:

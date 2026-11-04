@@ -78,3 +78,5 @@ One same-H20 comparison used the actual Layer0 inputs `[8,2048,16,128]`, g32/C32
 The measured F+B ratio is 2.38356× for this one operator shape. Both allocate a peak of 15,640,839,680 bytes and reserve 15,672,016,896 bytes; storage remains FP64. A prior run with public default input validation enabled is retained separately and is not pooled with these samples. This is neither a full-model/GDN comparison nor DDP throughput, and it does not satisfy the final three-independent-repeat requirement. It predates the small-model adjoint-envelope extension; the unchanged kernel bytes and ≤8 captured adjoints identify the measured execution scope.
 
 For later experiments on separate source snapshots, see the [November 4 validation records](experiments/khdn_2026_11_04/README.md).
+
+The [experimental BF16 state projection](key_gated_hyperbolic_bf16_fs6.md) has its own selector and qualification contract.

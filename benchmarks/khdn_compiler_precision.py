@@ -92,7 +92,7 @@ def compiled_precision_inventory(compiled):
 
 def attest_compiled_policy(launch, precision_policy):
     """Bind observed arithmetic to the requested family policy, without qualifying its numerics."""
-    if precision_policy not in ('strict', 'mixed_readout'):
+    if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6'):
         raise AssertionError('unknown KHDN precision policy')
     state_family = launch['kernel'] in ('state_fwd_kernel', 'state_bwd_kernel')
     mixed = precision_policy == 'mixed_readout' and state_family
@@ -101,6 +101,13 @@ def attest_compiled_policy(launch, precision_policy):
         raise AssertionError('KHDN compiled MIXED flag differs from requested policy')
     if not state_family and flags.get('MIXED', False) is not False:
         raise AssertionError('KHDN non-state family unexpectedly selects MIXED')
+    fs6_forward = precision_policy == 'bf16_fs6' and launch['kernel'] == 'state_fwd_kernel'
+    if flags.get('BF16_FS6', False) is not fs6_forward or (fs6_forward and 'BF16_FS6' not in flags):
+        raise AssertionError('KHDN compiled BF16_FS6 flag differs from requested family policy')
+    if precision_policy == 'bf16_fs6' and state_family:
+        expected = dict(C=16, K=128, G=32, KD=128, VD=128, GS=32, CARRY=False, MIXED=False)
+        if any(flags.get(key) != value for key, value in expected.items()):
+            raise AssertionError('KHDN compiled bf16_fs6 geometry/flags differ')
     inventory = launch.get('compiled_precision_inventory', {})
     for key in ('ttir_sha256', 'ptx_sha256'):
         if not re.fullmatch('[0-9a-f]{64}', inventory.get(key, '')):
@@ -122,7 +129,9 @@ def attest_compiled_policy(launch, precision_policy):
     floating = inventory['ptx_floating_opcodes']
     if not any(opcode.endswith('.f64') for opcode in floating):
         raise AssertionError('KHDN missing compiled FP64 arithmetic')
-    if mixed:
+    if fs6_forward:
+        _attest_fs6_arithmetic(inventory)
+    elif mixed:
         if not dots or not mma or any(
             dot['input_precision'] != 'tf32x3' or dot['operand_dtypes'] != ['f32', 'f32']
             or dot['result_dtype'] != 'f32' or dot['max_num_imprecise_acc'] not in (None, 0)
@@ -135,3 +144,33 @@ def attest_compiled_policy(launch, precision_policy):
             raise AssertionError('KHDN mixed PTX arithmetic dtype differs')
     elif dots or mma or any(not opcode.endswith('.f64') for opcode in floating):
         raise AssertionError('KHDN strict family requires FP64 arithmetic without Tensor Cores/dots')
+
+
+def _attest_fs6_arithmetic(inventory):
+    dots, mma = inventory['dot_operations'], inventory['ptx_tensor_core_opcodes']
+    if len(dots) != 21 or any(
+            dot['operand_dtypes'] != ['bf16', 'bf16'] or dot['result_dtype'] != 'f32'
+            or [list(shape) for shape in dot['operand_shapes']] != [[16, 128], [128, 32]]
+            or list(dot['result_shape']) != [16, 32] or dot['max_num_imprecise_acc'] not in (None, 0)
+            for dot in dots):
+        raise AssertionError('KHDN bf16_fs6 requires exactly 21 BF16[16,128] x BF16[128,32] -> FP32 dots')
+    if not mma or any(opcode != 'mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32' for opcode in mma):
+        raise AssertionError('KHDN bf16_fs6 requires native BF16/FP32 MMA PTX')
+    if any(not opcode.endswith('.f64') for opcode in inventory['ptx_floating_opcodes']):
+        raise AssertionError('KHDN bf16_fs6 reconstruction/readout arithmetic must remain FP64')
+    lines = [_mlir_without_location(line) for line in _compiler_without_comments(
+        inventory['raw_assembly']['ttir']).splitlines()
+        if re.match(r'\s*%[-\w.$]+(?:#\d+)?\s*=\s*(?:arith\.(?:constant|extf)|tt\.dot)\b', line)]
+    value = r'%[-\w.$]+(?:#\d+)?'
+    zero_pattern = (rf'({value})\s*=\s*arith\.constant\s+dense<0(?:\.0+(?:e[+-]?0+)?)?>'
+                    r'\s*:\s*tensor<16x32xf32>')
+    zero = {match[1] for line in lines if (match := re.fullmatch(zero_pattern, line))}
+    dot_pattern = rf'({value})\s*=\s*tt\.dot\s+{value}\s*,\s*{value}\s*,\s*({value}),.*'
+    terms = [match.groups() for line in lines if (match := re.fullmatch(dot_pattern, line))]
+    if len(terms) != 21 or any(acc not in zero for _, acc in terms):
+        raise AssertionError('KHDN bf16_fs6 each digit dot requires a zero FP32 initial accumulator')
+    for term, _ in terms:
+        pattern = (rf'{value}\s*=\s*arith\.extf\s+{re.escape(term)}\s*:\s*tensor<16x32xf32>'
+                   r'\s+to\s+tensor<16x32xf64>')
+        if not any(re.fullmatch(pattern, line) for line in lines):
+            raise AssertionError('KHDN bf16_fs6 each digit result must widen to FP64 before reconstruction')

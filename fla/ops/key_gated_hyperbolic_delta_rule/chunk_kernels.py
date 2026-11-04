@@ -294,10 +294,39 @@ def local_graph(P, Gp, ch, block, v, s, y, length,
 
 
 @triton.jit
+def bf16_fs6(f, s, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr):
+    tl.static_assert(C == 16 and K == 128 and G == 32)
+    f_scale = tl.max(tl.abs(f), 1)
+    s_scale = tl.max(tl.abs(s), 0)
+    f_tail = f / tl.where(f_scale > 0, f_scale, 1.)[:, None]
+    s_tail = s / tl.where(s_scale > 0, s_scale, 1.)[None, :]
+    f_digits = ()
+    s_digits = ()
+    for _ in tl.static_range(6):
+        f_tail *= 256.
+        s_tail *= 256.
+        f_int = f_tail.to(tl.int32)
+        s_int = s_tail.to(tl.int32)
+        f_digits += (f_int.to(tl.bfloat16),)
+        s_digits += (s_int.to(tl.bfloat16),)
+        f_tail -= f_int.to(tl.float64)
+        s_tail -= s_int.to(tl.float64)
+    # within a digit product the absolute integer sum is at most 128 * 256**2
+    result = tl.full((C, G), 0, tl.float64)
+    for level in tl.static_range(6):
+        diagonal = tl.full((C, G), 0, tl.float64)
+        for i in tl.static_range(6 - level):
+            term = tl.dot(f_digits[i], s_digits[5 - level - i], out_dtype=tl.float32)
+            diagonal += term.to(tl.float64)
+        result = diagonal + result * (1. / 256.)
+    return f_scale[:, None] * ((result * (1. / 65536.)) * s_scale[None, :])
+
+
+@triton.jit
 def state_fwd_kernel(V0, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, Carry,
                      H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr,
                      C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr,
-                     MIXED: tl.constexpr = False):
+                     MIXED: tl.constexpr = False, BF16_FS6: tl.constexpr = False):
     shg = tl.program_id(0).to(tl.int64)
     group, head, seq = shg % NG, (shg // NG) % H, shg // (NG * H)
     a, g, i = tl.arange(0, K), tl.arange(0, G), tl.arange(0, C)
@@ -317,7 +346,11 @@ def state_fwd_kernel(V0, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS,
         if CARRY and chunk > first:
             y = yn
         else:
-            y = mm_state_product(f, s, C, G, K, MIXED)
+            if BF16_FS6:
+                tl.static_assert(not MIXED and not CARRY)
+                y = bf16_fs6(f, s, C, K, G)
+            else:
+                y = mm_state_product(f, s, C, G, K, MIXED)
         store_matrix(SavedS, block, s, K, G)
         store_matrix(SavedY, block, y, C, G)
         output, s, h, w, u, r, t, zp, ro, target, ss, us, rs, ts = local_graph(

@@ -107,9 +107,9 @@ def _shared_vjp(keys, selection, snapshots, gates, tape, dpk, dgates, dfinal_k, 
     return dk, dselection, dkey, dscore
 
 
-def _case(length=35, chunk=16, rank=2, occupied=2, curvature=.3, gate=None):
+def _case(length=35, chunk=16, rank=2, occupied=2, curvature=.3, gate=None, key_dim=7, values=3):
     torch.manual_seed(2003 + length + rank)
-    b, h, key_dim, values = 1, 2, 7, 3
+    b, h = 1, 2
     q = torch.randn(b, length, h, key_dim, dtype=torch.float64)
     k = F.normalize(torch.randn_like(q), dim=-1)
     v = torch.randn(b, length, h, values, dtype=q.dtype).tanh() * .05
@@ -670,3 +670,39 @@ def test_protected_trajectory_cuda_bank_loss(outputs, curvature, monkeypatch):
     for got, want in zip(actual, expected):
         torch.testing.assert_close(got, want, atol=3e-3, rtol=3e-2)
         assert torch.isfinite(got).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA device unavailable')
+@pytest.mark.parametrize('scratch_value', [float('nan'), 37.])
+def test_value_tile_tail_gradient_ignores_initial_scratch(scratch_value, monkeypatch):
+    from fla.ops.hyperbolic_delta_rule.protected_triton import triton_protected_chunkwise_hyperbolic_delta_rule
+
+    monkeypatch.setenv('FLA_HYPERBOLIC_PROTECTED_STAGED', '0')
+    monkeypatch.setenv('FLA_HYPERBOLIC_SHARED_INVERSE', '0')
+    sources = _case(length=1, rank=4, occupied=4, key_dim=128, values=128)
+    args = tuple(x.detach().cuda().float().requires_grad_() for x in sources)
+    truth_args = tuple(x.detach().cpu().double().requires_grad_() for x in args)
+    expected = _coupled(truth_args, 16, .7)
+    actual = triton_protected_chunkwise_hyperbolic_delta_rule(
+        *args[:4], curvature=args[9], initial_state=args[4], protected_keys=args[5], protected_values=args[6],
+        protected_scores=args[7], selection_scores=args[8], protection_rank=4, checkpoint_size=16,
+        temperature=.7, kernel_strategy='value_parallel', checkpoint=False,
+    )[:5]
+    cotangents = tuple(torch.randn_like(x) for x in actual)
+    truth = torch.autograd.grad(expected, truth_args, tuple(x.cpu().double() for x in cotangents))
+    empty = torch.empty
+    initialized = []
+
+    def initialize_tail(*a, **kw):
+        result = empty(*a, **kw)
+        if result.shape == (1, 1, 2, 128, 4) and result.is_cuda and result.dtype == torch.float32:
+            result.fill_(scratch_value)
+            initialized.append(True)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, 'empty', initialize_tail)
+        grads = torch.autograd.grad(actual, args, cotangents)
+    assert initialized == [True]
+    for grad, reference_grad in zip(grads, truth):
+        torch.testing.assert_close(grad.cpu(), reference_grad.float(), atol=8e-3, rtol=8e-2)

@@ -5,14 +5,62 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import hashlib
+from pathlib import Path
+
 import pytest
 import torch
+import triton
 from test_key_gated_hyperbolic_delta_rule import compare_tensor, make_case, ops
+
+
+_NVIDIA = torch.cuda.is_available() and torch.version.cuda is not None
+pytestmark = pytest.mark.skipif(not _NVIDIA, reason='The serial FS6 GPU tests require NVIDIA CUDA.')
+_COMPILER = '1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32'
+
+
+def _runtime_reason():
+    if torch.cuda.get_device_capability() != (9, 0):
+        return 'unqualified_device'
+    if torch.__version__ != '2.9.0+cu128' or triton.__version__ != '3.5.0':
+        return 'unqualified_runtime'
+    return None
+
+
+@pytest.fixture(scope='module')
+def qualified_compiler():
+    if _runtime_reason():
+        pytest.skip('FS6 native assertions require the qualified SM90 software stack.')
+    from triton._C import libtriton
+    digest = hashlib.sha256()
+    with Path(libtriton.__file__).open('rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            digest.update(block)
+    if digest.hexdigest() != _COMPILER:
+        pytest.skip('FS6 native assertions require the tested compiler binary.')
+
+
+def test_radix_projection_unqualified_stack():
+    reason = _runtime_reason()
+    if reason is None:
+        pytest.skip('This case tests the public strict fallback on other NVIDIA stacks.')
+    sources, _ = make_case(17, 128, 128, 32, torch.float32)
+    opts = dict(curvature=sources[6], initial_state=sources[5], output_final_state=True, group_size=32, chunk_size=16)
+    info = {}
+    out = ops.chunk_key_gated_hyperbolic_delta_rule(*sources[:5], **opts, precision_policy='bf16_fs6', telemetry=info)
+    strict = ops.chunk_key_gated_hyperbolic_delta_rule(*sources[:5], **opts, precision_policy='strict')
+    cot = [torch.randn_like(v) for v in out]
+    grad = torch.autograd.grad(out, sources, cot)
+    expected = torch.autograd.grad(strict, sources, cot)
+    assert all(torch.equal(a, b) for a, b in zip((*out, *grad), (*strict, *expected)))
+    assert info['qualification_reason'] == reason
+    assert info['precision_route'] == info['backward_precision_route'] == 'strict'
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize('packed', [False, True])
 @pytest.mark.parametrize('loss_mode', ['output', 'state', 'joint'])
+@pytest.mark.usefixtures('qualified_compiler')
 def test_radix_projection_sources(dtype, packed, loss_mode):
     sources, cu = make_case(35, 128, 128, 32, dtype, packed=packed)
     ref = tuple(x.detach().double().requires_grad_() for x in sources)
@@ -44,6 +92,7 @@ def test_radix_projection_sources(dtype, packed, loss_mode):
 @pytest.mark.parametrize('chunk,carry,k,v,g', [(32, 'no_carry', 128, 128, 32), (64, 'no_carry', 128, 128, 32),
                                               (16, 'y_carry', 128, 128, 32), (16, 'no_carry', 16, 16, 16),
                                               (16, 'no_carry', 128, 128, 16)])
+@pytest.mark.usefixtures('qualified_compiler')
 def test_radix_projection_rejects_other_geometries(chunk, carry, k, v, g):
     sources, _ = make_case(33, k, v, g, torch.float32)
     opts = dict(curvature=sources[6], initial_state=sources[5], output_final_state=True, group_size=g, chunk_size=chunk,
@@ -71,6 +120,7 @@ def test_radix_projection_rejects_other_geometries(chunk, carry, k, v, g):
     ('normal', 32, 1., 32.000003814697266, 'experimental_bf16_fs6', 'strict_device_replay'),
     ('normal', 16, 1., 128.00001525878906, 'experimental_bf16_fs6', 'strict_device_replay'),
 ])
+@pytest.mark.usefixtures('qualified_compiler')
 def test_radix_projection_boundaries(case, length, curve, amplitude, fwd, bwd):
     sources, _ = make_case(length, 128, 128, 32, torch.float32)
     q, k, v, beta, ell, state, c = sources

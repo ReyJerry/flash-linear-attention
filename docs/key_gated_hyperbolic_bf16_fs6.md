@@ -3,7 +3,8 @@
 `bf16_fs6` is an explicit serial experimental policy. The default remains
 `strict`; `mixed_readout` retains its TF32x3 products and existing checks.
 The tested source manifest is `f18372724acf`; its production modules, benchmark
-code and test sources are reproduced byte for byte in this proposal. On H20,
+code and original tests are available in the first short-policy commit. The later
+portability change affects only test selection and fallback coverage. On H20,
 the full B8/T2048, fixed-c=1 comparison passed the two-step gradient, Adam and
 parameter checks. A separate fresh process reproduced update four from the
 step-three checkpoint. These bounded results do not qualify general training,
@@ -11,7 +12,10 @@ other lengths or distributed throughput. See the [validation records](experiment
 The separately studied long-context selector is not included here.
 
 The selector requires the entire existing forward/adjoint qualification plus
-no_carry, C16, K=V128 and g32. `_bf16_fs6_qualification_reason` retains the
+no_carry, C16, K=V128, g32 and at most 2,048 tokens per document. The native
+qualification stack is SM90, torch 2.9.0+cu128 and Triton 3.5.0 with the
+[validated compiler binary](key_gated_hyperbolic_precision.md#compiler-binding).
+Version strings alone do not identify the tested binary. `_bf16_fs6_qualification_reason` retains the
 original rejection reason before checking the additional geometry. The training
 exception guard wraps that helper and rejects host, recurrent, reference or
 strict-replay substitution before entering those paths. It covers the actual
@@ -67,7 +71,7 @@ conftest requires Triton. Archive CLI/dry-run requires a complete immutable
 revision for this archive. A retained prototype's `MIXED=True` is rejected as
 new-policy identity even if its BF16 arithmetic inventory reparses successfully.
 
-The next GPU gate must use one final frozen source/compiler/import snapshot,
+For requalification after a source or compiler change, use one final frozen source/compiler/import snapshot,
 the original seven-source elementwise AND relative-RMS budgets, targeted
 memcheck/INFO racecheck, then the original learned-curvature tiny W1
 all-parameter update/recovery checks. Only after these prerequisites pass may
@@ -81,8 +85,9 @@ batch identities. Step two continues the candidate's own trajectory.
 
 The external binding fixture retains `@triton.jit` and original line numbers on
 all 23 Python functions. Its no-computation CPU decorator stores the incoming
-function in `.fn`, matching Triton's source convention exactly. The independently
-pinned runtime binding must equal the loaded module before hooks are installed.
+function in `.fn`, matching Triton's source convention exactly. The in-tree small gate derives its update binding from the initial compiled
+route. External acceptance also compares it with a separately frozen source
+binding before the update trace is accepted.
 
 For bf16_fs6, each accumulation arm has its own `KHDNUpdateTrace`, and each
 uninterrupted/resumed recovery update has its own trace. The initial full

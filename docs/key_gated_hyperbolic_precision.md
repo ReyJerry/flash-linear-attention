@@ -1,5 +1,7 @@
 # KHDN experimental mixed precision
 
+The [BF16/FP32 research results](experiments/khdn_bf16_2026_11_05/README.md) document an isolated candidate with no FP64 in its training path. Tiny same-precision 1/8/16-GPU updates and recovery pass, while the original full-model cross-precision gradient checks still fail. That candidate is not a public policy or a new default.
+
 `precision_policy='strict'` remains the default. The explicit `mixed_readout` option retains accurate readout and state/control arithmetic while using seventeen TF32x3 matrix-product sites with FP32 operands and accumulation. It is available through the chunk operator and the KHDN Config → Model → Layer chain. It is an experimental execution policy, not a different model, a general accuracy certificate, or a speed claim.
 
 BF16 autocast controls the surrounding model operations. It does not override explicitly typed Triton operations. The measured Layer preparation supplies FP32 physical source tensors even under BF16 autocast. TF32x3 is distinct from plain BF16 multiplication; generated TTIR and PTX must be inspected to report the actual mode.

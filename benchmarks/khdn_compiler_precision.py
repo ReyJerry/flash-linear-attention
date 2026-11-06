@@ -92,7 +92,7 @@ def compiled_precision_inventory(compiled):
 
 def attest_compiled_policy(launch, precision_policy):
     """Bind observed arithmetic to the requested family policy, without qualifying its numerics."""
-    if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6'):
+    if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16'):
         raise AssertionError('unknown KHDN precision policy')
     state_family = launch['kernel'] in ('state_fwd_kernel', 'state_bwd_kernel')
     mixed = precision_policy == 'mixed_readout' and state_family
@@ -122,6 +122,9 @@ def attest_compiled_policy(launch, precision_policy):
             raise AssertionError(f'KHDN compiled precision observation/hash mismatch: {key}')
     if any(inventory.get('assembly_sha256', {}).get(key) != parsed['assembly_sha256'][key] for key in ('ttir', 'ptx')):
         raise AssertionError('KHDN assembly hash disagrees with raw compiled evidence')
+    if precision_policy == 'bf16':
+        _attest_bf16_arithmetic(launch, inventory)
+        return
     scalar = inventory['multiply_add_ir_dtypes']
     if not scalar.get('f64') or set(scalar) != {'f64'}:
         raise AssertionError('KHDN scalar multiply/add arithmetic must remain FP64')
@@ -144,6 +147,34 @@ def attest_compiled_policy(launch, precision_policy):
             raise AssertionError('KHDN mixed PTX arithmetic dtype differs')
     elif dots or mma or any(not opcode.endswith('.f64') for opcode in floating):
         raise AssertionError('KHDN strict family requires FP64 arithmetic without Tensor Cores/dots')
+
+
+def _attest_bf16_arithmetic(launch, inventory):
+    """Attest the measured C16/K=V128/g32 no-carry three-product specialization."""
+    counts = dict(common_fwd_kernel=9, group_fwd_kernel=3, group_af_fwd_kernel=0,
+                  state_fwd_kernel=15, state_bwd_kernel=45, common_bwd_kernel=24)
+    name, flags = launch['kernel'], launch['arguments']
+    if name not in counts or flags.get('C') != 16:
+        raise AssertionError('KHDN bf16 compiler gate currently covers C16 no-carry only')
+    if name in ('state_fwd_kernel', 'state_bwd_kernel'):
+        expected = dict(K=128, G=32, KD=128, VD=128, GS=32, CARRY=False, MIXED=False)
+        if any(flags.get(key) != value for key, value in expected.items()):
+            raise AssertionError('KHDN bf16 compiled geometry or carry policy differs')
+    raw = inventory['raw_assembly']
+    if re.search(r'\bf64\b|xf64\b', raw['ttir']) or re.search(r'\.f64\b', raw['ptx']):
+        raise AssertionError('KHDN bf16 compiled FP64 type or instruction is forbidden')
+    if set(inventory['multiply_add_ir_dtypes']) != {'f32'}:
+        raise AssertionError('KHDN bf16 scalar/control arithmetic must be FP32')
+    dots, mma = inventory['dot_operations'], inventory['ptx_tensor_core_opcodes']
+    if len(dots) != counts[name] or any(
+        dot['operand_dtypes'] != ['bf16', 'bf16'] or dot['result_dtype'] != 'f32'
+        or dot['max_num_imprecise_acc'] not in (None, 0) for dot in dots
+    ):
+        raise AssertionError('KHDN bf16 three-product compiled dot count or operand/accumulator type differs')
+    if bool(dots) != bool(mma) or any(not re.search(r'\.f32\.bf16\.bf16(?:\.f32)?$', opcode) for opcode in mma):
+        raise AssertionError('KHDN bf16 requires matching BF16/FP32 Tensor Core instructions')
+    if any(not opcode.endswith('.f32') for opcode in inventory['ptx_floating_opcodes']):
+        raise AssertionError('KHDN bf16 PTX scalar arithmetic must be FP32')
 
 
 def _attest_fs6_arithmetic(inventory):

@@ -6,7 +6,26 @@ The recovery, evidence-retention and archive-metadata fixes have passed targeted
 
 ## Availability and configuration
 
-GDN, KDA, Comba, HDN TC/staged and the existing protected baselines use their native CausalLMs. GDN2 has native operators and a layer but no native CausalLM/config, so a full-model GDN2 request fails. KHDN requests (`khdn_no_carry`/`khdn_y_carry`) require explicit `--khdn-strict` or `--khdn-precision-policy {strict,mixed_readout}` and actual operator/autograd/kernel, precision, token-domain and checkpoint-replay checks. The strict device path uses FP64 SIMT; exceptional host/reference/recurrent substitutions and strict replay are rejected from timing. `khdn_naive` requires `--check-only` and constructs only a tiny model with head dimension/group size 32 by default; it never produces full-model timing.
+GDN, KDA, Comba, HDN TC/staged and the existing protected baselines use their native CausalLMs. GDN2 has native operators and a layer but no native CausalLM/config, so a full-model GDN2 request fails. KHDN requests (`khdn_no_carry`/`khdn_y_carry`) require explicit `--khdn-strict` or `--khdn-precision-policy {strict,mixed_readout,bf16_fs6,bf16}` and actual operator/autograd/kernel, precision, token-domain and checkpoint-replay checks. The strict device path uses FP64 SIMT; exceptional host/reference/recurrent substitutions and strict replay are rejected from timing. `khdn_naive` requires `--check-only` and constructs only a tiny model with head dimension/group size 32 by default; it never produces full-model timing. Experimental policies have additional shape and qualification restrictions below.
+
+## Public BF16 qualification
+
+`--khdn-precision-policy bf16` selects the public three-product BF16 implementation with FP32 control/state and no candidate FP64 fallback. Its current harness witness is C16/K=V128/g32/no_carry, BF16 autocast, ShortConv and plain CE. The CLI currently permits only `--check-only` or `--dry-run`; full-model timing remains gated until the integrated path is qualified. This is separate from the frozen private full-model timings in the [BF16 release record](experiments/khdn_bf16_2026_11_06/README.md).
+
+On the qualified H20/compiler runtime, an actual single-rank NCCL qualification uses:
+
+```bash
+torchrun --standalone --nproc-per-node=1 --max-restarts=0 -m benchmarks.benchmark_hyperbolic_training \
+  --methods khdn_no_carry --khdn-precision-policy bf16 --loss-backend plain \
+  --chunk-size 16 --check-only --scaling strong --seed 101 --data-seed 1009 \
+  --output /absolute/new-result-directory/bf16-w1.json
+```
+
+The small model retains K128/g32, learned positive curvature and every gate parameter. Its initial dense/packed comparison uses the user-approved BF16 global-gradient cosine/norm criteria and FP32 evaluation CE on reserved sample10000. Old elementwise gradient failures remain in the result. Operator output/state and seven-source VJPs use the separate BF16 arithmetic budget; legacy strict/FS6 budgets and same-precision accumulation/DDP/update budgets are unchanged. This initial check does not replace finite full-model validation.
+
+`KHDNTrace` observes the actual BF16 autograd class and native kernels, binds source/JIT hashes and reparses raw compiled instruction types. `KHDNUpdateTrace` separately requires each expected microbatch, layer, native forward/backward and checkpoint recomputation before an optimizer update. The BF16 exception guard rejects FP64 tensor inputs/results and legacy fallback/reference substitutions. These checks do not infer execution from a configuration label.
+
+The public CLI completed the actual NCCL W1 small-model gate with43 parameter groups: reported accumulated-gradient, update and restored-next-update parameter errors were all zero. It used16 microbatches/224 input slots/125 valid labels, **not** the full262144-token strong-scaling workload. The full24 model and W8/W16 acceptance remain open. The same-process reload here is distinct from fresh-process recovery, and its raw gradient/Adam tensors were not retained for independent byte comparison. See the [harness evidence](experiments/khdn_bf16_2026_11_06/harness-evidence.json) for exact sources, counts and limitations.
 
 The full recipe is 24 layers, hidden 2048, H16, K/V128, FFN5184, vocab32000, expand_v1, short convolution, output gate, FP32 parameters, BF16 autocast, and outer nonreentrant checkpointing. Default fixed-curvature counts from the source inventory are HDN 1,400,280,064; GDN 1,401,067,264; KDA 1,324,881,280; Comba 1,401,068,032; KHDN 1,412,912,512. Learned KHDN curvature adds 24 parameters. KHDN adds 12,632,448 parameters over HDN. KDA uses its native low-rank output gate, so matched width/depth is not equal parameter count. `--parameter-counts` cross-checks actual meta constructors when native dependencies exist; when Triton is absent it explicitly reports source inventory without constructor verification. Every full CUDA model's actual count must agree before timing.
 

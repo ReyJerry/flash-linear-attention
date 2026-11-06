@@ -166,7 +166,8 @@ def native_boundary(monkeypatch, request):
             if controller.get('zero_calls'):
                 return SimpleNamespace(loss=sum(p.sum() for p in self.parameters()) * 0.)
             for layer in self.layers:
-                value = (checkpoint(layer, value, cu_seqlens, use_reentrant=False) if self.use_checkpoint else layer(value, cu_seqlens))
+                value = (checkpoint(layer, value, cu_seqlens, use_reentrant=False)
+                         if self.use_checkpoint else layer(value, cu_seqlens))
             return SimpleNamespace(loss=value.sum() * labels[:, 1:].ne(-100).sum() / num_items_in_batch)
 
     binding = utils._khdn_fs6_source_binding(chunk, kernels)
@@ -191,13 +192,18 @@ def run_guard(core, *, stage='accumulated_update', checkpointed=True, supplied_b
     return records, steps
 
 
-def test_all23_decorated_hashes_equal_euler_runtime_contract(request):
+def test_fs6_kernel_contract_and_current_public_source_binding(request):
     modules = request.getfixturevalue('source_modules')
     binding = utils._khdn_fs6_source_binding(*modules)
-    expected = json.loads((Path(__file__).parent / 'fixtures/khdn-runtime-source-binding.json').read_text())
-    assert binding == expected
+    fixtures = Path(__file__).parent / 'fixtures'
+    retained = json.loads((fixtures / 'khdn-runtime-source-binding.json').read_text())
+    current = json.loads((fixtures / 'khdn-public-fs6-source-binding.json').read_text())
+    assert binding == current
+    for key in ('jit_functions', 'selected_forward_callee', 'backward_primal'):
+        assert binding[key] == retained[key]
     assert len(binding['jit_functions']) == 23
-    assert utils._binding_hash(binding) == 'b97aa379fc039ad484cdcc107f17be28013d41090e262ebea3c3b18e0a793d95'
+    assert utils._binding_hash(retained) == 'b97aa379fc039ad484cdcc107f17be28013d41090e262ebea3c3b18e0a793d95'
+    assert utils._binding_hash(binding) == '446aea25e9dbf2a632dbcf9649a3d0e8dc001acbb49d607e2d29b3dcac753c38'
     assert all(inspect.getsource(getattr(modules[1], name).fn).startswith('@triton.jit\n')
                for name in binding['jit_functions'])
 
@@ -213,7 +219,7 @@ def test_positive_public_native_counts_and_real_checkpoint_before_step(native_bo
 
 
 @pytest.mark.parametrize('stage,policy', [('accumulated_update', None), ('uninterrupted_recovery', 'mixed_readout'),
-                                         ('resumed_recovery', 'strict')])
+                                          ('resumed_recovery', 'strict')])
 def test_reproduces_parent_empty_events_false_pass_then_new_pre_step_rejection(native_boundary, stage, policy):
     core = native_boundary
     # Load the retained parent implementation, not an imitation of its negative sentinel.
@@ -261,9 +267,9 @@ def test_rejects_silent_substitution_missing_identity_and_wrong_flags_before_ste
 
 
 @pytest.mark.parametrize('root,stage,expected_updates', [(1, 'accumulated_update', 0), (17, 'accumulated_update', 0),
-                                                        (33, 'uninterrupted_recovery', 2), (34, 'resumed_recovery', 3), (None, None, 4)])
+                                                         (33, 'uninterrupted_recovery', 2), (34, 'resumed_recovery', 3), (None, None, 4)])
 def test_small_gate_rejects_each_arm_and_recovery_before_corresponding_optimizer(native_boundary, monkeypatch,
-                                                                                root, stage, expected_updates):
+                                                                                 root, stage, expected_updates):
     core = native_boundary
     core.controller['attack_root'] = root
     counts = {'updates': 0}

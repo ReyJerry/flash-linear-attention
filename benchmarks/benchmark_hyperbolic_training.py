@@ -75,7 +75,7 @@ def parse_arguments(argv=None):
     parser.add_argument('--chunk-size', type=int, choices=(16, 32, 64), default=16)
     parser.add_argument('--khdn-strict', action='store_true',
                         help='opt in to correctness-gated strict FP64 SIMT KHDN; no Tensor Core claim')
-    parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout', 'bf16_fs6'),
+    parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout', 'bf16_fs6', 'bf16'),
                         help='explicit KHDN policy; experimental policies reject fallback/replay')
     parser.add_argument('--operator-sweep', action='store_true',
                         help='bounded KHDN operator-only correctness/profile/timing, separate from model/DDP')
@@ -125,12 +125,18 @@ def parse_arguments(argv=None):
         parser.error('--khdn-strict conflicts with an experimental --khdn-precision-policy')
     if args.khdn_strict:
         args.khdn_precision_policy = 'strict'
-    if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6') and 'khdn_naive' in args.methods:
+    if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6', 'bf16') and 'khdn_naive' in args.methods:
         parser.error('khdn_naive always executes strict; experimental policies require a chunk method')
     if args.khdn_precision_policy == 'bf16_fs6' and (
             args.methods != ['khdn_no_carry'] or args.chunk_size != 16 or args.group_size != 32 or args.head_dim != 128
             or args.dtype != 'bf16' or args.loss_backend != 'plain' or args.no_short_conv or args.no_layer_checkpoint):
         parser.error('bf16_fs6 requires khdn_no_carry, C16/K=V128/g32, BF16 autocast, ShortConv, checkpoint and plain CE')
+    if args.khdn_precision_policy == 'bf16':
+        if (args.methods != ['khdn_no_carry'] or args.chunk_size != 16 or args.group_size != 32 or args.head_dim != 128
+                or args.dtype != 'bf16' or args.loss_backend != 'plain' or args.no_short_conv):
+            parser.error('bf16 training harness requires khdn_no_carry, C16/K=V128/g32, BF16 autocast, ShortConv and plain CE')
+        if not (args.check_only or args.dry_run):
+            parser.error('bf16 CLI currently requires --check-only; integrated full-model timing qualification remains pending')
     dimensions = (args.batch, args.layers, args.hidden_size, args.heads, args.intermediate_size)
     if min(dimensions) <= 0 or args.seq_len < 2 or args.vocab_size < 4:
         parser.error('model dimensions must be positive; seq-len>=2 and vocab-size>=4')
@@ -213,13 +219,13 @@ def model_configuration(args, name, *, small=False):
     if name.startswith('khdn_'):
         if small:
             common.update(hidden_size=64, num_heads=2, head_dim=32, intermediate_size=128)
-            if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6'):
+            if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6', 'bf16'):
                 common.update(hidden_size=256, head_dim=128, intermediate_size=512)
         common.update(group_size=args.group_size, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
                       chunk_size=args.chunk_size, carry_mode='y_carry' if name == 'khdn_y_carry' else 'no_carry',
                       attn_mode='naive' if name == 'khdn_naive' else 'chunk',
                       precision_policy='strict' if name == 'khdn_naive' else (args.khdn_precision_policy or 'strict'))
-        if small and args.khdn_precision_policy == 'bf16_fs6':
+        if small and args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
             common['learnable_curvature'] = True
     elif name not in ('gdn', 'kda', 'comba', 'gdn2'):
         common.update(tensor_core=True, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
@@ -415,6 +421,50 @@ def compare_model_results(actual, expected):
             'loss_atol_rtol': LOSS_TOLERANCE, 'gradient_atol_rtol': GRADIENT_TOLERANCE}
 
 
+def compare_bf16_model_results(actual, expected):
+    """Apply the approved BF16 initial-model gate while retaining legacy elementwise failures."""
+    if actual['initial_weights_sha256'] != expected['initial_weights_sha256']:
+        raise AssertionError('BF16 comparison initial weights differ')
+    if actual['gradients'].keys() != expected['gradients'].keys() or not actual['gradients']:
+        raise AssertionError('BF16 comparison parameter-gradient names differ or are empty')
+    if not torch.isfinite(actual['loss']).all() or not torch.isfinite(expected['loss']).all():
+        raise AssertionError('BF16 comparison loss is nonfinite')
+    products, norm_a, norm_b, errors = [], [], [], {}
+    for name, gradient in actual['gradients'].items():
+        reference = expected['gradients'][name]
+        if gradient is None or reference is None or not torch.isfinite(gradient).all() or not torch.isfinite(reference).all():
+            raise AssertionError(f'Missing or nonfinite BF16 gradient: {name}')
+        if gradient.shape != reference.shape:
+            raise AssertionError(f'BF16 gradient shape differs: {name}')
+        a, b = gradient.detach().double(), reference.detach().double()
+        products.append(float((a*b).sum()))
+        norm_a.append(float(a.square().sum()))
+        norm_b.append(float(b.square().sum()))
+        errors[name] = {'max_abs': float((a-b).abs().max()),
+                        'relative_rms': float((a-b).square().mean().sqrt() / b.square().mean().sqrt().clamp_min(1e-30)),
+                        'legacy_elementwise_failures': int(((a-b).abs() > GRADIENT_TOLERANCE[0]
+                                                            + GRADIENT_TOLERANCE[1]*b.abs()).sum())}
+    aa, bb = math.fsum(norm_a), math.fsum(norm_b)
+    if aa <= 0 or bb <= 0:
+        raise AssertionError('BF16 gradient norm is zero')
+    cosine, ratio = math.fsum(products)/math.sqrt(aa*bb), math.sqrt(aa/bb)
+    if cosine < .99 or not .9 <= ratio <= 1.1:
+        raise AssertionError(f'BF16 global gradient gate failed: cosine={cosine}, norm_ratio={ratio}')
+    left, right = actual['validation'], expected['validation']
+    if not left or not right or any(left[key] != right[key] for key in ('sample_id', 'batch_sha256', 'valid_labels')):
+        raise AssertionError('BF16 heldout sample identity differs')
+    if left['sample_id'] != 10000 or left['valid_labels'] <= 0:
+        raise AssertionError('BF16 initial-model gate requires reserved sample10000 with valid labels')
+    delta = left['mean_ce']-right['mean_ce']
+    if not math.isfinite(delta) or abs(delta) > math.log1p(.001):
+        raise AssertionError(f'BF16 reserved-sample mean CE difference exceeds log(1.001): {delta}')
+    return {'global_gradient_cosine': cosine, 'global_gradient_norm_ratio': ratio,
+            'parameter_gradient_errors': errors, 'validation_mean_ce_delta': delta,
+            'validation_ppl_relative_delta': math.expm1(delta), 'validation': {'candidate': left, 'reference': right},
+            'legacy_loss_abs': abs(actual['loss'].item()-expected['loss'].item()),
+            'scope': 'approved BF16 initial small-model gradient/heldout gate only; finite full-model and DDP qualification remain separate'}
+
+
 def small_model_gate(args):
     requested = set(args.methods)
     if requested.intersection(('hdn_tc', 'hdn_staged')):
@@ -552,8 +602,11 @@ def main(argv=None):
             'timing_scope': 'Forward includes loss; backward includes outer checkpoint replay; optimizer included in total. '
                             'CUDA events per phase, synchronized wall total. zero_grad/data creation/health/trace are outside timing.',
             'comparison': 'Identical initial HDN weights within groups; GDN performance-only, never a numerical oracle.',
-            'numerical_gate_scope': 'Small-model loss and all-parameter gradient parity; full-size runs check numerical '
-                                    'finiteness and actual routes, without asserting full-size trajectory equivalence.',
+            'numerical_gate_scope': ('Small-model BF16 global gradient cosine/norm and reserved-sample FP32 CE; '
+                                     'legacy elementwise failures retained; full-model finite qualification remains separate.'
+                                     if args.khdn_precision_policy == 'bf16' else
+                                     'Small-model loss and all-parameter gradient parity; full-size runs check numerical '
+                                     'finiteness and actual routes, without asserting full-size trajectory equivalence.'),
         },
     }
     from benchmarks.hyperbolic_training_distributed import audit_methods, parameter_counts, run_benchmark, scaling_plan

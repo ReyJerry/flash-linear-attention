@@ -98,6 +98,61 @@ def policy_launch(mixed=True):
             'kernel_source_sha256': 'a' * 64, 'compiled_precision_inventory': inventory}
 
 
+def bf16_launch(name='state_fwd_kernel', count=15, dtype='bf16', scalar='f32', extra_ir='', extra_ptx=''):
+    ir = f'%x = arith.mulf %a, %b : tensor<16x16x{scalar}>\n'
+    ir += '\n'.join(f'%o{i} = tt.dot %a, %b, %c, inputPrecision = tf32 : '
+                    f'tensor<16x128x{dtype}> * tensor<128x32x{dtype}> -> tensor<16x32xf32>' for i in range(count))
+    ptx = f'fma.rn.{scalar} a,b,c,d;\n'
+    if count:
+        ptx += f'mma.sync.aligned.m16n8k16.row.col.f32.{dtype}.{dtype}.f32 {{%r0}}, {{%r1}}, {{%r2}}, {{%r3}};\n'
+    inventory = compiled_precision_inventory(compiled(ir+extra_ir, ptx+extra_ptx))
+    return dict(kernel=name, arguments=dict(C=16, K=128, G=32, KD=128, VD=128, GS=32, CARRY=False,
+                                            MIXED=False, BF16_FS6=False),
+                kernel_source_sha256='b'*64, compiled_precision_inventory=inventory)
+
+
+@pytest.mark.parametrize('name,count', [('common_fwd_kernel', 9), ('group_fwd_kernel', 3), ('group_af_fwd_kernel', 0),
+                                        ('state_fwd_kernel', 15), ('state_bwd_kernel', 45), ('common_bwd_kernel', 24)])
+def test_bf16_compiled_policy_accepts_its_bounded_native_families(name, count):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    row = bf16_launch(name, count)
+    attest_compiled_policy(row, 'bf16')
+    assert not row['compiled_precision_inventory']['numerical_policy_qualified']
+
+
+@pytest.mark.parametrize('options', [
+    dict(count=5), dict(count=30), dict(dtype='f16'), dict(dtype='f32'), dict(scalar='f64'),
+    dict(extra_ir='\n%w = arith.extf %x : tensor<16x16xf32> to tensor<16x16xf64>'),
+    dict(extra_ptx='\ncvt.f64.f32 a,b;'), dict(extra_ptx='\nadd.f16 a,b,c;'), dict(name='carry_fwd_kernel'),
+])
+def test_bf16_compiled_policy_rejects_reparsed_wrong_arithmetic(options):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    row = bf16_launch(**options)
+    with pytest.raises(AssertionError):
+        attest_compiled_policy(row, 'bf16')
+
+
+@pytest.mark.parametrize('mutation', [
+    lambda row: row['arguments'].update(C=32),
+    lambda row: row['arguments'].update(KD=64),
+    lambda row: row['arguments'].update(CARRY=True),
+    lambda row: row['arguments'].update(MIXED=True),
+    lambda row: row['arguments'].update(BF16_FS6=True),
+    lambda row: row['arguments'].pop('MIXED'),
+    lambda row: row['compiled_precision_inventory'].update(raw_assembly={}),
+    lambda row: row['compiled_precision_inventory'].update(dot_operations=[]),
+    lambda row: row['compiled_precision_inventory'].update(ptx_tensor_core_opcodes={}),
+    lambda row: row['compiled_precision_inventory'].update(ttir_sha256='c'*64),
+    lambda row: row.pop('kernel_source_sha256'),
+])
+def test_bf16_compiled_policy_rejects_missing_or_substituted_evidence(mutation):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    row = bf16_launch()
+    mutation(row)
+    with pytest.raises(AssertionError):
+        attest_compiled_policy(row, 'bf16')
+
+
 @pytest.mark.parametrize('policy', ['strict', 'mixed_readout'])
 def test_compiled_policy_requires_actual_family_flags_dtypes_modes_and_hashes(policy):
     from benchmarks.khdn_compiler_precision import attest_compiled_policy

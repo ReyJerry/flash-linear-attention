@@ -35,6 +35,7 @@ from benchmarks.hyperbolic_benchmark_utils import (
     KHDNExceptionGuard,
     KHDNTrace,
     KHDNUpdateTrace,
+    _NoFP64Training,
     environment,
     metadata,
     summarize,
@@ -768,7 +769,8 @@ def trace_route(model, batch, args, name, benchmark):
         expected_layout = khdn_batch_layout(batch.inputs)
         context.bind_model(model)
         context.expected_checkpoint = not args.no_layer_checkpoint
-    guard = KHDNExceptionGuard('bf16_fs6') if strict and args.khdn_precision_policy == 'bf16_fs6' else contextlib.nullcontext()
+    guard = KHDNExceptionGuard(args.khdn_precision_policy) if strict and args.khdn_precision_policy in (
+        'bf16_fs6', 'bf16') else contextlib.nullcontext()
     with guard, context as trace, observe_key_gates(model, name if not strict else '') as gates:
         loss = weighted_loss(model, batch, args, max(1, batch.valid_labels), 1)
         loss.backward()
@@ -842,16 +844,17 @@ def khdn_update_guard(args, name, stage, records, *, model=None, batches=None, s
         return
     with KHDNExceptionGuard(precision_policy=args.khdn_precision_policy or 'strict') as guard:
         record = {'stage': stage, 'guard': guard.evidence()}
-        if args.khdn_precision_policy == 'bf16_fs6':
+        if args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
             record['arm'] = arm
         records.append(record)
         try:
-            if args.khdn_precision_policy == 'bf16_fs6':
+            if args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
                 if model is None or not batches or not source_binding:
                     raise AssertionError('KHDN update missing positive model/batch/source contracts')
                 observer = KHDNUpdateTrace(unwrap(model), batches, [khdn_batch_layout(b.inputs) for b in batches],
                                            expected_checkpoint=not args.no_layer_checkpoint,
-                                           expected_source_binding=source_binding, arm=arm)
+                                           expected_source_binding=source_binding, arm=arm,
+                                           **({'precision_policy': 'bf16'} if args.khdn_precision_policy == 'bf16' else {}))
                 with observer:
                     yield
                 record['positive_observation'] = observer.attest()
@@ -892,7 +895,7 @@ def small_gate(args, name, runtime, benchmark):
     initial = parameters(model)
     update_guards = []
     binding = route.get('source_binding')
-    if args.khdn_precision_policy == 'bf16_fs6':
+    if args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
         serial_batches = [batch.to(runtime.device) for batch in global_batches]
         with khdn_update_guard(args, name, 'accumulated_update', update_guards,
                                model=ddp, batches=local_batches, source_binding=binding, arm='ddp'):
@@ -925,7 +928,8 @@ def small_gate(args, name, runtime, benchmark):
               'ddp_accepted': False}
     if name.startswith('khdn_'):
         oracle_key = {'mixed_readout': 'mixed_vs_explicit_strict_oracle',
-                      'bf16_fs6': 'bf16_fs6_vs_explicit_strict_oracle'}.get(
+                      'bf16_fs6': 'bf16_fs6_vs_explicit_strict_oracle',
+                      'bf16': 'bf16_vs_explicit_strict_oracle'}.get(
                           args.khdn_precision_policy, 'strict_vs_explicit_oracle')
         result[oracle_key] = oracle_parity
         gates = {}
@@ -1311,17 +1315,23 @@ def khdn_model_oracle_gate(args, name, benchmark):
             oracle_context = khdn_model_oracle_precision() if method == 'khdn_naive' else contextlib.nullcontext()
             with oracle_context as oracle_evidence:
                 route = trace_route(model, batch, gate_args, method, benchmark)
+                validation = None
+                if args.khdn_precision_policy == 'bf16':
+                    validation = khdn_validation_ce(model, make_batch(gate_args, 10000).to('cuda'), gate_args, benchmark,
+                                                    candidate=method != 'khdn_naive')
             if method == 'khdn_naive':
                 if not oracle_evidence['calls']:
                     raise AssertionError('Model Oracle did not execute the explicit FP64 reference')
                 result[layout]['oracle_precision'] = oracle_evidence
             outputs.append({'loss': torch.tensor(route['loss']), 'initial_weights_sha256': info['initial_weights_sha256'],
+                            'validation': validation,
                             'gradients': {key: value.grad.detach().float().cpu().clone()
                                           for key, value in model.named_parameters() if value.requires_grad}})
             if method == name:
                 result[layout] = {'actual_route': route, 'model': info}
             del model
-        parity = benchmark.compare_model_results(*outputs)
+        parity = (benchmark.compare_bf16_model_results(*outputs) if args.khdn_precision_policy == 'bf16'
+                  else benchmark.compare_model_results(*outputs))
         required = ('f_proj.0.weight', 'f_proj.1.weight', 'A_log', 'dt_bias', 'curvature_raw')
         for suffix in required:
             if not any(key.endswith(suffix) for key in outputs[0]['gradients']):
@@ -1332,6 +1342,33 @@ def khdn_model_oracle_gate(args, name, benchmark):
             'identical weights and outer checkpoint; explicit naive dense-solve Oracle only in this untimed small gate',
             'dense_fp64_truth_scope': 'independent operator and model Oracle; model reference internally promotes prepared '
             'sources differentiably to FP64 and restores public output/state dtypes; outer autocast and parameters unchanged'}
+
+
+def khdn_validation_ce(model, batch, args, benchmark, *, candidate):
+    """Evaluate reserved labels with explicit FP32 CE, separate from reported training loss."""
+    inputs = {key: value for key, value in batch.inputs.items() if key != 'labels'}
+    target = batch.inputs['labels'][:, 1:]
+    valid = target.ne(-100)
+    if int(valid.sum()) != batch.valid_labels or batch.valid_labels <= 0:
+        raise AssertionError('BF16 validation label count differs')
+    training = model.training
+    guard = _NoFP64Training() if candidate else contextlib.nullcontext()
+    try:
+        model.eval()
+        with guard, torch.no_grad():
+            with benchmark.autocast(args):
+                logits = model(**inputs, use_cache=False).logits
+            with torch.autocast(device_type=logits.device.type, enabled=False):
+                losses = torch.nn.functional.cross_entropy(logits[:, :-1].float().reshape(-1, logits.shape[-1]),
+                                                           target.reshape(-1), reduction='none')
+            losses = losses[valid.reshape(-1)]
+            if not torch.isfinite(losses).all():
+                raise AssertionError('BF16 validation CE is nonfinite')
+            mean = math.fsum(losses.cpu().tolist()) / batch.valid_labels
+    finally:
+        model.train(training)
+    return {'mean_ce': mean, 'batch_sha256': batch.sha256, 'sample_id': batch.sample_id,
+            'valid_labels': batch.valid_labels, 'evaluation': 'FP32 logits/CE with autocast disabled; CPU fsum aggregation'}
 
 
 def khdn_operator_sources(args, length):
@@ -1361,7 +1398,8 @@ def khdn_operator_gate(args, name, sources):
     truth_sources = tuple(value.detach().double().requires_grad_() for value in sources)
     oracle_checkpoint = verify_checkpointed_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, sources, args, name)
     truth = checkpointed_dense_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, truth_sources, args, name)
-    guard = KHDNExceptionGuard('bf16_fs6') if args.khdn_precision_policy == 'bf16_fs6' else contextlib.nullcontext()
+    guard = KHDNExceptionGuard(args.khdn_precision_policy) if args.khdn_precision_policy in (
+        'bf16_fs6', 'bf16') else contextlib.nullcontext()
     with guard, KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
                           precision_policy=args.khdn_precision_policy or 'strict') as trace:
         actual = khdn_operator_call(ops.chunk_key_gated_hyperbolic_delta_rule, actual_sources, args, name)
@@ -1371,9 +1409,11 @@ def khdn_operator_gate(args, name, sources):
     try:
         truth_grads = torch.autograd.grad(truth, truth_sources, tuple(value.double() for value in cotangents))
         errors = {}
+        bf16_policy = args.khdn_precision_policy == 'bf16'
         for category, values, references, names, budget in (
-            ('forward', actual, truth, ('output', 'state'), (2e-5, 2e-4, 1e-4)),
-            ('backward', actual_grads, truth_grads, ('q', 'k', 'v', 'beta', 'log_decay', 'S0', 'curvature'), (5e-5, 5e-4, 2e-4)),
+            ('forward', actual, truth, ('output', 'state'), (.002, .02, .01) if bf16_policy else (2e-5, 2e-4, 1e-4)),
+            ('backward', actual_grads, truth_grads, ('q', 'k', 'v', 'beta', 'log_decay', 'S0', 'curvature'),
+             (.005, .03, .015) if bf16_policy else (5e-5, 5e-4, 2e-4)),
         ):
             for key, value, reference in zip(names, values, references):
                 if not torch.isfinite(value).all() or not torch.isfinite(reference).all():
@@ -1387,6 +1427,13 @@ def khdn_operator_gate(args, name, sources):
                     raise AssertionError(f'KHDN {category}/{key} exceeds frozen relative-RMS budget')
                 errors[f'{category}/{key}'] = {'max_abs': float(difference.abs().max()), 'relative_rms': float(rms / scale),
                                                'atol': atol, 'rtol': rtol, 'relative_rms_budget': ratio}
+                if bf16_policy:
+                    old_atol, old_rtol, old_rms = (2e-5, 2e-4, 1e-4) if category == 'forward' else (5e-5, 5e-4, 2e-4)
+                    errors[f'{category}/{key}']['legacy_fp32_diagnostics'] = {
+                        'elementwise_failures': int((difference.abs() > old_atol + old_rtol*reference.abs()).sum()),
+                        'rms_failed': bool(rms > old_rms*reference.square().mean().sqrt().clamp_min(old_atol)),
+                        'atol_rtol_rms': [old_atol, old_rtol, old_rms],
+                    }
     except BaseException as error:
         error.khdn_evidence = trace.calls
         raise

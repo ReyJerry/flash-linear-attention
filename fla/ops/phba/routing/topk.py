@@ -5,37 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Algorithm 4：Tiled Top-K Historical Block Selection（triton化方案.md 3.2 节、4.11 节、4.12 节），以及 Rstate 构造
-（Algorithm 1：Rstate = [current_block; Rtok]，再按 PrefixValid 屏蔽，2.3 节、2.6 节）。
-
-    grid = (Nwork, H)；one program = (query_work_id, head)
-    输入 Qrope [T, H, Dh]（routing 只用 RoPE 后的 Qrope）、Centroid [Nc, H, Dh] fp32、QueryWorkList、SeqBlockPtr、PrefixValid
-    输出 Rtok [H, T, Kh]、Rstate [H, T, Ks]（int32，full block id，无效为 -1）
-
-kernel 内（对应 4.11 节伪代码）：
-
-    lane = arange(BR_DOT)；query_valid = (lane < Br) & (row < QueryWorkEnd)        lane >= Br 是物理 padding
-    best_score[BR_DOT, KPAD] = -inf，best_id = -1                                  每个 query 行独立的 Top-KPAD
-    for block_tile in [SeqBlockPtr[seq], CurrentBlock) 按 Bc 递增：                 same-sequence + strict-history
-        score = Σ_{feature chunk} tl.dot(Q_chunk, Centroid_chunk.to(q_dtype).T, out fp32)
-        score = where(query_valid & block_id < CurrentBlock, score, -inf)
-        merge：KPAD 轮固定次数选择，每轮在“已有区”与“新 tile”中各取 max / argmax(tie_break_left=True)，
-               已有区优先（score 相同时已有候选的 block id 更小）；选出的 score 为 -inf 时 id 记为 -1；
-               被选中的候选 score 置 -inf
-    store Rtok[head, row, slot] = best_id，mask = query_valid & slot < Kh             内部 Top-KPAD，只写回前 Kh 个
-    store Rstate[head, row, 0] = CurrentBlock if PrefixValid[CurrentBlock] else -1
-    store Rstate[head, row, 1 + slot] = best_id if PrefixValid[best_id] else -1
-
-tie-break（4.12 节）：分数高者优先，完全相同取较小 block id——tile 按 block id 递增扫描，tile 内 argmax 取最左，
-已有区在 rank 顺序中同分候选的 id 递增，合并时已有区优先，所以同分时总是保留较小 id。
-Kh / Ks 与由它们决定的 route stride、以及随 T 变化的 route head stride 都是 do_not_specialize（4.2 节）。
-Kh = 0 时不 launch kernel，Rtok 为 [H, T, 0]，Rstate 只有 slot 0。
-
-另外提供：
-    route_reference        production-matched routing reference（fp64 计算、按 Q dtype cast 的 centroid、稳定 Top-K）
-    routing_fidelity       与 fp32 oracle（不 cast centroid）的一致率报告（只报告，不作为 correctness 判据）
-    check_route_invariants 调试模式的 4.12 节不变量断言（需要同步）
-"""
+'Strict-history top-k selection and prefix-state route masks.'
 
 from __future__ import annotations
 

@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+'Derive state-route metadata from canonical token routes.'
+
 import torch
 import triton
 import triton.language as tl

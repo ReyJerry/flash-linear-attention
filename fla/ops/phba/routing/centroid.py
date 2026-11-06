@@ -5,19 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Algorithm 3：Fused Key-Block Centroid（triton化方案.md 4.8 节、4.9 节）。
-
-    grid = (Nc, H)；one program = (block, head)
-    input  Krope [T, H, Dh]（storage dtype），BlockPtr [Nc + 1]
-    output Centroid [Nc, H, Dh] fp32
-
-每个 program 读取 start = BlockPtr[b]、end = BlockPtr[b+1]，按 BLOCK_TOK（token）与 BLOCK_D（feature）分块，
-无效 token 与 feature 尾部用 mask，fp32 累加后除以 max(end - start, 1)。新版对所有 block 计算 centroid（不再只算
-filtered 历史子集），历史性由 Algorithm 4 的 mask 处理。空 block 不应出现（SequenceLengthPlan 在入口拒绝空 sequence），
-若出现输出 0。Centroid 只用于 routing，没有 backward（route 不可导，4.2 节）。
-
-固定配置：BLOCK_TOK、BLOCK_D 取自 KernelConfig（默认 64 / 64），不挂运行时 autotune。
-"""
+'FP32 key centroids for causal same-sequence routing.'
 
 from __future__ import annotations
 

@@ -5,21 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Algorithm 1 的 block layout（triton化方案.md 2.2 节、2.6 节、4.2 节、4.3 节、4.11 节、4.17 节）。
-
-    BlockPtr      [Nc + 1] int32   block b 的 token 区间 [BlockPtr[b], BlockPtr[b+1])；BlockPtr[Nc] = T
-    SeqBlockPtr   [Nseq + 1] int32 sequence s 的 block 区间 [SeqBlockPtr[s], SeqBlockPtr[s+1])
-    BlockSeq      [Nc] int32       block b 所属的 sequence
-    CurrentBlock  [T] int32        token t 所在的 block
-    PrefixValid   [Nc] bool        b > SeqBlockPtr[BlockSeq[b]]（每个 sequence 的首 block 为 0）
-    QueryWork*    [Nwork] int32    Block / Start / End / Sequence：每项是一个 block 内的 Br 个 query 行，不跨 block、不跨 sequence
-
-全部在 GPU 上由 SequenceLengthPlan 的 device cu_seqlens 构造（第一阶段用 PyTorch tensor 操作，4.2 节允许）：
-tensor 尺寸（Nc、Nwork、T）全部来自 host 计算的值，不用 device 上的 0 维 tensor 作尺寸，不调用 nonzero / .item()，
-repeat_interleave 显式给 output_size，因此不引入 device→host 同步。结果缓存在 SequenceLengthPlan 内（按 (C, Br)）。
-
-调试模式（``verify_against_host``）逐元素比较 GPU 结果与 host 计算的 BlockPtr / SeqBlockPtr / Nwork（需要同步）。
-"""
+'Block and query ownership layouts for dense and packed sequences.'
 
 from __future__ import annotations
 

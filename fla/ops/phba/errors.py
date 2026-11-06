@@ -5,17 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""PHBA 失败分类（triton化方案.md 5.2 节）。
-
-每个失败带固定的 ``fallback_reason`` 与 ``fallback_class``：
-
-    A  直接报错，不 fallback（与 sparse / prefix 实现方式无关，或 packed 同样不支持）
-    B  direct 专属问题：只有 sparse_backend_requested = auto 且 packed_allowed 时才退到 packed
-    C  prefix 专属问题：生产路径报 prefix_kernel_unsupported；allow_prefix_reference_cpu 时退到 reference_cpu_mode
-
-原因名以方案为准；方案没有给出名字的几项（标注“本模块命名”）在这里固定下来，后续实现与 benchmark 只使用这里的名字。
-本模块只依赖标准库。
-"""
+'Structured PHBA input and kernel validation errors.'
 
 from __future__ import annotations
 

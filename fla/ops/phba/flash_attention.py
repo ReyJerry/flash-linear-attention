@@ -5,22 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""FlashAttention 低层 varlen op 的 adapter（阶段 A；triton化方案.md 4.6 节、4.24 节、5.2 节 A 类）。
-
-    check_schema          低层 op 的参数名集合必须与锁定的 flash-attn 2.8.3.post1 完全一致（多一个、少一个都报错）
-    check_device          GPU 架构 >= sm80（FA2），否则 fa_device_unsupported
-    varlen_forward        显式传入全部参数（不依赖默认值），返回 (out, lse[H, total_q])
-    varlen_backward       显式传入 joint out / softmax_lse，写入调用方提供的 dq / dk / dv
-    runtime_smoke_probe   小 shape：forward 的 LSE dtype / shape / 连续性；backward 接受 joint 形状的 out / lse；
-                          softmax_d 的大小与 4.6 节 workspace 公式一致；失败报 fa_layout_probe_failed
-    ensure_ready          check_device + check_schema + probe，每个 (device, dtype, Dh) 进程内只做一次
-
-禁止使用 flash_attn_varlen_func 等 high-level API 的默认 autograd backward：它用分支自己的 O / LSE，
-而 PHBA 的 backward 必须用 joint O / L（4.6 节调用契约）。
-
-flash_attn 在调用时才导入（``_load_ops``），本模块本身可以在没有 CUDA / flash_attn 的机器上导入；
-``check_schema`` 也接受外部传入的函数，便于在 CPU 上测试参数表。
-"""
+'FlashAttention local branches using the joint PHBA outputs and log normalizers.'
 
 from __future__ import annotations
 

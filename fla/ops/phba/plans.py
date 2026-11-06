@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+'Immutable sequence layouts and bounded deterministic backward workspaces.'
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence

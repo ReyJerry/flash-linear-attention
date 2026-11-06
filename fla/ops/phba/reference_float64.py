@@ -5,17 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""层 3：Reference B，以冻结 route 为条件的 fp32 oracle（triton化方案.md 6.5 节层 3）。
-
-    g_log = log_sigmoid(a) / tau；A = exp(g_log)；I = -expm1(g_log)
-    每个 sequence 内逐 token 递推：S_0 = 0；S_t = Diag(A_t) S_{t-1} + I_t z_t^T，z_t = concat(Kraw_t, V_t)
-    Prefix[n] = block n 第一个 token 之前的 S（不做 storage cast）
-    attention：local + Rtok 历史 block 的 token + Rstate 的 Prefix slot 上的 joint softmax，全部在 dtype 中计算
-    梯度由 torch.autograd 求得
-
-所有输入从 operator 实际接收的同一份存储值转为 dtype 后开始计算。逐 token 递推是串行的，只用于小规模验证。
-dtype=float64 时它就是层 1 的公式参照（formula_fp64.py）。
-"""
+'Differentiable recurrent PHBA reference with frozen routes.'
 
 from __future__ import annotations
 

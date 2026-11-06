@@ -5,23 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Algorithm 5：Reformat Routes to Block-Major Varlen Metadata（triton化方案.md 2.4 节、4.14 节、4.15 节）。
-
-对每个 branch β ∈ {tok, st}（route R = Rtok [H, T, Kh] 或 Rstate [H, T, Ks]）：
-
-    Kernel A count   ：Count[e] += 1，e = b * H + h，对每个有效 route entry b >= 0；slot 按 KPAD_β 读取，slot_valid = slot < K_β
-    scan（Phase 1）  ：Offset = zeros；torch.cumsum(Count, dtype=int32, out=Offset[1:])（metadata_scan_impl = torch_cumsum）
-    Kernel D scatter ：p = atomic_add(Cursor[e], 1)；Rho[Offset[e] + p] = r，r = t * H + h
-
-    Count / Offset / Rho 全部 int32；Count 与 Cursor 是两个独立 buffer（backward 读 Count，不能被 cursor 覆盖）
-    Rho 按上界分配：rho_capacity_tok = T * H * Kh，rho_capacity_state = T * H * Ks；只写入前 Nedge = Offset[-1] 个元素，
-        Nedge 留在 device 上，不同步到 host
-    Kh = 0：不分配 Rho_tok，不 launch token 分支；state 分支始终存在（Ks = Kh + 1 >= 1）
-    Rho 段内顺序由 atomic 决定，不稳定；correctness 比较每个 (block, head) 的 row 集合（sort_rho_segments）
-
-T 相关的整数（T、route 的 head stride）与 K_β、route 的 token stride 都是 do_not_specialize（4.2 节），
-KPAD_β 是 constexpr：Kh 不同但 KPAD 相同的层共用编译结果。固定 launch 配置，不挂 autotune。
-"""
+'Fixed-capacity block-major route metadata for deterministic training.'
 
 from __future__ import annotations
 

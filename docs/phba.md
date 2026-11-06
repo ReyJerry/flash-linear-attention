@@ -1,17 +1,78 @@
 # PHBA
 
-PHBA combines causal block routing, local attention, and gated prefix states. The integration keeps the validated deterministic block-major training path, canonical metadata, gate algebra, and screened H20 projection gradients together under PHBA-owned modules.
+PHBA combines causal block routing, local token attention, and gated prefix states. The implementation provides the deterministic block-major training path, canonical metadata, fixed-order gradient accumulation, and bounded temporary workspaces.
 
-## Public entry points
+## Installation and model registration
 
-The model follows the repository's configuration, decoder-layer, and causal-language-model structure. Import `fla.models.phba` to register `PHBAConfig`, `PHBAModel`, and `PHBAForCausalLM` with Transformers auto classes. Public operators live in `fla.ops.phba` and the attention layer in `fla.layers.phba`.
+Install FLA with its CUDA and PHBA dependencies. FlashAttention2.8.3 is required for the joint local-attention backward interface.
 
-Existing non-PHBA Python files, including shared model/layer export lists, remain unchanged. PHBA-specific adapters preserve checkpoint parameter names and keep optional acceleration isolated from other models.
+```bash
+pip install -e '.[cuda,phba]'
+```
 
-## Validation contract
+Import the model package before using Transformers auto classes:
 
-The migration is compared with the frozen, previously validated PHBA implementation. Validation covers outputs, every supported gradient, deterministic metadata, parameter/state-dict compatibility, save/load and registration, supported dense and variable-length inputs, and clear rejection of unsupported inputs. Optional optimizer packetization also requires nonzero-learning-rate multi-step parameter, gradient, momentum, and step-counter equality.
+```python
+import torch
+from transformers import AutoModelForCausalLM
+from fla.models.phba import PHBAConfig
 
-Performance is measured on the same H20 devices with identical input shapes, weights, seeds, precision, native normalization choices, and optimizer settings. Full-step measurements include allocation, descriptor/view construction, sorting, conversion, and dispatch. No dense FLOPs proxy is used to infer a hardware limit.
+config = PHBAConfig(
+    hidden_size=2048,
+    num_hidden_layers=24,
+    num_heads=16,
+    num_kv_heads=16,
+    intermediate_size=4272,
+    max_position_embeddings=8192,
+    moba_chunk_size=128,
+    moba_topk=8,
+    gsa_num_slots=128,
+    qk_norm=False,
+    use_output_gate=False,
+    use_cache=False,
+)
+model = AutoModelForCausalLM.from_config(config).cuda().train()
+tokens = torch.randint(config.vocab_size, (1, 8192), device='cuda')
+with torch.autocast('cuda', dtype=torch.bfloat16):
+    loss = model(input_ids=tokens, labels=tokens).loss
+loss.backward()
+```
 
-Implementation and validation on this development branch are in progress. The draft pull request records the current validation status.
+The public model classes are `PHBAConfig`, `PHBAModel`, and `PHBAForCausalLM` in `fla.models.phba`. The layer is `fla.layers.phba.PHBA`; the operator is `fla.ops.phba.chunk_phba`. Existing shared Python export lists remain unchanged, so importing only `fla` does not register PHBA. Checkpoints retain the PHBA projection, normalization, MLP, embedding and language-head parameter names.
+
+## Supported execution
+
+The operator accepts CUDA FP16 or BF16 activation tensors and accumulates prefix and attention intermediates in FP32. Models can retain FP32 parameters under autocast. Query, key and value head counts must match; head dimensions are multiples of 8 from 16 through 128; prefix slot counts are 1–128. Supported chunk sizes are 32, 64, 128, 256, 512 and topk is 1–16, including the current block.
+
+Dense inputs, packed variable-length inputs, nonempty padded sequences, first-order gradients, and non-reentrant gradient checkpointing are supported. Packed operator inputs use `[1, total_tokens, heads, width]` and int32 cumulative sequence lengths. `SequenceLengthPlan.from_host` can supply known sequence lengths without a device-to-host length read.
+
+The model supports cache-free training, prefill and generation with `use_cache=False`. Persistent KV/prefix caching, an additional sliding window, and unequal query/key/value head counts are not implemented by this deterministic path. Final prefix states returned by the operator are FP32 and nondifferentiable. Context parallelism, tensor parallelism and full-graph compilation are outside the current validation scope.
+
+## Optional H20 acceleration
+
+PHBA projections retain the native linear path unless the exact-screened H20 geometry and runtime match. The accelerated path is restricted to PyTorch 2.9.0, CUDA 12.8, the validated cuBLASLt library, BF16 autocast and its three weight-gradient geometries. The C++ helpers build from packaged source into the Torch extension cache; no prebuilt machine-specific binary is included. CUDA development headers and a C++ compiler are needed for this optional path. Other supported cases retain native PyTorch operations.
+
+The optional optimizer changes only native AdamW launch packetization:
+
+```python
+from fla.models.phba.optim import PHBAAdamW
+
+optimizer = PHBAAdamW(parameter_groups, lr=1e-4, betas=(0.9, 0.95), fused=True)
+```
+
+Preserve the training recipe's parameter groups, weight-decay exclusions and clipping call. On the validated H20/FP32 fused-optimizer path, each native launch receives at most 312 blocks while retaining 512 threads per block and 65536-element chunks. Each original parameter's step is incremented once. The optimizer does not replace a global Torch dispatcher; unsupported configurations use native AdamW behavior.
+
+## Validation and benchmarking
+
+```bash
+FLA_CI_ENV=0 pytest tests/ops/test_phba.py tests/models/test_modeling_phba.py \
+  tests/models/test_phba_optimizer.py tests/modules/test_phba_linear.py
+
+python benchmarks/benchmark_phba.py --chunk-size 128 --topk 8 \
+  --warmup-steps 20 --steps 50 --optimizer fla.models.phba.optim:PHBAAdamW \
+  --output phba-throughput.json
+```
+
+The dedicated benchmark keeps existing benchmark registries unchanged. Its default recipe is 1.264B parameters, B1×8192, FP32 parameters, BF16 autocast, no activation checkpointing and lr=0 training computation. It measures zero-grad, forward/loss, backward, clipping and optimizer updates together. Input generation and optional numerical audit hooks are outside the measured steps. The lr=0 recipe measures compute throughput and is not a convergence experiment.
+
+The references and numerical storage contract are described in [the operator README](../fla/ops/phba/README.md). Migration validation additionally compares the frozen mature implementation using the same initial weights, inputs and native normalization choices. See [migration validation](phba_validation.md) for the completed numerical gates, paired dense/packed throughput, memory measurements and limitations.

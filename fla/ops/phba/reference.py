@@ -5,33 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""层 2：Reference A(chunkwise_cuda)（triton化方案.md 6.5 节层 2 与 cast 清单）。
-
-PyTorch 实现，backward 不对 forward 图做自动微分，而是按生产实现的公式手写，并在生产实现做 storage cast 的位置做同样的 cast：
-
-    Prefix-State（prefix/chunkwise.py 的基准）
-        g_cum     = block 内 cumsum(g_log)                                   compute dtype
-        W         = storage( s * exp(g_last - g_cum) )                         s = storage(-expm1(g_log))
-        S         = exp(g_last) * S + W^T Z                                    compute dtype 的 recurrent carry，跨 block 延续
-        Prefix[b] = storage(S)                                               storage snapshot；backward 用它重建边界
-        backward  = _prefix_bwd_kernel 的逐 block 逆序公式，dot 操作数（grad_next、k_scaled）cast 为 storage；
-                    K / V 两路的 dS、dg 在 compute dtype 中相加，各 cast 一次
-    joint attention（与 packed / direct 共享的语义，4.6 节）
-        memory = local（当前 block、因果）+ Rtok 指定的历史 block 的全部 token + Rstate 指定的 block 的 Prefix slot
-        local 与 token 分支用 Qrope / Krope，state 分支用 Qraw / PrefixK；scale = 1/sqrt(Dh)，在 dot 之后乘
-        forward：Oloc = storage(softmax_loc @ V)，以 (Oloc, Lloc) 为种子在 compute dtype 中合并 token / state 分支，
-                 P 只在进入 dot 时 cast 为 storage；O = storage(u / z)，L = m + log z（fp32）
-        backward：Delta = sum(fp32(dO) * fp32(O))；每个分支 dS = P * (dP - Delta)；
-                  local 分支的 dQ / dK / dV 按 FA 输出舍入为 storage 后再参与合并；其余分支为 compute dtype accumulator；
-                  Function 内合并后每个梯度只 cast 一次（chunkwise 模式下 dPrefix 也是 storage）
-
-routes 使用全量 block id：rtok [H, T, Kh]、rstate [H, T, Ks]，-1 表示无效（同一份冻结的 route，参照内部不重新路由）。
-local_impl='torch' 使用手写公式（CPU/fp64 诊断）；local_impl='flash_attn' 显式复用 production 的
-FlashAttention 低层 forward/backward、相同分批与 joint O/L，用于 GPU dtype-matched correctness，不静默回退。
-
-storage dtype 为 float64 时所有 cast 都是恒等，Reference A 退化为 fp64 公式，与 Reference B（autograd）应在 1e-10 内一致，
-这就是层 1 的公式验证（tests/ops/test_phba_stage_b_reference.py）。
-"""
+'Storage-aware PyTorch reference for PHBA prefix states and joint attention.'
 
 from __future__ import annotations
 

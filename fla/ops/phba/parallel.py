@@ -56,7 +56,7 @@ class BlockMajorConfig:
         if any(type(getattr(self, name)) is not int for name in ('bq', 'bc', 'owner_br', 'bq_backward')):
             raise ValueError('kernel tile sizes must be integers')
         if self.bq not in (16, 32, 64) or self.bc not in (16, 32, 64) or self.owner_br not in (16, 32):
-            raise ValueError('unsupported experimental forward tile')
+            raise ValueError('unsupported PHBA forward tile')
         if self.bq_backward not in (16, 32):
             raise ValueError('unsupported backward query tile')
 
@@ -67,10 +67,10 @@ def workspace_plan(t, h, d, kh, nc, config):
     w = min(t, config.window_tokens)
     edges, experts = w * h * kh, nc * h
     if t * h > INT32_MAX or edges > INT32_MAX or experts + 1 > INT32_MAX:
-        raise fail('int32_overflow', 'experimental row/edge/expert indices exceed int32')
+        raise fail('int32_overflow', 'PHBA row/edge/expert indices exceed int32')
     task_capacity = triton.cdiv(edges, config.bq) + experts if kh else 0
     if task_capacity > INT32_MAX:
-        raise fail('int32_overflow', 'experimental task count exceeds int32')
+        raise fail('int32_overflow', 'PHBA task count exceeds int32')
     owner_capacity = triton.cdiv(w, config.owner_br) + min(w, nc) + 1
     metadata_bytes = 4 * (5 * experts + 2 + 2 * edges + 2 * task_capacity) if kh else 0
     partial_bytes = 4 * edges * (d + 2)
@@ -78,7 +78,7 @@ def workspace_plan(t, h, d, kh, nc, config):
     owner_bytes = 12 * owner_capacity
     total = metadata_bytes + partial_bytes + cache_bytes + owner_bytes
     if total > config.workspace_budget_bytes:
-        raise fail('invalid_config', f'experimental workspace {total} exceeds budget {config.workspace_budget_bytes}')
+        raise fail('invalid_config', f'PHBA workspace {total} exceeds budget {config.workspace_budget_bytes}')
     return dict(window_tokens=w, edge_capacity=edges, expert_count=experts, task_capacity=task_capacity,
                 owner_capacity=owner_capacity, metadata_bytes=metadata_bytes, partial_bytes=partial_bytes,
                 q_cache_bytes=cache_bytes, workspace_bytes=total)
@@ -434,11 +434,11 @@ def launch_owner(qw, pk, pv, oloc, lloc, layout, ws, config, q0, kh, owners, out
 
 def validate_inputs(qr, qw, kr, v, pk, pv, rtok, layout):
     if qr.ndim != 3 or qr.dtype not in (torch.float16, torch.bfloat16):
-        raise ValueError('experimental inputs require storage fp16/bf16 [T,H,D]')
+        raise ValueError('PHBA inputs require storage fp16/bf16 [T,H,D]')
     t, h, d = qr.shape
     supported_chunk = 16 <= layout.chunk_size <= 128 or layout.chunk_size in CHUNKWISE_VALIDATED_C
     if t != layout.T or d < 16 or d > 128 or d % 8 or not supported_chunk:
-        raise ValueError('unsupported experimental geometry')
+        raise ValueError('unsupported PHBA geometry')
     if any(x.shape != qr.shape or x.dtype != qr.dtype or x.device != qr.device or not x.is_contiguous()
            for x in (qr, qw, kr, v)):
         raise ValueError('matching contiguous Q/K/V required')
@@ -455,7 +455,7 @@ def validate_inputs(qr, qw, kr, v, pk, pv, rtok, layout):
     if layout.device != qr.device:
         raise ValueError('layout device mismatch')
     if qr.device.type != 'cuda' and os.environ.get('TRITON_INTERPRET') != '1':
-        raise RuntimeError('experimental kernels require CUDA; CPU only allowed in explicit interpreter tests')
+        raise RuntimeError('PHBA kernels require CUDA; CPU only allowed in explicit interpreter tests')
 
 
 def block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, *, config=BlockMajorConfig(), local_seed=None, profile=False, canonical_token=None):

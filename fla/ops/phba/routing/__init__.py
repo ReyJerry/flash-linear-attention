@@ -5,16 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Algorithm 1 / 3 / 4 的 routing（triton化方案.md 4.2 节、4.9 节、4.11 节；阶段 C）。
-
-    layout.py    BlockPtr / SeqBlockPtr / BlockSeq / CurrentBlock / PrefixValid / QueryWorkList（GPU 构造，不同步）
-    centroid.py  Algorithm 3：有效 token 的 block centroid（fp32）
-    topk.py      Algorithm 4：same-sequence + strict-history 的 multi-tile Top-K，以及 Rstate + PrefixValid
-
-``build_routes`` 是 Algorithm 1 的 routing 部分（4.2 节 pipeline：block layout → centroid → tiled Top-K →
-Rtok → Rstate = [current; Rtok] → PrefixValid）。route 是不可导的离散 metadata，全部在 no_grad 下计算。
-Algorithm 5（direct metadata）在 metadata/direct_metadata.py，只在 needs_backward 且 direct 候选时调用。
-"""
+'Discrete causal block routing from rotary queries and key centroids.'
 
 from __future__ import annotations
 

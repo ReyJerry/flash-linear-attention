@@ -10,7 +10,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla.models.phba import PHBAConfig, PHBAForCausalLM
-from fla.utils import IS_NVIDIA, device, find_spec_cached
+from fla.utils import IS_NVIDIA, assert_close, device, find_spec_cached
 
 
 def make_config(**kwargs):
@@ -75,3 +75,34 @@ def test_checkpoint_gradients():
             model(input_ids=tokens, labels=tokens).loss.backward()
     for (name, left), (_, right) in zip(first.named_parameters(), second.named_parameters()):
         assert torch.equal(left.grad, right.grad), name
+
+
+@pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
+def test_right_padding():
+    torch.manual_seed(42)
+    model = PHBAForCausalLM(make_config()).to(device).eval()
+    tokens = torch.randint(1, 128, (2, 67), device=device)
+    mask = torch.ones_like(tokens)
+    mask[1, 49:] = 0
+    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        padded = model(input_ids=tokens, attention_mask=mask).logits
+        for index, length in enumerate((67, 49)):
+            expected = model(input_ids=tokens[index:index + 1, :length]).logits
+            assert_close('padded_logits', expected.float(), padded[index:index + 1, :length].float(), .006)
+
+
+@pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
+def test_cache_free_generation():
+    torch.manual_seed(42)
+    model = PHBAForCausalLM(make_config()).to(device).eval()
+    prompt = torch.tensor([[1, 4, 7]], device=device)
+    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        expected = prompt
+        for _ in range(2):
+            token = model(input_ids=expected).logits[:, -1].argmax(-1, keepdim=True)
+            expected = torch.cat((expected, token), dim=-1)
+        actual = model.generate(
+            input_ids=prompt, max_new_tokens=2, do_sample=False, use_cache=False,
+            pad_token_id=0, eos_token_id=None,
+        )
+    assert torch.equal(actual, expected)

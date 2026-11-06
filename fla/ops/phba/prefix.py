@@ -27,7 +27,7 @@ from fla.ops.phba.plans import (
 )
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
-# 固定配置（阶段 E 离线调优后修改；修改即改变预检签名与 Reference A 的基准，需要重跑对拍）
+# fixed launch geometry preserves the validated accumulation order
 
 
 @dataclass(frozen=True)
@@ -535,7 +535,7 @@ def check_inputs(s_val: torch.Tensor, k_raw: torch.Tensor, v: torch.Tensor, g_lo
         raise fail("prefix_kernel_unsupported",
                    f"s_val / k_raw / v 必须是相同的 fp16 / bf16，收到 {s_val.dtype} / {k_raw.dtype} / {v.dtype}")
     if g_log.dtype != torch.float32:
-        raise fail("prefix_kernel_unsupported", f"g_log 必须是 fp32（阶段 A 第 2 项），收到 {g_log.dtype}")
+        raise fail("prefix_kernel_unsupported", f"g_log must be FP32, got {g_log.dtype}")
     T, H, M = s_val.shape
     if g_log.shape != s_val.shape or k_raw.shape[:2] != (T, H) or v.shape != k_raw.shape:
         raise fail("prefix_kernel_unsupported", f"shape 不一致：s {tuple(s_val.shape)} g {tuple(g_log.shape)} "

@@ -41,6 +41,7 @@ def _reset_telemetry(telemetry, requested):
         'backward_output_cotangent_max', 'backward_state_cotangent_max',
         'backward_adjoint_chunks', 'backward_adjoint_sum', 'backward_adjoint_load',
         'source_alias_groups', 'source_gradient_aggregation',
+        'native_kernel_calls', 'working_dtype', 'host_fallback',
     ):
         telemetry.pop(key, None)
     telemetry.update(precision_requested=requested)
@@ -434,13 +435,22 @@ def chunk_key_gated_hyperbolic_delta_rule(
     telemetry: dict | None = None,
     precision_policy: str = 'strict',
 ):
-    """Evaluate e39 strict or the explicitly requested, empirically bounded mixed candidate.
+    """Evaluate the explicitly selected KHDN arithmetic policy.
 
     Output follows q.dtype; canonical state is FP32 unless a source is FP64.
-    Exceptional ranges use the separately reported reviewed host implementation.
+    Legacy policies may use the separately reported reviewed host implementation.
+    The bf16 policy rejects unsupported inputs or runtimes and never replays in FP64.
     Telemetry describes the latest call; use a separate dictionary for each live autograd graph.
     """
     _reset_telemetry(telemetry, precision_policy)
+    if precision_policy == 'bf16':
+        from fla.ops.key_gated_hyperbolic_delta_rule.bf16 import chunk_bf16
+        return chunk_bf16(
+            q=q, k=k, v=v, beta=beta, log_decay=log_decay, curvature=curvature,
+            initial_state=initial_state, output_final_state=output_final_state, scale=scale,
+            cu_seqlens=cu_seqlens, group_size=group_size, chunk_size=chunk_size,
+            carry_mode=carry_mode, telemetry=telemetry,
+        )
     bounds, scale = _validate(q, k, v, beta, log_decay, curvature, initial_state, scale, cu_seqlens, group_size, False)
     if not q.is_cuda:
         raise ValueError('The production KHDN entry requires CUDA tensors.')

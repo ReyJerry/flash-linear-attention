@@ -34,7 +34,7 @@ def configuration(**kwargs):
     return KeyGatedHyperbolicDeltaNetConfig(**values)
 
 
-@pytest.mark.parametrize('policy', ['mixed_readout', 'bf16_fs6'])
+@pytest.mark.parametrize('policy', ['mixed_readout', 'bf16_fs6', 'bf16'])
 def test_default_legacy_and_new_configuration_roundtrip(tmp_path, policy):
     default = configuration()
     assert default.precision_policy == 'strict'
@@ -66,7 +66,7 @@ def test_explicit_unsupported_mode_is_not_silently_treated_as_mixed(mode, policy
         KeyGatedHyperbolicDeltaNet(mode=mode, precision_policy=policy)
 
 
-@pytest.mark.parametrize('policy', ['strict', 'mixed_readout', 'bf16_fs6'])
+@pytest.mark.parametrize('policy', ['strict', 'mixed_readout', 'bf16_fs6', 'bf16'])
 def test_real_model_layers_forward_explicit_policy_and_preserve_parameter_gradients(monkeypatch, policy):
     calls = []
 
@@ -110,3 +110,29 @@ def test_mixed_prefill_configuration_uses_strict_recurrent_decode(monkeypatch, p
         result = layer(torch.randn(1, 1, 64))[0]
     assert result.shape == (1, 1, 64) and len(calls) == 1
     assert 'precision_policy' not in calls[0]
+
+
+@pytest.mark.parametrize('mode', ['chunk', 'fused_recurrent'])
+def test_bf16_decode_preserves_precision_policy(monkeypatch, mode):
+    calls = []
+
+    def observed(*args, **kwargs):
+        calls.append(kwargs.copy())
+        assert kwargs.pop('precision_policy') == 'bf16'
+        kwargs.pop('checkpoint_size')
+        return ops.naive_recurrent_key_gated_hyperbolic_delta_rule(*args, **kwargs)
+
+    monkeypatch.setattr(ops, 'fused_recurrent_key_gated_hyperbolic_delta_rule', observed)
+    layer = KeyGatedHyperbolicDeltaNet(hidden_size=64, head_dim=32, num_heads=2, group_size=32,
+                                       mode=mode, precision_policy='bf16', use_short_conv=False,
+                                       fuse_norm=False, layer_idx=0).eval()
+    with torch.no_grad():
+        result = layer(torch.randn(1, 1, 64))[0]
+    assert result.shape == (1, 1, 64) and len(calls) == 1
+
+
+def test_bf16_naive_mode_rejected():
+    with pytest.raises(ValueError, match='native'):
+        configuration(attn_mode='naive', precision_policy='bf16')
+    with pytest.raises(ValueError, match='native'):
+        KeyGatedHyperbolicDeltaNet(mode='naive', precision_policy='bf16')

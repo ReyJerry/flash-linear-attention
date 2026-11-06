@@ -1,6 +1,6 @@
 # KHDN experimental mixed precision
 
-The [BF16/FP32 research results](experiments/khdn_bf16_2026_11_05/README.md) document an isolated candidate with no FP64 in its training path. Tiny same-precision 1/8/16-GPU updates and recovery pass, while the original full-model cross-precision gradient checks still fail. That candidate is not a public policy or a new default.
+The [BF16 three-product release](experiments/khdn_bf16_2026_11_06/README.md) adds explicit `precision_policy='bf16'` to chunk, recurrent and Config/Layer dispatch, with FP32 state/control and no FP64 replay. It publishes exact full-model timing scripts, three independent H20 comparisons and bounded native correctness evidence. The integrated API remains opt-in pending full-model integration and distributed acceptance. The [earlier direct-BF16 research](experiments/khdn_bf16_2026_11_05/README.md) and its original failures remain separate historical evidence.
 
 `precision_policy='strict'` remains the default. The explicit `mixed_readout` option retains accurate readout and state/control arithmetic while using seventeen TF32x3 matrix-product sites with FP32 operands and accumulation. It is available through the chunk operator and the KHDN Config → Model → Layer chain. It is an experimental execution policy, not a different model, a general accuracy certificate, or a speed claim.
 

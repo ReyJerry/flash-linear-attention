@@ -32,7 +32,7 @@ class PHBAConfig(PreTrainedConfig):
         intermediate_size: int | None = None,
         hidden_act: str = "swish",
         initializer_range: float = 0.02,
-        elementwise_affine: bool | None = True,
+        elementwise_affine: bool = True,
         norm_eps: float = 1e-6,
         use_cache: bool = False,
         pad_token_id: int | None = None,
@@ -68,6 +68,8 @@ class PHBAConfig(PreTrainedConfig):
         self.hidden_act = hidden_act
 
         self.initializer_range = initializer_range
+        if type(elementwise_affine) is not bool:
+            raise ValueError("PHBA elementwise_affine must be bool")
         self.elementwise_affine = elementwise_affine
         self.norm_eps = norm_eps
         self.use_cache = use_cache
@@ -102,8 +104,8 @@ class PHBAConfig(PreTrainedConfig):
         if kwargs.pop("attnres_block_size", None) is not None:
             raise ValueError("PHBA does not implement AttnRes")
 
-        if hidden_size // num_heads > 128 or (hidden_size // num_heads) % 8:
-            raise ValueError("PHBA head dimensions must be multiples of8 no larger than128")
+        if not 16 <= hidden_size // num_heads <= 128 or (hidden_size // num_heads) % 8:
+            raise ValueError("PHBA head dimensions must be multiples of8 from16 through128")
         if moba_chunk_size not in (32, 64, 128, 256, 512) or moba_topk > 16 or gsa_num_slots > 128:
             raise ValueError("PHBA supports chunks32-512, topk1-16 and slots1-128")
         if use_cache:

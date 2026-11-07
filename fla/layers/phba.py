@@ -14,9 +14,10 @@ from torch import nn
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
-from fla.ops.phba import SequenceLengthPlan, chunk_phba
+from fla.ops.phba import chunk_phba
 from fla.ops.phba.backends.cublaslt import exact_backend
 from fla.ops.phba.linear import _Linear
+from fla.ops.phba.plans import _resolve_length_plan
 
 
 class PHBALinear(nn.Linear):
@@ -57,14 +58,19 @@ class PHBA(nn.Module):
         use_phba: bool = True,
         gsa_num_slots: int = 128,
         gate_logit_normalizer: float = 8.0,
+        elementwise_affine: bool = True,
     ):
         super().__init__()
         if not use_phba:
             raise ValueError('PHBA requires use_phba=True')
-        if hidden_size % num_heads or num_kv_heads not in (None, num_heads):
+        if hidden_size <= 0 or num_heads <= 0 or hidden_size % num_heads or num_kv_heads not in (None, num_heads):
             raise ValueError('PHBA requires equal query/key/value head counts dividing hidden_size')
         if window_size is not None:
             raise ValueError('PHBA uses causal blocks rather than an additional sliding window')
+        if not 16 <= hidden_size // num_heads <= 128 or (hidden_size // num_heads) % 8:
+            raise ValueError("PHBA head dimensions must be multiples of8 from16 through128")
+        if type(elementwise_affine) is not bool:
+            raise ValueError("PHBA elementwise_affine must be bool")
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_heads
@@ -81,17 +87,22 @@ class PHBA(nn.Module):
         self.v_proj = PHBALinear(hidden_size, hidden_size, bias=qkv_bias)
         self.o_proj = PHBALinear(hidden_size, hidden_size, bias=False)
         self.gsa_gate_proj = PHBALinear(hidden_size, num_heads * gsa_num_slots, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, eps=1e-6) if qk_norm else nn.Identity()
-        self.k_norm = RMSNorm(self.head_dim, eps=1e-6) if qk_norm else nn.Identity()
+        self.q_norm = RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=elementwise_affine) if qk_norm else nn.Identity()
+        self.k_norm = RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=elementwise_affine) if qk_norm else nn.Identity()
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=rope_theta)
         if use_output_gate:
             self.g_proj = nn.Sequential(
                 PHBALinear(hidden_size, self.head_dim, bias=False),
                 PHBALinear(self.head_dim, hidden_size, bias=False),
             )
-            self.o_norm = FusedRMSNormGated(self.head_dim, activation='sigmoid', eps=1e-6)
+            self.o_norm = FusedRMSNormGated(
+                self.head_dim,
+                activation='sigmoid',
+                eps=1e-6,
+                elementwise_affine=elementwise_affine,
+            )
         else:
-            self.o_norm = RMSNorm(self.head_dim, eps=1e-6)
+            self.o_norm = RMSNorm(self.head_dim, eps=1e-6, elementwise_affine=elementwise_affine)
 
     def forward(
         self,
@@ -107,11 +118,21 @@ class PHBA(nn.Module):
         if output_attentions:
             raise ValueError('PHBA does not materialize attention weights')
         batch, tokens, _ = hidden_states.shape
+        cu_seqlens = kwargs.get('cu_seqlens')
+        plan = kwargs.get('phba_length_plan')
+        if attention_mask is not None:
+            if attention_mask.ndim != 2 or attention_mask.shape != (batch, tokens):
+                raise ValueError('PHBA attention_mask must be a [B,T] padding mask')
+            if cu_seqlens is not None:
+                raise ValueError('PHBA padding masks and packed cu_seqlens are mutually exclusive')
+        else:
+            plan = _resolve_length_plan(batch, tokens, hidden_states.device, cu_seqlens, plan)
+            if cu_seqlens is not None and not plan._matches_source(cu_seqlens) or cu_seqlens is None and batch == 1 and len(plan.lengths) > 1:
+                cu_seqlens = plan.cu_seqlens
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         q, k = self.q_norm(q), self.k_norm(k)
-        cu_seqlens = kwargs.get('cu_seqlens')
         q_rope, k_rope = self.rotary(
             q=q,
             k=k,
@@ -119,11 +140,8 @@ class PHBA(nn.Module):
             max_seqlen=max(tokens, self.max_position_embeddings or tokens),
             cu_seqlens=cu_seqlens,
         )
-        plan = kwargs.get('phba_length_plan')
         indices = None
         if attention_mask is not None:
-            if attention_mask.ndim != 2 or attention_mask.shape != (batch, tokens):
-                raise ValueError('PHBA attention_mask must be a [B,T] padding mask')
             q_rope, other, indices, cumulative, _ = unpad_input(
                 q=q_rope,
                 states=(k_rope, v, q, k, hidden_states),
@@ -132,8 +150,7 @@ class PHBA(nn.Module):
             )
             k_rope, v, q, k, flat_hidden = other
             cu_seqlens = cumulative[0]
-            if plan is None:
-                plan = SequenceLengthPlan.from_device(cu_seqlens)
+            plan = _resolve_length_plan(1, q.shape[0], q.device, cu_seqlens, plan)
         else:
             q_rope = rearrange(q_rope, 'b t ... -> (b t) ...')
             k_rope = rearrange(k_rope, 'b t ... -> (b t) ...')
@@ -141,11 +158,6 @@ class PHBA(nn.Module):
             q = rearrange(q, 'b t ... -> (b t) ...')
             k = rearrange(k, 'b t ... -> (b t) ...')
             flat_hidden = rearrange(hidden_states, 'b t d -> (b t) d')
-            if plan is None:
-                plan = (
-                    SequenceLengthPlan.from_host([tokens] * batch, hidden_states.device)
-                    if cu_seqlens is None else SequenceLengthPlan.from_device(cu_seqlens)
-                )
         gate = rearrange(self.gsa_gate_proj(flat_hidden), 't (h m) -> t h m', h=self.num_heads, m=self.gsa_num_slots)
         output, _ = chunk_phba(
             q=q.unsqueeze(0),

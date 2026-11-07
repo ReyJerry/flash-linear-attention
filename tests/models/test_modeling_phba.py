@@ -106,3 +106,63 @@ def test_cache_free_generation():
             pad_token_id=0, eos_token_id=None,
         )
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize('fuse_norm', [False, True], ids=['native-norm', 'fused-norm'])
+def test_affine_configuration(fuse_norm):
+    model = PHBAForCausalLM(make_config(elementwise_affine=False, fuse_norm=fuse_norm, qk_norm=True, use_output_gate=True))
+    norms = [model.model.norm]
+    for layer in model.model.layers:
+        norms.extend((layer.attn_norm, layer.mlp_norm, layer.attn.q_norm, layer.attn.k_norm, layer.attn.o_norm))
+    assert all(module.weight is None for module in norms)
+
+
+@pytest.mark.parametrize('width', [8, 17, 136], ids=['below-minimum', 'unaligned', 'above-maximum'])
+def test_configuration_head_dimensions(width):
+    with pytest.raises(ValueError, match='head dimensions'):
+        make_config(hidden_size=width * 2)
+
+
+def test_central_model_exports():
+    from fla.models import PHBAConfig as ExportedConfig
+    from fla.models import PHBAForCausalLM as ExportedCausalLM
+    from fla.models import PHBAModel
+
+    assert ExportedConfig is PHBAConfig
+    assert ExportedCausalLM is PHBAForCausalLM
+    assert AutoConfig.for_model('phba').model_type == PHBAModel.config_class.model_type
+
+
+@pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
+def test_model_plan_boundaries_and_affine_gradients():
+    from fla.ops.phba import SequenceLengthPlan
+
+    torch.manual_seed(42)
+    model = PHBAForCausalLM(make_config(elementwise_affine=False, qk_norm=True, use_output_gate=True)).to(device).train()
+    tokens = torch.randint(0, 128, (2, 33), device=device)
+    with pytest.raises(ValueError, match='dense batch boundary'):
+        model(input_ids=tokens, phba_length_plan=SequenceLengthPlan.from_host((66,), device))
+    packed = tokens.reshape(1, -1)
+    plan = SequenceLengthPlan.from_host((33, 33), device)
+    with torch.autocast('cuda', dtype=torch.bfloat16):
+        actual = model(input_ids=packed, labels=packed, phba_length_plan=plan)
+        expected = model(input_ids=packed, labels=packed, cu_seqlens=plan.cu_seqlens)
+    assert torch.equal(actual.logits, expected.logits)
+    actual.loss.backward()
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+    with pytest.raises(ValueError, match='different boundaries'):
+        model(input_ids=packed, cu_seqlens=torch.tensor([0, 66], device=device, dtype=torch.int32), phba_length_plan=plan)
+
+
+@pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
+def test_updated_cumulative_lengths_do_not_reuse_rotary_indices():
+    torch.manual_seed(42)
+    model = PHBAForCausalLM(make_config()).to(device).eval()
+    tokens = torch.randint(0, 128, (1, 66), device=device)
+    cu = torch.tensor([0, 33, 66], dtype=torch.int32, device=device)
+    with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
+        model(input_ids=tokens, cu_seqlens=cu)
+        cu[1] = 32
+        actual = model(input_ids=tokens, cu_seqlens=cu).logits
+        expected = model(input_ids=tokens, cu_seqlens=cu.clone()).logits
+    assert torch.equal(actual, expected)

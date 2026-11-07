@@ -154,3 +154,86 @@ def test_routing_and_metadata(topk):
         assert torch.equal(actual.offset.cpu(), offset)
         assert sort_rho_segments(actual) == rows
         assert torch.all(actual.rho[int(offset[-1]):] == -1)
+
+
+@pytest.mark.parametrize('width', [8, 17, 136], ids=['below-minimum', 'unaligned', 'above-maximum'])
+def test_head_dimension_rejected_before_launch(width, monkeypatch):
+    from fla.ops.phba import chunk
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('Invalid geometry reached FlashAttention initialization')
+
+    monkeypatch.setattr(chunk, 'ensure_ready', unexpected)
+    x = torch.zeros(1, 4, 1, width, device=device, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match='head dimensions'):
+        chunk_phba(q=x, k=x, v=x, q_rope=x, k_rope=x, gate=x)
+
+
+def test_length_plan_batch_boundaries():
+    x = torch.zeros(2, 4, 1, 16, device=device, dtype=torch.bfloat16)
+    values = torch.ones_like(x)
+    values[0].fill_(10)
+    wrong = SequenceLengthPlan.from_host([8], device)
+    with pytest.raises(ValueError, match='dense batch boundary'):
+        chunk_phba(q=x, k=x, v=values, q_rope=x, k_rope=x, gate=x, chunk_size=32, topk=1, length_plan=wrong)
+    actual, _ = chunk_phba(q=x, k=x, v=values, q_rope=x, k_rope=x, gate=x, chunk_size=32, topk=1)
+    assert torch.equal(actual, values)
+
+
+def test_length_plan_cumulative_boundaries(monkeypatch):
+    from fla.ops.phba.plans import _resolve_length_plan
+
+    plan = SequenceLengthPlan.from_host((4, 4), device)
+    wrong = torch.tensor([0, 8], device=device, dtype=torch.int32)
+    with pytest.raises(ValueError, match='different boundaries'):
+        _resolve_length_plan(1, 8, plan.device, wrong, plan)
+    assert _resolve_length_plan(1, 8, plan.device, plan.cu_seqlens.clone(), plan) is plan
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('Reusing the owned length tensor must not compare device values')
+
+    monkeypatch.setattr(torch, 'equal', unexpected)
+    assert _resolve_length_plan(1, 8, plan.device, plan.cu_seqlens, plan) is plan
+
+
+def test_low_memory_fallback_gradients(monkeypatch):
+    from fla.ops.phba import plans
+
+    torch.manual_seed(42)
+    inputs = [torch.randn(1, 129, 2, 32, device=device, dtype=torch.bfloat16) * .1 for _ in range(6)]
+    do = torch.randn_like(inputs[0])
+
+    def evaluate():
+        leaves = [x.clone().requires_grad_() for x in inputs]
+        output, _ = chunk_phba(*leaves, chunk_size=32, topk=4)
+        return output.detach(), torch.autograd.grad(output, leaves, do)
+
+    expected, expected_grads = evaluate()
+    monkeypatch.setattr(plans, 'OWNER_TAPE_CAP_BYTES', 0)
+    monkeypatch.setattr(plans, 'PREFIX_REVERSE_WORKSPACE_CAP', 0)
+    assert not plans.prefix_backward_plan(5, 2, 32, 32).parallel
+    assert not plans.owner_branch_tape_plan(129, 2, 5, 32, 32, 3, 4, 32, 2).enabled
+    actual, grads = evaluate()
+    repeated, repeated_grads = evaluate()
+    assert torch.equal(actual, repeated)
+    assert_close('fallback_output', expected.float(), actual.float(), .03)
+    for index, (reference, result, repeat) in enumerate(zip(expected_grads, grads, repeated_grads)):
+        assert torch.isfinite(result).all()
+        assert torch.equal(result.view(torch.uint8), repeat.view(torch.uint8))
+        assert_close(f'fallback_gradient_{index}', reference.float(), result.float(), .06)
+
+
+def test_length_plan_source_identity_and_mutation(monkeypatch):
+    from fla.ops.phba.plans import _resolve_length_plan
+
+    cu = torch.tensor([0, 4, 8], dtype=torch.int32, device=device)
+    plan = SequenceLengthPlan.from_device(cu)
+    with monkeypatch.context() as context:
+        def unexpected(*args, **kwargs):
+            pytest.fail('Unchanged source lengths must not require a device comparison')
+
+        context.setattr(torch, 'equal', unexpected)
+        assert _resolve_length_plan(1, 8, plan.device, cu, plan) is plan
+    cu[1] = 3
+    with pytest.raises(ValueError, match='different boundaries'):
+        _resolve_length_plan(1, 8, plan.device, cu, plan)

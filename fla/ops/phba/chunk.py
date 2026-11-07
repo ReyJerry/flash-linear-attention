@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from fla.ops.phba.flash_attention import ensure_ready
 from fla.ops.phba.gate import gate_algebra
 from fla.ops.phba.parallel import BlockMajorConfig, block_major_attention
-from fla.ops.phba.plans import CHUNKWISE_VALIDATED_C, MAX_KH, SequenceLengthPlan
+from fla.ops.phba.plans import CHUNKWISE_VALIDATED_C, MAX_KH, SequenceLengthPlan, _resolve_length_plan
 from fla.ops.phba.prefix import chunkwise_prefix_states
 from fla.ops.phba.routing import build_routes
 from fla.utils import input_guard
@@ -38,10 +38,39 @@ def chunk_phba(
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
     """Compute causal block-routed attention with gated prefix-state compensation.
 
-    Inputs use `[B, T, H, D]`; gate logits use `[B, T, H, M]`. Packed variable-length
-    inputs have `B == 1` and int32 `cu_seqlens`. Routing is nondifferentiable;
-    the six floating-point inputs retain their supported first-order gradients.
-    Final prefix states, when requested, are nondifferentiable FP32 tensors.
+    Routing is nondifferentiable. All six floating inputs support first-order gradients.
+    Head dimensions must be multiples of8 from16 through128; slot counts are1–128.
+
+    Args:
+        q (torch.Tensor):
+            Raw queries [B, T, H, D] for prefix-state attention, in CUDA FP16/BF16 storage.
+        k (torch.Tensor):
+            Raw keys [B, T, H, D] used to build prefix states.
+        v (torch.Tensor):
+            Values [B, T, H, D] shared by local, historical and prefix branches.
+        q_rope (torch.Tensor):
+            Rotary queries [B, T, H, D] for routing and token attention.
+        k_rope (torch.Tensor):
+            Rotary keys [B, T, H, D] for routing and token attention.
+        gate (torch.Tensor):
+            Gate logits [B, T, H, M], with the same device and storage dtype as q.
+        chunk_size (int, Optional):
+            Block length, one of32,64,128,256,512. Default: 128.
+        topk (int, Optional):
+            Number of selected blocks including the current block, from1 through16. Default: 8.
+        gate_logit_normalizer (float, Optional):
+            Finite positive gate-log normalization factor. Default: 8.0.
+        cu_seqlens (torch.Tensor, Optional):
+            Int32 packed boundaries on the input device; packed inputs require B=1. Default: `None`.
+        length_plan (SequenceLengthPlan, Optional):
+            Owned sequence geometry. Dense B>1 requires lengths (T,)*B.
+            If cu_seqlens is also supplied, its values must agree with this plan. Default: `None`.
+        output_final_state (bool, Optional):
+            Whether to return final prefix states. Default: `False`.
+
+    Returns:
+        tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+            Output [B, T, H, D] and optional nondifferentiable FP32 key/value states [Nseq, H, M, D].
     """
     if q.ndim != 4 or any(x.shape != q.shape for x in (k, v, q_rope, k_rope)):
         raise ValueError('PHBA q, k, v and rotary inputs must have the same [B, T, H, D] shape')
@@ -50,23 +79,15 @@ def chunk_phba(
     if any(x.device != q.device or x.dtype != q.dtype for x in (k, v, q_rope, k_rope, gate)):
         raise ValueError('PHBA floating-point inputs must have the same device and storage dtype')
     batch, tokens, heads, width = q.shape
-    if min(batch, tokens, heads, width) < 1 or width > 128:
-        raise ValueError('PHBA requires nonempty inputs and a head dimension no larger than128')
+    if min(batch, tokens, heads) < 1 or not 16 <= width <= 128 or width % 8:
+        raise ValueError('PHBA requires nonempty inputs and head dimensions divisible by8 from16 through128')
     if gate.ndim != 4 or gate.shape[:3] != q.shape[:3] or not 1 <= gate.shape[-1] <= 128:
         raise ValueError('PHBA gate logits must have shape [B, T, H, M], with1 <= M <=128')
     if chunk_size not in CHUNKWISE_VALIDATED_C or not 1 <= topk <= MAX_KH + 1:
         raise ValueError('PHBA chunk_size must be32,64,128,256 or512; topk must be between1 and16')
     if not math.isfinite(gate_logit_normalizer) or gate_logit_normalizer <= 0:
         raise ValueError('gate_logit_normalizer must be finite and positive')
-    if cu_seqlens is not None and batch != 1:
-        raise ValueError('Packed PHBA inputs require batch dimension1')
-    if length_plan is None:
-        length_plan = (
-            SequenceLengthPlan.from_device(cu_seqlens)
-            if cu_seqlens is not None else SequenceLengthPlan.from_host([tokens] * batch, q.device)
-        )
-    if batch * tokens != length_plan.T or length_plan.device != q.device:
-        raise ValueError('PHBA length plan does not match the input geometry or device')
+    length_plan = _resolve_length_plan(batch, tokens, q.device, cu_seqlens, length_plan)
     ensure_ready(q.device, q.dtype, width)
     q, k, v, q_rope, k_rope = (x.reshape(-1, heads, width) for x in (q, k, v, q_rope, k_rope))
     gate = gate.reshape(-1, heads, gate.shape[-1])

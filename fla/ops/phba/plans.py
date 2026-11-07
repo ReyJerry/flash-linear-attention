@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from weakref import ref
 
 import torch
 
@@ -289,21 +290,33 @@ class SequenceLengthPlan:
     """
 
     __slots__ = ("_cu_host", "_lengths", "_cu_device", "_block_layouts", "_routing_layouts",
-                 "__weakref__")
+                 "_source_ref", "_source_version", "__weakref__")
 
     def __init__(self, *_args: Any, _token: object = None, **_kwargs: Any) -> None:
         if _token is not _CONSTRUCT_TOKEN:
             raise TypeError("请使用 SequenceLengthPlan.from_host / from_device（debug 模式可用 from_pair_debug）")
 
     @classmethod
-    def _build(cls, cu_host: tuple[int, ...], cu_device: torch.Tensor) -> SequenceLengthPlan:
+    def _build(cls, cu_host: tuple[int, ...], cu_device: torch.Tensor, source: torch.Tensor | None = None) -> SequenceLengthPlan:
         obj = cls(_token=_CONSTRUCT_TOKEN)
         object.__setattr__(obj, "_cu_host", cu_host)
         object.__setattr__(obj, "_lengths", tuple(cu_host[i + 1] - cu_host[i] for i in range(len(cu_host) - 1)))
         object.__setattr__(obj, "_cu_device", cu_device)
         object.__setattr__(obj, "_block_layouts", {})
         object.__setattr__(obj, "_routing_layouts", {})
+        object.__setattr__(obj, "_source_ref", ref(source) if source is not None else None)
+        try:
+            version = source._version if source is not None else None
+        except RuntimeError:
+            version = None
+        object.__setattr__(obj, "_source_version", version)
         return obj
+
+    def _matches_source(self, source: torch.Tensor) -> bool:
+        # identity-only rotary caches are safe for fresh source tensors without in-place writes
+        if self._source_version != 0 or self._source_ref is None or self._source_ref() is not source:
+            return False
+        return source._version == self._source_version
 
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError("SequenceLengthPlan 创建后 immutable")
@@ -334,7 +347,7 @@ class SequenceLengthPlan:
         """兼容入口：每个 step 开始时把 device cu_seqlens 拷贝到 host 一次（一次 D2H 同步），再由 plan 持有两份 owned 副本。"""
         _check_cu_seqlens_tensor(cu_seqlens)
         cu_host = _validate_cu_seqlens_host([int(x) for x in cu_seqlens.tolist()])
-        return cls._build(cu_host, cu_seqlens.detach().clone(memory_format=torch.contiguous_format))
+        return cls._build(cu_host, cu_seqlens.detach().clone(memory_format=torch.contiguous_format), source=cu_seqlens)
 
     @classmethod
     def from_pair_debug(cls, cu_seqlens_host: Sequence[int], cu_seqlens: torch.Tensor) -> SequenceLengthPlan:
@@ -398,6 +411,43 @@ class SequenceLengthPlan:
             )
             self._block_layouts[c] = layout
         return layout
+
+
+def _resolve_length_plan(
+    batch: int,
+    tokens: int,
+    device: torch.device,
+    cu_seqlens: torch.Tensor | None = None,
+    length_plan: SequenceLengthPlan | None = None,
+) -> SequenceLengthPlan:
+    """Resolve sequence boundaries without crossing dense batch elements.
+
+    Packed inputs require batch size one. If both representations are supplied,
+    their boundaries must agree; passing the plan's owned tensor avoids a device comparison.
+    """
+    supplied_plan = length_plan is not None
+    if cu_seqlens is not None:
+        if batch != 1:
+            raise ValueError('Packed PHBA inputs require batch dimension1')
+        _check_cu_seqlens_tensor(cu_seqlens)
+        if cu_seqlens.device != device:
+            raise ValueError('PHBA cumulative lengths must be on the input device')
+    if length_plan is None:
+        length_plan = (
+            SequenceLengthPlan.from_device(cu_seqlens)
+            if cu_seqlens is not None else SequenceLengthPlan.from_host([tokens] * batch, device)
+        )
+    elif not isinstance(length_plan, SequenceLengthPlan):
+        raise TypeError('PHBA length_plan must be a SequenceLengthPlan')
+    if batch * tokens != length_plan.T or length_plan.device != device:
+        raise ValueError('PHBA length plan does not match the input geometry or device')
+    if batch > 1 and length_plan.lengths != (tokens,) * batch:
+        raise ValueError('PHBA length plan must preserve each dense batch boundary')
+    if (supplied_plan and cu_seqlens is not None and cu_seqlens is not length_plan.cu_seqlens
+            and not length_plan._matches_source(cu_seqlens)):
+        if not torch.equal(cu_seqlens, length_plan.cu_seqlens):
+            raise ValueError('PHBA length_plan and cu_seqlens have different boundaries')
+    return length_plan
 
 
 def _to_device_async(x: torch.Tensor, device: Any) -> torch.Tensor:

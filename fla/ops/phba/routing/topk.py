@@ -196,7 +196,7 @@ def route_reference(q_rope, centroids, layout: RoutingLayout, kh: int):
 
 
 def compare_routes(rtok: torch.Tensor, ref: torch.Tensor, scores: torch.Tensor, *, tie_tol: float) -> dict:
-    """kernel route 与 reference 逐行比较（集合相同即匹配；Algorithm 4 的写回顺序也按 rank，额外报告逐位一致）。
+    """kernel route 与 reference 逐行比较（集合相同即匹配；路由的写回顺序也按 rank，额外报告逐位一致）。
 
     不一致的行只允许出现在 reference 的“近并列”处：对称差中每个候选的 reference 分数与该行第 Kh 名的分数之差都 <= tie_tol
     （kernel 的 tl.dot 与 reference 的求和顺序不同，只会在这种情况下改变选择）。

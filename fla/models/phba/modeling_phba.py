@@ -17,8 +17,8 @@ from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedMod
 from fla.models.phba.configuration_phba import PHBAConfig
 from fla.modules import RMSNorm
 from fla.modules.activations import swiglu
-from fla.ops.phba import SequenceLengthPlan
 from fla.ops.phba.linear import _SwiGLULinear
+from fla.ops.phba.plans import _resolve_length_plan
 
 
 class PHBAMLP(nn.Module):
@@ -54,7 +54,11 @@ class PHBABlock(GradientCheckpointingLayer):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
+            config.hidden_size,
+            eps=config.norm_eps,
+            elementwise_affine=config.elementwise_affine,
+        )
         self.attn = PHBA(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
@@ -71,8 +75,13 @@ class PHBABlock(GradientCheckpointingLayer):
             use_phba=config.use_phba,
             gsa_num_slots=config.gsa_num_slots,
             gate_logit_normalizer=config.gate_logit_normalizer,
+            elementwise_affine=config.elementwise_affine,
         )
-        self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
+            config.hidden_size,
+            eps=config.norm_eps,
+            elementwise_affine=config.elementwise_affine,
+        )
         self.mlp = PHBAMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
@@ -126,7 +135,11 @@ class PHBAModel(PHBAPreTrainedModel, FLAModel):
         self.vocab_size = config.vocab_size
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([PHBABlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
+            config.hidden_size,
+            eps=config.norm_eps,
+            elementwise_affine=config.elementwise_affine,
+        )
         self.use_attnres = False
         self.gradient_checkpointing = False
         self.post_init()
@@ -135,12 +148,14 @@ class PHBAModel(PHBAPreTrainedModel, FLAModel):
         if kwargs.get('use_cache', False) or kwargs.get('past_key_values') is not None:
             raise ValueError('PHBA supports cache-free prefill and training; set use_cache=False')
         inputs = input_ids if input_ids is not None else inputs_embeds
-        if inputs is not None and kwargs.get('phba_length_plan') is None and attention_mask is None:
+        if inputs is not None and attention_mask is None:
             cu_seqlens = kwargs.get('cu_seqlens')
-            kwargs['phba_length_plan'] = (
-                SequenceLengthPlan.from_host([inputs.shape[1]] * inputs.shape[0], inputs.device)
-                if cu_seqlens is None else SequenceLengthPlan.from_device(cu_seqlens)
+            plan = _resolve_length_plan(
+                inputs.shape[0], inputs.shape[1], inputs.device, cu_seqlens, kwargs.get('phba_length_plan'),
             )
+            kwargs['phba_length_plan'] = plan
+            if cu_seqlens is not None and not plan._matches_source(cu_seqlens) or cu_seqlens is None and inputs.shape[0] == 1 and len(plan.lengths) > 1:
+                kwargs['cu_seqlens'] = plan.cu_seqlens
         return super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,

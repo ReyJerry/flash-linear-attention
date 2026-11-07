@@ -330,7 +330,7 @@ def rstate_from_rtok_host(rtok: torch.Tensor, layout: HostLayout) -> torch.Tenso
 
 
 def alg6_reference(q_rope, q_raw, k_rope, v, prefix_k, prefix_v, oloc, lloc, rtok, layout: HostLayout, scale: float):
-    """Algorithm 6 merge 的参照：以给定的 (Oloc storage, Lloc fp32 [H, T]) 为种子，在 current prefix、历史 token、
+    """joint-attention merge 的参照：以给定的 (Oloc storage, Lloc fp32 [H, T]) 为种子，在 current prefix、历史 token、
     历史 aligned prefix 上做一次 joint softmax（与 kernel 的逐 tile online-softmax 代数等价）。
     P 在进入 dot 前转为 storage dtype；返回 (O storage [T,H,D], L compute [H,T])。"""
     storage, cd = q_rope.dtype, compute_dtype(q_rope.dtype)

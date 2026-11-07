@@ -164,7 +164,7 @@ def direct_sparse_backward(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, m
     if n_query_split != 1:
         raise fail('n_query_split_unsupported', 'Sparse backward requires n_query_split=1')
     if bq not in (16, 32) or bc not in (16, 32, 64):
-        raise fail('invalid_config', 'unsupported Algorithm 7 tiles')
+        raise fail('invalid_config', 'unsupported PHBA backward tiles')
     if not lse.is_contiguous() or not delta.is_contiguous():
         raise fail('non_contiguous_input', 'L/Delta must be contiguous [H,T]')
     if backward_mode not in ('atomic', 'query_owner_deterministic'):

@@ -33,7 +33,6 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 class LaunchConfig:
     num_warps: int
     num_stages: int
-    tiles: tuple[tuple[str, int], ...] = ()
 
 
 CUMSUM_BS = 32
@@ -45,14 +44,12 @@ REVERSE_BLOCK_D = 64
 SEGMENT_CHUNKS = 2
 
 LAUNCH = {
-    "chunk_local_cumsum": LaunchConfig(num_warps=4, num_stages=1, tiles=(("BS", CUMSUM_BS),)),
-    "chunk_local_cumsum_reverse": LaunchConfig(num_warps=4, num_stages=1, tiles=(("BS", CUMSUM_BS),)),
-    "chunk_fwd_h": LaunchConfig(num_warps=4, num_stages=1, tiles=(("BK", FWD_BK), ("BV", FWD_BV))),
-    "chunk_state_bwd": LaunchConfig(num_warps=8, num_stages=2, tiles=(("BLOCK_T", BWD_BLOCK_T),)),
-    "prefix_reverse_state": LaunchConfig(num_warps=4, num_stages=1,
-                                         tiles=(("BLOCK_M", REVERSE_BLOCK_M), ("BLOCK_D", REVERSE_BLOCK_D))),
-    "prefix_bwd_local": LaunchConfig(num_warps=8, num_stages=2,
-                                     tiles=(("BLOCK_T", BWD_BLOCK_T), ("SEGMENT_CHUNKS", SEGMENT_CHUNKS))),
+    'chunk_local_cumsum': LaunchConfig(num_warps=4, num_stages=1),
+    'chunk_local_cumsum_reverse': LaunchConfig(num_warps=4, num_stages=1),
+    'chunk_fwd_h': LaunchConfig(num_warps=4, num_stages=1),
+    'chunk_state_bwd': LaunchConfig(num_warps=8, num_stages=2),
+    'prefix_reverse_state': LaunchConfig(num_warps=4, num_stages=1),
+    'prefix_bwd_local': LaunchConfig(num_warps=8, num_stages=2),
 }
 
 STORAGE_DTYPES = (torch.float16, torch.bfloat16)

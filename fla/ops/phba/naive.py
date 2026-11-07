@@ -51,10 +51,6 @@ class HostLayout:
             seq_block_ptr.append(seq_block_ptr[-1] + n)
         return cls(chunk_size, tuple(block_ptr), tuple(seq_block_ptr))
 
-    @classmethod
-    def from_block_layout(cls, layout) -> HostLayout:
-        return cls(layout.chunk_size, tuple(layout.block_ptr_host), tuple(layout.seq_block_ptr_host))
-
     def blocks_of_sequence(self, s: int) -> range:
         return range(self.seq_block_ptr[s], self.seq_block_ptr[s + 1])
 
@@ -323,21 +319,8 @@ class RefJointAttentionFn(torch.autograd.Function):
         return result + (None,) * (len(ctx.needs_input_grad) - len(result))
 
 
-def rstate_from_rtok_host(rtok: torch.Tensor, layout: HostLayout) -> torch.Tensor:
-    """Rstate = [current_block; Rtok]，PrefixValid = 0（每个 sequence 的首 block）的 entry 为 -1。"""
-    H, T, kh = rtok.shape
-    dev = rtok.device
-    tb = layout.token_block(dev)
-    first = torch.zeros(layout.Nc, dtype=torch.bool, device=dev)
-    first[list(layout.seq_block_ptr[:-1])] = True
-    pv = ~first
-    cur = torch.where(pv[tb], tb, torch.full_like(tb, -1)).to(torch.int32).view(1, T, 1).expand(H, T, 1)
-    hist = torch.where((rtok >= 0) & pv[rtok.long().clamp(min=0)], rtok, torch.full_like(rtok, -1))
-    return torch.cat([cur, hist], dim=-1)
-
-
 def gate_from_storage(a_storage: torch.Tensor, tau: float, storage: torch.dtype):
-    """与 fla/layers/phba.py 相同：g_log = logsigmoid(fp32(a)) / tau；s = storage(-expm1(g_log))（autograd）。"""
+    """与 chunk.py / gate.py 的生产公式相同：g_log = logsigmoid(fp32(a)) / tau；s = storage(-expm1(g_log))（autograd）。"""
     cd = compute_dtype(storage)
     g_log = F.logsigmoid(a_storage.to(cd)) / tau
     return g_log, (-torch.expm1(g_log)).to(storage)
@@ -596,7 +579,6 @@ __all__ = [
     'route_reference',
     'routing_scores',
     'rstate_from_rtok',
-    'rstate_from_rtok_host',
     'sort_rho_segments',
     'topk_from_scores',
     'verify_against_host',

@@ -261,7 +261,7 @@ class TapeWorkspace:
         return sum(value.numel() * value.element_size() for value in (self.tape, self.edge_map, self.count, self.offset))
 
 
-def allocate_tape_workspace(q, plan: OwnerTapePlan | OwnerBranchTapePlan):
+def allocate_tape_workspace(q, plan: OwnerBranchTapePlan):
     if not plan.enabled:
         raise ValueError('disabled owner tape plan must use the original algorithm')
     workspace = TapeWorkspace(
@@ -346,7 +346,7 @@ def run_tape_group(q, k, v, dout, lse, delta, route, meta, block_ptr, prefix_val
 
 
 def backward_with_tape(qr, qw, kr, value, pk, pv, dout, lse, delta, metadata, block_ptr, prefix_valid,
-                       rtok, rstate, grads, plan: OwnerTapePlan | OwnerBranchTapePlan, *, chunk_size, bc, bq):
+                       rtok, rstate, grads, plan: OwnerBranchTapePlan, *, chunk_size, bc, bq):
     t, h, _ = qr.shape
     geometry = (t, h, pk.shape[0], chunk_size, pk.shape[1], rtok.shape[-1], rstate.shape[-1], bc, qr.element_size())
     if plan.geometry != geometry:
@@ -358,7 +358,7 @@ def backward_with_tape(qr, qw, kr, value, pk, pv, dout, lse, delta, metadata, bl
         if route.shape[-1] == 0:
             dq.zero_()
             continue
-        branch_plan = (plan.token if branch == 0 else plan.state) if isinstance(plan, OwnerBranchTapePlan) else plan
+        branch_plan = plan.token if branch == 0 else plan.state
         if not branch_plan.enabled:
             raise ValueError('enabled owner plan lacks a required branch')
         for head_start in range(0, h, branch_plan.group_size):

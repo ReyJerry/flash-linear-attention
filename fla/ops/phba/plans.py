@@ -30,7 +30,6 @@ CHUNKWISE_TRAIN_MAX_M = 128
 CHUNKWISE_TRAIN_MAX_DH = 128
 PREFIX_REVERSE_WORKSPACE_CAP = 256 * 1024**2
 OWNER_TAPE_CAP_BYTES = 256 * 1024**2
-OWNER_TAPE_MAX_HEADS = 4
 OWNER_TAPE_PRODUCER_STAGES = ((16, 2), (32, 2), (64, 1))
 
 
@@ -96,28 +95,36 @@ def owner_tape_uses_tile_major(plan: OwnerTapePlan, branch: int) -> bool:
     return branch == 0 or plan.geometry[6] <= bound
 
 
-def owner_tape_policy_signature() -> tuple[tuple[str, Any], ...]:
-    return (('owner_algorithm', 'head_group_ds_tape_fused_dkv_v2'), ('tape_cap_bytes', OWNER_TAPE_CAP_BYTES),
-            ('max_group_heads', OWNER_TAPE_MAX_HEADS),
-            ('tape_layout', 'token_tile_state_route_bound_v2'), ('state_tile_major_max_routes', 8),
-            ('tape_edges', 'dynamic_int64_address_stride'), ('map', 'canonical_lower_bound_v1'),
-            ('offset_scan', 'tile_cumsum_int32_v1'), ('owner_bq', 16),
-            ('count_bt', 128), ('offset_bt', 128), ('map_bt', 256), ('metadata_warps', 4), ('metadata_stages', 1),
-            ('producer_warps', 4), ('producer_stages_by_bc', OWNER_TAPE_PRODUCER_STAGES),
-            ('producer_writes_dk', True),
-            ('dk_order', 'canonical_bq_per_dot_scale_v1'),
-            ('producer_indices', 'capacity_guarded_int32_v1'), ('producer_padding_margin', 'BQ'),
-            ('owner_warps', 4), ('owner_stages', 2))
-
-
 def owner_branch_tape_policy_signature() -> tuple[tuple[str, Any], ...]:
-    inherited = tuple((key, value) for key, value in owner_tape_policy_signature()
-                      if key not in ('owner_algorithm', 'max_group_heads'))
-    return (('owner_algorithm', 'branch_group_ds_tape_fused_dkv_v3'),) + inherited + (
-        ('branch_group_revision', 1), ('token_group_limit', 8), ('state_group_limit', 16),
+    return (
+        ('owner_algorithm', 'branch_group_ds_tape_fused_dkv_v3'),
+        ('tape_cap_bytes', OWNER_TAPE_CAP_BYTES),
+        ('tape_layout', 'token_tile_state_route_bound_v2'),
+        ('state_tile_major_max_routes', 8),
+        ('tape_edges', 'dynamic_int64_address_stride'),
+        ('map', 'canonical_lower_bound_v1'),
+        ('offset_scan', 'tile_cumsum_int32_v1'),
+        ('owner_bq', 16),
+        ('count_bt', 128),
+        ('offset_bt', 128),
+        ('map_bt', 256),
+        ('metadata_warps', 4),
+        ('metadata_stages', 1),
+        ('producer_warps', 4),
+        ('producer_stages_by_bc', OWNER_TAPE_PRODUCER_STAGES),
+        ('producer_writes_dk', True),
+        ('dk_order', 'canonical_bq_per_dot_scale_v1'),
+        ('producer_indices', 'capacity_guarded_int32_v1'),
+        ('producer_padding_margin', 'BQ'),
+        ('owner_warps', 4),
+        ('owner_stages', 2),
+        ('branch_group_revision', 1),
+        ('token_group_limit', 8),
+        ('state_group_limit', 16),
         ('group_candidates', 'powers_of_two_three_full_heads'),
         ('group_selection', 'minimum_group_count_then_shared_bytes'),
-        ('workspace_reuse', 'per_buffer_maximum_across_branches'))
+        ('workspace_reuse', 'per_buffer_maximum_across_branches'),
+    )
 
 
 def owner_tape_index32_safe(capacity: int, padded_extent: int, bq: int) -> bool:
@@ -146,28 +153,6 @@ class OwnerTapePlan:
         return self.group_size > 0
 
 
-def owner_tape_plan(t: int, h: int, nc: int, c: int, m: int, kh: int, ks: int,
-                    bc: int, storage_bytes: int, *, group_limit: int = OWNER_TAPE_MAX_HEADS) -> OwnerTapePlan:
-    """Bound one reused tape/map/offset allocation using only invocation geometry."""
-    geometry = (t, h, nc, c, m, kh, ks, bc, storage_bytes)
-    if min(h, c, m, bc, storage_bytes) <= 0 or min(t, nc, kh, ks) < 0 or ks > MAX_KH + 1:
-        raise fail('invalid_config', 'invalid owner tape geometry', geometry=geometry)
-    if not 1 <= group_limit <= OWNER_TAPE_MAX_HEADS:
-        raise fail('invalid_config', 'owner tape group limit must be within the frozen policy')
-    tok_extent, state_extent = cdiv(c, bc) * bc, cdiv(m, bc) * bc
-    width = max(kh, ks)
-    tape_per_head = t * max(kh * tok_extent, ks * state_extent)
-    map_per_head = t * width
-    per_head = tape_per_head * storage_bytes + map_per_head * 4 + nc * 8
-    group = min(group_limit, h, (OWNER_TAPE_CAP_BYTES - 4) // max(1, per_head),
-                INT32_MAX // max(1, map_per_head), (INT32_MAX - 1) // max(1, nc)) if t and nc and width else 0
-    tape_elements, map_elements, count_elements = group * tape_per_head, group * map_per_head, group * nc
-    offset_elements = count_elements + 1 if group else 0
-    total = tape_elements * storage_bytes + (map_elements + count_elements + offset_elements) * 4
-    return OwnerTapePlan(geometry, group, tape_elements, map_elements, count_elements, offset_elements,
-                         width, tok_extent, state_extent, total, owner_tape_policy_signature())
-
-
 @dataclass(frozen=True)
 class OwnerBranchTapePlan:
     geometry: tuple[int, ...]
@@ -184,12 +169,6 @@ class OwnerBranchTapePlan:
     def enabled(self):
         kh, ks = self.geometry[5:7]
         return bool((kh or ks) and (not kh or self.token.enabled) and (not ks or self.state.enabled))
-
-    @property
-    def group_size(self):
-        """A common group size exists only when the active branches agree."""
-        groups = {branch.group_size for branch in (self.token, self.state) if branch.enabled}
-        return next(iter(groups)) if len(groups) == 1 else None
 
 
 def _owner_group_candidates(h: int, limit: int) -> tuple[int, ...]:
@@ -292,7 +271,7 @@ class SequenceLengthPlan:
 
     def __init__(self, *_args: Any, _token: object = None, **_kwargs: Any) -> None:
         if _token is not _CONSTRUCT_TOKEN:
-            raise TypeError("请使用 SequenceLengthPlan.from_host / from_device（debug 模式可用 from_pair_debug）")
+            raise TypeError("请使用 SequenceLengthPlan.from_host / from_device")
 
     @classmethod
     def _build(
@@ -351,21 +330,6 @@ class SequenceLengthPlan:
         _check_cu_seqlens_tensor(cu_seqlens)
         cu_host = _validate_cu_seqlens_host([int(x) for x in cu_seqlens.tolist()])
         return cls._build(cu_host, cu_seqlens.detach().clone(memory_format=torch.contiguous_format), source=cu_seqlens)
-
-    @classmethod
-    def from_pair_debug(cls, cu_seqlens_host: Sequence[int], cu_seqlens: torch.Tensor) -> SequenceLengthPlan:
-        """debug-only：调用方分别给出 host / device 两份长度，逐元素比较（需要 D2H 同步）后构造 immutable plan。"""
-        _check_cu_seqlens_tensor(cu_seqlens)
-        cu_host = _validate_cu_seqlens_host([int(x) for x in cu_seqlens_host])
-        if len(cu_host) != cu_seqlens.shape[0]:
-            raise fail("invalid_cu_seqlens", f"len(cu_seqlens_host)={len(cu_host)} 与 cu_seqlens.shape[0]="
-                       f"{cu_seqlens.shape[0]} 不一致")
-        device_values = tuple(int(x) for x in cu_seqlens.tolist())
-        if device_values != cu_host:
-            first = next(i for i, (a, b) in enumerate(zip(cu_host, device_values)) if a != b)
-            raise fail("invalid_cu_seqlens", f"cu_seqlens_host 与 device cu_seqlens 在位置 {first} 不一致："
-                       f"{cu_host[first]} != {device_values[first]}", index=first)
-        return cls._build(cu_host, cu_seqlens.detach().clone(memory_format=torch.contiguous_format))
 
     @property
     def cu_seqlens_host(self) -> tuple[int, ...]:
@@ -509,14 +473,6 @@ class LocalFABatch:
     t0: int
     t1: int
     max_seqlen: int
-
-    @property
-    def num_blocks(self) -> int:
-        return self.b1 - self.b0
-
-    @property
-    def num_rows(self) -> int:
-        return self.t1 - self.t0
 
 
 def _block_layout(lengths: Sequence[int], c: int, br: int) -> tuple[tuple[int, ...], tuple[int, ...], int]:

@@ -212,10 +212,15 @@ def test_low_memory_fallback_gradients(monkeypatch):
     inputs = [torch.randn(1, 129, 2, 32, device=device, dtype=torch.bfloat16) * .1 for _ in range(6)]
     do = torch.randn_like(inputs[0])
 
+    def unexpected(*args, **kwargs):
+        pytest.fail('Backward must use the tape plan saved by forward')
+
     def evaluate():
         leaves = [x.clone().requires_grad_() for x in inputs]
         output, _ = chunk_phba(*leaves, chunk_size=32, topk=4)
-        return output.detach(), torch.autograd.grad(output, leaves, do)
+        with monkeypatch.context() as context:
+            context.setattr(plans, 'owner_branch_tape_plan', unexpected)
+            return output.detach(), torch.autograd.grad(output, leaves, do)
 
     expected, expected_grads = evaluate()
     monkeypatch.setattr(plans, 'OWNER_TAPE_CAP_BYTES', 0)

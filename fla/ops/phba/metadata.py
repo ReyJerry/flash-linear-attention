@@ -133,25 +133,11 @@ class BranchMetadata:
     # retain original route slots for forward metadata reuse
     source_slots: torch.Tensor | None = None
 
-    @property
-    def nedge(self) -> torch.Tensor:
-        return self.offset[-1:]
-
 
 @dataclass(frozen=True)
 class DirectMetadata:
     tok: BranchMetadata | None   # Kh = 0 时为 None
     state: BranchMetadata
-    kh: int
-
-    def bytes(self) -> int:
-        n = 0
-        for br in (self.tok, self.state):
-            if br is not None:
-                n += (br.count.numel() + br.offset.numel() + br.rho.numel()) * 4
-                if br.source_slots is not None:
-                    n += br.source_slots.numel() * br.source_slots.element_size()
-        return n
 
 
 def _branch(
@@ -208,7 +194,7 @@ def build_direct_metadata(rtok: torch.Tensor, rstate: torch.Tensor, nc: int, *,
         state = derive_state(tok, derived_state_layout, H, T * H * (kh + 1))
     else:
         state = _branch(rstate, nc, kpad_state(kh + 1), scan_impl=metadata_scan_impl)
-    return DirectMetadata(tok=tok, state=state, kh=kh)
+    return DirectMetadata(tok=tok, state=state)
 
 
 @triton.jit

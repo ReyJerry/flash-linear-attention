@@ -1,6 +1,6 @@
 # PHBA validation
 
-This record validates the 20-file PHBA operator layout on NVIDIA H20, PyTorch 2.9.0+cu128, Triton 3.5.0, Transformers 5.6.2 and FlashAttention 2.8.3.post1. The source/runtime manifest has SHA256 `a8762cefc40d9388d197ea19de439bd4fbed270ff36eb35b409dcaba2926168c`, computed from `json.dumps(path_to_sha256, sort_keys=True).encode()` using repository-relative paths. The manifest covers the tracked `fla` files and complete-step benchmark script. The baseline is `73a9e98a0a1e5155cdd5bde838ff70ab6bc42bbc`.
+This record validates PHBA helper and legacy-interface cleanup within the existing 20-file operator layout on NVIDIA H20, PyTorch 2.9.0+cu128, Triton 3.5.0, Transformers 5.6.2 and FlashAttention 2.8.3.post1. The source/runtime manifest has SHA256 `9762cc6fc87e7f7c4a91305777012162c666b5107e8dc4b9168a03b0b65c0686`, computed from `json.dumps(path_to_sha256, sort_keys=True).encode()` using repository-relative paths. The manifest covers the tracked `fla` files and complete-step benchmark script. The baseline is `3e489cce6ceb5fb50d923a2579ad9dfb445ef058`.
 
 ## Correctness and API coverage
 
@@ -10,13 +10,13 @@ Projection coverage checks all three screened GEMM geometries against native out
 
 The fresh before/after audit covers nine combinations of FP16/BF16 dense/packed/no-history inputs and training, inference or forced low-workspace execution. Outputs, final states and all supported gradients are byte-identical. Instrumentation confirms execution of integer metadata kernels, sparse dK/dV, query-owner dQ and sequential prefix backward. Six reference-mode comparisons cover the FP64 formula and wrapper, plus FP16/BF16 storage-aware references with PyTorch or FlashAttention local branches; returned tensors and all six input gradients match byte-for-byte.
 
-All 33 production Triton JIT ASTs are identical. The 171 retained top-level function/class bodies are AST-equivalent after excluding import relocation and the explicitly removed unused error-record method. Constants retain their expressions. Public operator entry files, all model/layer/module files and the H20 backend resources are byte-identical to the baseline. Runtime inspection also verifies public signatures, defaults, exports and the sequence-plan class module. The operator test changes only imports; its numerical assertions and tolerances are unchanged.
+All 33 production Triton JIT ASTs are identical. Retained reference computations have identical ASTs after excluding a corrected docstring. Public operator entry files, all model/layer/module files and the H20 backend resources are byte-identical to the baseline. Fourteen geometry/budget comparisons preserve the complete forward-bound tape plans and policies; all prefix warp/stage launch settings also match. Runtime inspection preserves supported operator/model signatures, defaults, exports and the sequence-plan class module, and verifies the intentional removal of the unused `from_pair_debug` constructor. The existing low-workspace operator test now rejects backward-time plan construction in both normal and fallback execution; prior assertions and tolerances are unchanged.
 
 Every complete-step pair matches all 267 initial parameter tensors, inputs, first-step loss/norm and first-step raw/clipped gradient bytes. Final parameter and optimizer-state hashes also match after 70 steps. The freshly installed split wheels also pass the 1.264B model gate with all three exact GEMM sessions active: loss `10.784871101379395`, gradient norm `2.495190382003784`, and zero raw or clipped gradient mismatches.
 
 ## Official split-package installation
 
-The formal `scripts/build_packages.py` path builds both wheels and source distributions. All **643** packaged Python/C++/JSON files match the source bytes: 456 in `fla-core` and 187 in `flash-linear-attention`. The 11 superseded private module files are absent, as are the earlier obsolete reference modules; both reference families and their active oracles live in `naive.py`. The two C++ helpers and algorithm JSON are present in `fla-core` only; no prebuilt shared library or optimizer is added.
+The formal `scripts/build_packages.py` path builds both wheels and source distributions. All **643** packaged Python/C++/JSON files match the source bytes: 456 in `fla-core` and 187 in `flash-linear-attention`. The 11 previously superseded private module files remain absent, as are the earlier obsolete reference modules; both reference families and their active oracles live in `naive.py`. The two C++ helpers and algorithm JSON are present in `fla-core` only; no prebuilt shared library or optimizer is added.
 
 Fresh installation outside the checkout passes **89 tests, no skips**, including import binding, registration and alignment/fallback checks. Four host-side split-package contract/install-order tests also pass. Their full-runtime-dependency companion is intentionally deselected on the local host; the separate installed GPU suite and full-model gate execute on H20. The unchanged shared integration previously passed 574 tests at `3f39ae4aa64411221ea935b267630f212cd2edc1`; that count is prior evidence, not a new run.
 
@@ -26,23 +26,23 @@ The H100 smoke workflow selects four existing PHBA forward/backward cases, insta
 
 ## Paired complete-step throughput
 
-Baseline: `73a9e98a0a1e5155cdd5bde838ff70ab6bc42bbc`, before the four core module consolidations. The candidate is identified by the runtime manifest above. Each workload uses three same-device paired seeds, 3407/3408/3409, with alternating role order and matched native normalization launch choices. The recipe is 1,264,423,936 parameters, 24 layers, hidden width 2048, 16 heads, FFN width 4272, vocabulary 32000, 128 prefix slots, B1 x 8192, FP32 parameters/BF16 autocast, no activation checkpointing, native fused AdamW, lr=0, betas 0.9/0.95, clipping at 1, and weight decay 0.1 excluding one-dimensional parameters. Each run has 20 warmup and 50 measured complete steps. Packed lengths are 2048/3072/3072, with sequence-boundary labels masked before shifted language-model loss. Zero-grad, forward/loss, backward, clipping, optimizer, allocations, alignment checks and dispatch are timed together. Input generation and validation hooks are outside measured steps.
+Baseline: `3e489cce6ceb5fb50d923a2579ad9dfb445ef058`, before removing the reviewed helper interfaces and legacy tape-plan compatibility. The candidate is identified by the runtime manifest above. Each workload uses three same-device paired seeds, 3407/3408/3409, with alternating role order and matched native normalization launch choices. The recipe is 1,264,423,936 parameters, 24 layers, hidden width 2048, 16 heads, FFN width 4272, vocabulary 32000, 128 prefix slots, B1 x 8192, FP32 parameters/BF16 autocast, no activation checkpointing, native fused AdamW, lr=0, betas 0.9/0.95, clipping at 1, and weight decay 0.1 excluding one-dimensional parameters. Each run has 20 warmup and 50 measured complete steps. Packed lengths are 2048/3072/3072, with sequence-boundary labels masked before shifted language-model loss. Zero-grad, forward/loss, backward, clipping, optimizer, allocations, alignment checks and dispatch are timed together. Input generation and validation hooks are outside measured steps.
 
 | Workload       | Baseline ms/step | Candidate ms/step | Paired throughput change |
 | -------------- | ---------------: | ----------------: | -----------------------: |
-| Dense C64/K16  | 1039.42          | 1040.51           | -0.104%                  |
-| Dense C128/K8  | 849.74           | 849.49            | +0.029%                  |
-| Dense C256/K4  | 775.46           | 775.41            | +0.007%                  |
-| Dense C512/K2  | 750.44           | 750.08            | +0.048%                  |
-| Packed C128/K8 | 782.26           | 782.84            | -0.074%                  |
+| Dense C64/K16  | 1039.84          | 1040.70           | -0.083%                  |
+| Dense C128/K8  | 849.74           | 849.32            | +0.050%                  |
+| Dense C256/K4  | 775.44           | 774.81            | +0.081%                  |
+| Dense C512/K2  | 750.08           | 749.38            | +0.092%                  |
+| Packed C128/K8 | 782.62           | 782.54            | +0.011%                  |
 
-Latency columns are arithmetic means; throughput changes are geometric means of paired throughput ratios. Dense geometric-mean throughput change is -0.0051%; packed change is -0.0738%. All positive and negative pairs are retained. Throughput is effectively preserved in these measurements; this is not an exact-zero latency change or a universal speedup. Peak allocated memory is unchanged in every matched workload. No dense-FLOPs hardware-floor estimate or new NCU bottleneck claim is made. The lr=0 runs measure training computation, not convergence.
+Latency columns are arithmetic means; throughput changes are geometric means of paired throughput ratios. Dense geometric-mean throughput change is +0.0351%; packed change is +0.0109%. All positive and negative pairs are retained. Throughput is effectively preserved in these measurements; this is not an exact-zero latency change or a universal speedup. Peak allocated memory is unchanged in every matched workload. No dense-FLOPs hardware-floor estimate or new NCU bottleneck claim is made. The lr=0 runs measure training computation, not convergence.
 
-The preceding path-cleanup measurements are preserved in [the previous validation record](https://github.com/ReyJerry/flash-linear-attention/blob/73a9e98a0a1e5155cdd5bde838ff70ab6bc42bbc/docs/phba_validation.md). They use a different baseline and are not the numbers above.
+The preceding module-consolidation measurements are preserved in [the previous validation record](https://github.com/ReyJerry/flash-linear-attention/blob/3e489cce6ceb5fb50d923a2579ad9dfb445ef058/docs/phba_validation.md). They use a different baseline and are not the numbers above.
 
 ## Normalized L2Warp sensitivity
 
-The four focused cases below pass again in the current source and installed suites. Mutation sensitivity was verified at `73a9e98a`; the model test file and loss implementation are byte-identical in this consolidation, so those fault-injection results are retained evidence.
+The four focused cases below pass again in the current source and installed suites. Mutation sensitivity was verified at `73a9e98a`; the model test file and loss implementation are byte-identical in this cleanup, so those fault-injection results are retained evidence.
 
 Four focused cases cover native CE with integer/tensor item counts, fused CE and fused-linear CE. An identity head and one valid CE target on a zero hidden row isolate the L2 contribution: ignored-token hidden gradients and head-weight gradients have no CE component. The test compares them with an independently differentiated FP64 max-logit penalty, both without item-count normalization and after normalization. It additionally checks the reciprocal item-count scaling directly and requires a nonzero signal.
 
@@ -67,7 +67,7 @@ PHBA has 41 dedicated model cases, alongside 22 operator, 25 projection and two 
 
 Native loss-interface comparisons preserve PyTorch's autocast input precision. Fused-loss comparisons use an explicit FP32 cross-entropy reference, matching their accumulation contract. Loss comparisons use the existing 1e-3 bound and full-model AMP gradient comparisons use 0.006; no existing tolerance was relaxed. The original L2Warp CPU oracle remains, supplemented by the isolated FP64-oracle scaling checks above. Meta initialization runs in a subprocess so the shared operator-test NaN-allocation wrappers cannot pollute Torch's cached device-factory set.
 
-The existing PHBA model and projection test files are unchanged in this consolidation. The operator test changes only its imports; all assertions and tolerances retain identical ASTs. Other models' tests and production modules are untouched. PHBA remains outside the hand-written shared forward/decoder/initialization lists; its dedicated tests now cover the supported equivalent contracts directly. The scripts remain `tests/models/test_modeling_phba.py`, `tests/ops/test_phba.py`, `tests/layers/test_phba_linear.py` and `tests/benchmarks/test_phba_registry.py`.
+The existing PHBA model and projection test files are unchanged in this cleanup. The existing low-workspace operator test now rejects backward-time plan construction. All prior assertions and tolerances retain identical ASTs. Other models' tests and production modules are untouched. PHBA remains outside the hand-written shared forward/decoder/initialization lists; its dedicated tests now cover the supported equivalent contracts directly. The scripts remain `tests/models/test_modeling_phba.py`, `tests/ops/test_phba.py`, `tests/layers/test_phba_linear.py` and `tests/benchmarks/test_phba_registry.py`.
 
 ## Reproduction and scope
 

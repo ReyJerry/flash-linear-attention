@@ -27,7 +27,6 @@ REASON_CLASSES: dict[str, str] = {
     "invalid_shape": CLASS_A,
     "invalid_cu_seqlens": CLASS_A,
     "int32_overflow": CLASS_A,
-    "n_query_split_unsupported": CLASS_A,
     "routing_unsupported": CLASS_A,
     "fa_layout_probe_failed": CLASS_A,
     "fa_device_unsupported": CLASS_A,

@@ -266,10 +266,8 @@ def launch_branch(q, k, v, dout, lse, delta, meta, block_ptr, prefix_valid, dk, 
 
 
 def direct_sparse_backward(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, metadata,
-                           block_ptr, prefix_valid, *, chunk_size, bc=32, bq=16, n_query_split=1,
-                           rtok=None, rstate=None, tape_plan=None):
-    if n_query_split != 1:
-        raise fail('n_query_split_unsupported', 'Sparse backward requires n_query_split=1')
+                           block_ptr, prefix_valid, *, chunk_size, bc=32, bq=16,
+                           rtok, rstate, tape_plan):
     if bq not in (16, 32) or bc not in (16, 32, 64):
         raise fail('invalid_config', 'unsupported PHBA backward tiles')
     if not lse.is_contiguous() or not delta.is_contiguous():
@@ -286,10 +284,6 @@ def direct_sparse_backward(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, m
 
     grads = SparseGradients(q_buffer(), z(), z(), q_buffer(), torch.zeros_like(pk, dtype=torch.float32),
                             torch.zeros_like(pv, dtype=torch.float32))
-    from fla.ops.phba.plans import owner_tape_plan
-    if tape_plan is None:
-        tape_plan = owner_tape_plan(T, H, pk.shape[0], chunk_size, pk.shape[1], rtok.shape[-1],
-                                    rstate.shape[-1], bc, q_rope.element_size())
     if tape_plan.enabled:
         from fla.ops.phba.tape import backward_with_tape
         return backward_with_tape(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, metadata,
@@ -320,14 +314,14 @@ def attention_backward(ctx, dout, _dlse):
     token = token[:-2]
     state = BranchMetadata(sc, so, sr, sr.numel())
     tok = BranchMetadata(*token, token[-1].numel()) if ctx.has_token else None
-    metadata = DirectMetadata(tok, state, int(ctx.has_token))
+    metadata = DirectMetadata(tok, state)
     dout, _copy_bytes = prepare_grad_output(dout, out)
     dout = dout.contiguous()
     delta = compute_delta(dout, out)
     local = local_backward(dout, qr, kr, v, out, lse, bp, ctx.batches, deterministic=True)
     sparse = direct_sparse_backward(qr, qw, kr, v, pk, pv, dout, lse, delta, metadata, bp, valid,
                                     chunk_size=c, bc=bc, bq=bq, rtok=rtok, rstate=rstate,
-                                    tape_plan=getattr(ctx, 'owner_tape_plan', None))
+                                    tape_plan=ctx.owner_tape_plan)
     dq = merge_gradient(local[0], sparse.dq_rope, output_dtype=qr.dtype)
     dk = merge_gradient(local[1], sparse.dk_rope, output_dtype=kr.dtype)
     dv = merge_gradient(local[2], sparse.dv, output_dtype=v.dtype)

@@ -1,0 +1,165 @@
+{
+  "status": "THREE_PUBLIC_PAIRED_TRIALS_MAIN_VERIFIED",
+  "raw_observations": 1440,
+  "rows": {
+    "kda": {
+      "fwd": {
+        "trial_medians_ms": [
+          374.7718073427677,
+          372.04389087855816,
+          372.151518240571
+        ],
+        "median_ms": 372.151518240571,
+        "min_ms": 372.04389087855816,
+        "max_ms": 374.7718073427677,
+        "max_peak_allocated_bytes": 15637480960
+      },
+      "bwd": {
+        "trial_medians_ms": [
+          1246.5826850384474,
+          1246.7026729136705,
+          1247.1536584198475
+        ],
+        "median_ms": 1246.7026729136705,
+        "min_ms": 1246.5826850384474,
+        "max_ms": 1247.1536584198475,
+        "max_peak_allocated_bytes": 15637480960
+      },
+      "fb": {
+        "trial_medians_ms": [
+          1617.6711060106754,
+          1617.7362520247698,
+          1618.161616846919
+        ],
+        "median_ms": 1617.7362520247698,
+        "min_ms": 1617.6711060106754,
+        "max_ms": 1618.161616846919,
+        "max_peak_allocated_bytes": 15637480960
+      },
+      "step": {
+        "trial_medians_ms": [
+          1672.428697347641,
+          1672.1653323620558,
+          1672.7037653326988
+        ],
+        "median_ms": 1672.428697347641,
+        "min_ms": 1672.1653323620558,
+        "max_ms": 1672.7037653326988,
+        "max_peak_allocated_bytes": 26237336576
+      }
+    },
+    "kda_matched": {
+      "fwd": {
+        "trial_medians_ms": [
+          392.1623192727566,
+          392.2055009752512,
+          392.3263754695654
+        ],
+        "median_ms": 392.2055009752512,
+        "min_ms": 392.1623192727566,
+        "max_ms": 392.3263754695654,
+        "max_peak_allocated_bytes": 16163571200
+      },
+      "bwd": {
+        "trial_medians_ms": [
+          1309.437619522214,
+          1309.603601694107,
+          1310.0362848490477
+        ],
+        "median_ms": 1309.603601694107,
+        "min_ms": 1309.437619522214,
+        "max_ms": 1310.0362848490477,
+        "max_peak_allocated_bytes": 16163571200
+      },
+      "fb": {
+        "trial_medians_ms": [
+          1700.7314432412386,
+          1700.7233947515488,
+          1701.3674192130566
+        ],
+        "median_ms": 1700.7314432412386,
+        "min_ms": 1700.7233947515488,
+        "max_ms": 1701.3674192130566,
+        "max_peak_allocated_bytes": 16163571200
+      },
+      "step": {
+        "trial_medians_ms": [
+          1758.803153410554,
+          1758.9597385376692,
+          1759.8543297499418
+        ],
+        "median_ms": 1758.9597385376692,
+        "min_ms": 1758.803153410554,
+        "max_ms": 1759.8543297499418,
+        "max_peak_allocated_bytes": 27473419264
+      }
+    },
+    "khdn": {
+      "fwd": {
+        "trial_medians_ms": [
+          832.355061545968,
+          832.2829734534025,
+          831.455847248435
+        ],
+        "median_ms": 832.2829734534025,
+        "min_ms": 831.455847248435,
+        "max_ms": 832.355061545968,
+        "max_peak_allocated_bytes": 16462515200
+      },
+      "bwd": {
+        "trial_medians_ms": [
+          2318.9910650253296,
+          2319.2975111305714,
+          2319.3809259682894
+        ],
+        "median_ms": 2319.2975111305714,
+        "min_ms": 2318.9910650253296,
+        "max_ms": 2319.3809259682894,
+        "max_peak_allocated_bytes": 20933102592
+      },
+      "fb": {
+        "trial_medians_ms": [
+          3145.9251288324594,
+          3147.841963917017,
+          3147.0755115151405
+        ],
+        "median_ms": 3147.0755115151405,
+        "min_ms": 3145.9251288324594,
+        "max_ms": 3147.841963917017,
+        "max_peak_allocated_bytes": 20933102592
+      },
+      "step": {
+        "trial_medians_ms": [
+          3205.447329208255,
+          3205.9865184128284,
+          3205.660566687584
+        ],
+        "median_ms": 3205.660566687584,
+        "min_ms": 3205.447329208255,
+        "max_ms": 3205.9865184128284,
+        "max_peak_allocated_bytes": 32238232064
+      }
+    }
+  },
+  "paired_time_ratios": {
+    "kda": {
+      "trials": [
+        1.9166421470116353,
+        1.9172664666382828,
+        1.9164544452675287
+      ],
+      "median": 1.9166421470116353,
+      "KHDN_throughput_fraction": 0.5217458050576456
+    },
+    "kda_matched": {
+      "trials": [
+        1.822516250890536,
+        1.8226605465558643,
+        1.8215488137265754
+      ],
+      "median": 1.822516250890536,
+      "KHDN_throughput_fraction": 0.5486919524099553
+    }
+  },
+  "scope": "SamephysicalH20 full24 B8T2048,3independentpairedtrials,10warm30steady/mode,actual40Adamupdates/steptrial. NativeKDA distinguishedfromfullprojectionmatchedKDA. PublicKHDN619 includesruntimechecks. Precision BF16first/FP32controls,not FP64training. NoDDPthroughput/realcorpusquality claim."
+}

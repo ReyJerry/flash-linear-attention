@@ -1,0 +1,33 @@
+{
+  "files": {
+    "chunk": "76c8f42d9f4b28c0ce35718d1796b05a6c47960c3c68b0b1b9cb577a64ddcc11",
+    "chunk_kernels": "67fc876b881e756009e6e46c8fcfc3c7e2a40c5d3bc450c245565967ac956ae8"
+  },
+  "jit_functions": {
+    "mm": "748a0beefeed8bf48f47f8a883429dc97b7f787468ebc19b9652a9e96fd545b2",
+    "mm_state_product": "6dcd2bcfcbc765ddcbb67fa133433d424f9829e3000ecfbaa2cae3dc9971fe36",
+    "row": "8d47ce453a7b777af21e9e5b5e6b1a8c7c9d5df4859898c0dd0b104c048bbf49",
+    "at": "25d2c249c6cb4caab68975225c6d2933fe870622b48f2b1ee30dc7ebba5381a4",
+    "load_matrix": "9abf0101f157fc1f97ff37135d9d4b9a8d6fbd2e1bfd353cfe38d26d6a7dabf2",
+    "store_matrix": "d0d5a700c7d72796f06e2b5277740496f1c4b2ea1639424ee93d19e7e6b509e5",
+    "load_vector": "cc1106ee86e09a645d3df56e4a21f7f54c906d56d33133fddd28c11ca51d7e2c",
+    "store_vector": "85d7ba24730cc0da827644a6b4918a40972512b0c9d536cc6c0a46cf842da42c",
+    "reduced_row": "436c531db97b98dd1b0136e3afc8fe11b58b91137f4eb52a5a0d3e827fe2cb99",
+    "inverse_lower": "957873553226d3f0a2ba1b00f911bf916fe427c4a6690819b1c52d6a251acb9c",
+    "erase": "89cd72eb3c0586c1ba11859e60f3d3b0444ca7b319d74cbdd78c109a4d6e83bb",
+    "erase_vjp": "aa180877c6266f7938704ab2a76b908add934d0ad09d8413bb45aedba9b838e0",
+    "common_fwd_kernel": "a101be11a6184f6ef4a8c53ec979ccd38842c377dffcc6a498bc4885b8df7250",
+    "group_fwd_kernel": "25dba8079b1403588f250afbe720b54b5cbbd8f408959374a205ca8c84d2750e",
+    "group_af_fwd_kernel": "f2921c18a2afb1d8f00d7e15501ae065a7822e48f7cdfcdddfb340a5c56fe16f",
+    "local_graph": "132acbe1d0bd6b2c7dbd992f522ec6b2bb97d7abb70079afa25e9bb2280d379c",
+    "bf16_fs6": "2d605939c95f9c5a33dd8e1be29fe136f3749d0e4150730ca562cb7e65e147b0",
+    "state_fwd_kernel": "537d506230e89f0c4672d0feaaa9ebcfaf3f1a3ec6422f65fead839454f9aaf4",
+    "state_bwd_kernel": "e21eb7ea2c2232696001730c1e6bf9f1ec80a8d9babd13bb805137e0ae2a6f5f",
+    "sum_matrix": "c3952a85facc8fcd469d1c647e5a2c87a13be89d39268c7c3910fb472239af3d",
+    "sum_vector": "35dbd074e1f2f295b5544327e12dbe7d55569275583342d01836d4f9d991bf44",
+    "common_bwd_kernel": "d182013530cfa60c2e04e668983eba9095a75ec5b37cee0ce02e93433fa5d9f1",
+    "carry_fwd_kernel": "51422fd9369049b88feb85a7b13763ff27235d68ad40ff8d63c9d38ac7f107b0"
+  },
+  "selected_forward_callee": "bf16_fs6",
+  "backward_primal": "SavedS/SavedY; strict physical VJP"
+}

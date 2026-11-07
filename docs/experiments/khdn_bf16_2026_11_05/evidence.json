@@ -1,0 +1,375 @@
+{
+  "schema": "khdn.bf16-research.2026-11-05",
+  "production_accepted": false,
+  "acceptance_budgets_changed": false,
+  "prospective_contract": {
+    "version": 1,
+    "status": "ACTIVE_PROSPECTIVE",
+    "recorded_at_utc": "2026-11-05 13:49:16 UTC",
+    "user_answer": "\u91c7\u7528\u65b0 BF16 \u5408\u540c\uff0c\u7ee7\u7eed\u5b8c\u6574\u6a21\u578b\u9a8c\u8bc1\uff08\u63a8\u8350\uff09",
+    "proposal_sha256": "21eed1180e069feaa90e7f4ac956f450fa61277bb3a224cc1645f888a2b87b57",
+    "contract_sha256": "049e4b24262504ebddfd164e2ff0fc10a1e3924a8a0174fc54812dc04785e3cd",
+    "prospective_model_seeds": [
+      101,
+      211,
+      307
+    ],
+    "prospective_data_seeds": [
+      1009,
+      2003,
+      3001
+    ],
+    "old_failures_reclassified": false,
+    "FP64_candidate_training": false,
+    "semantic_and_same_precision_ddp_budgets_changed": false
+  },
+  "precision": "BF16 matrix operands, FP32 accumulation/control/state; no FP64 in candidate training. Separate explicit untimed FP64 truth and CPU analysis remain permitted.",
+  "environment": {
+    "gpu": "NVIDIA H20",
+    "torch": "2.9.0+cu128",
+    "triton": "3.5.0",
+    "libtriton_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32",
+    "runtime_snapshot": "9e8e944207fe29c6dabef646ce0539d41a01c173b3a59ae62ee11a796f9247d3"
+  },
+  "candidate_source_files": {
+    "kernels_direct.py": "9b1f97bfd5b0d7f00fb0e23242c7ec11ae271856005bf68a012ecdfde2d0ef99",
+    "kernels_compensated.py": "24fca1966a38b8075d72de20b05f2ac593e93fdad40f8b3f4bf9e9ce0550bec9",
+    "kernels_residual.py": "7c22fdf9f9113f92057dfd50dad3db6cbc85e7d0ee6119d8b2cbf81efcc83247",
+    "operator_direct.py": "090fd760827778459d32e4adae83cdbc27d787366b320c7793f120c73c24f6ff",
+    "operator_compensated.py": "88ebc5083421c72c184e77c47e7fcf3d5483555db7f50f25d961764222503508",
+    "operator_residual.py": "63ffff11fdd2f30652d1fd9da2252457528a7987d1d88461bf4cd50efce4be1d"
+  },
+  "cost": {
+    "job": "khdn-no64-cost-5acef7a2eb48",
+    "gpu_uuid": "GPU-1cd6ef52-da6f-cd56-8092-4a090266e369",
+    "result": {
+      "status": "MAIN_SAME_CARD_COST_DIAGNOSTIC_VERIFIED",
+      "shape": [
+        8,
+        2048,
+        16,
+        128
+      ],
+      "samples_per_arm": 30,
+      "warmup_per_arm": 10,
+      "arms": {
+        "direct": {
+          "wall_median_ms": 67.59313307702541,
+          "wall_p95_ms": 67.72701069712639,
+          "cuda_median_ms": 67.53144073486328,
+          "saved_forward_bytes": 3306160128,
+          "payload_numeric_pass": false,
+          "output_relative_RMS": 0.003466141101303553,
+          "full_training_accepted": false
+        },
+        "compensated": {
+          "wall_median_ms": 93.83457154035568,
+          "wall_p95_ms": 94.71878781914711,
+          "cuda_median_ms": 93.76871871948242,
+          "saved_forward_bytes": 3306160128,
+          "payload_numeric_pass": true,
+          "output_relative_RMS": 7.563917887725649e-07,
+          "full_training_accepted": false
+        },
+        "residual": {
+          "wall_median_ms": 136.27138547599316,
+          "wall_p95_ms": 136.54011487960815,
+          "cuda_median_ms": 136.21167755126953,
+          "saved_forward_bytes": 4514119680,
+          "payload_numeric_pass": true,
+          "output_relative_RMS": 7.845019636325113e-07,
+          "full_training_accepted": false
+        }
+      },
+      "residual_time_increase_percent": 45.225137429637606,
+      "residual_saved_bytes_increase_percent": 36.53663177925785,
+      "scope": "Same card actual full Layer0 inputs/dO, fixed-buffer forward/manual-backward chain replay,10warm30steady interleaved. Excludes allocation, validation, PyTorch autograd, other model layers/loss/optimizer. Finite failed-qualification arms are research cost measurements only; no training speedup or deployment eligibility."
+    }
+  },
+  "full24_zero_update": {
+    "status": "FULL24_ZERO_UPDATE_DIAGNOSTICS_METADATA_VERIFIED",
+    "rows": [
+      {
+        "arm": "direct",
+        "reported_loss": 10.786362648010254,
+        "evaluation_CE_fp32": 10.786578178405762,
+        "evaluation_CE_delta": 5.626678466796875e-05,
+        "peak_allocated": 22174486016,
+        "peak_reserved": 24006098944,
+        "gradient_relative_L2": 0.1114659305263357,
+        "gradient_cosine": 0.9937871705339343,
+        "gradient_sign_flips": 47045547,
+        "original_gradient_budget_bad": 13001,
+        "failed_parameter_tensors": 18,
+        "measured_parameters": 459,
+        "measured_coordinates": 1412912512,
+        "raw_images": 6,
+        "fp64_native": false,
+        "gradient_storage": "Original459shards remain on Ceph; not downloaded in this metadata audit."
+      },
+      {
+        "arm": "compensated",
+        "reported_loss": 10.786961555480957,
+        "evaluation_CE_fp32": 10.786977767944336,
+        "evaluation_CE_delta": 0.0004558563232421875,
+        "peak_allocated": 22174486016,
+        "peak_reserved": 24006098944,
+        "gradient_relative_L2": 0.05864034152038611,
+        "gradient_cosine": 0.9982807566726766,
+        "gradient_sign_flips": 24558516,
+        "original_gradient_budget_bad": 5110,
+        "failed_parameter_tensors": 9,
+        "measured_parameters": 459,
+        "measured_coordinates": 1412912512,
+        "raw_images": 6,
+        "fp64_native": false,
+        "gradient_storage": "Original459shards remain on Ceph; not downloaded in this metadata audit."
+      },
+      {
+        "arm": "residual",
+        "reported_loss": 10.786879539489746,
+        "evaluation_CE_fp32": 10.78705883026123,
+        "evaluation_CE_delta": 0.0005369186401367188,
+        "peak_allocated": 23381921280,
+        "peak_reserved": 25239224320,
+        "gradient_relative_L2": 0.058522230333668594,
+        "gradient_cosine": 0.998287954746228,
+        "gradient_sign_flips": 24567893,
+        "original_gradient_budget_bad": 4976,
+        "failed_parameter_tensors": 8,
+        "measured_parameters": 459,
+        "measured_coordinates": 1412912512,
+        "raw_images": 6,
+        "fp64_native": false,
+        "gradient_storage": "Original459shards remain on Ceph; not downloaded in this metadata audit."
+      },
+      {
+        "arm": "strict_reference",
+        "reported_loss": 10.786606788635254,
+        "evaluation_CE_fp32": 10.786521911621094,
+        "evaluation_CE_delta": 0.0,
+        "peak_allocated": 19352388608,
+        "peak_reserved": 26031947776
+      }
+    ],
+    "physical_updates": 0,
+    "acceptance": false,
+    "scope": "One fixed full24 B8T2048 initial weak sample; frozen source,originalmodel/data/RNG/tuners,unchanged old budgets. Main recomputes aggregates from all459measured rows and reads actual native images. No optimizer,performance,long-training,DDP or quality acceptance."
+  },
+  "tiny_finite": [
+    {
+      "arm": "direct",
+      "steps": 64,
+      "validation_CE": 4.6383878000076155,
+      "CE_difference": 0.00039736509369692197
+    },
+    {
+      "arm": "compensated",
+      "steps": 64,
+      "validation_CE": 4.6380973622882395,
+      "CE_difference": 0.00010692737432149713
+    },
+    {
+      "arm": "residual",
+      "steps": 64,
+      "validation_CE": 4.638413351683249,
+      "CE_difference": 0.0004229167693304836
+    },
+    {
+      "arm": "strict_reference",
+      "steps": 64,
+      "validation_CE": 4.6379904349139185,
+      "CE_difference": 0.0
+    }
+  ],
+  "tiny_finite_scope": "One initialization, synthetic train64/heldout8 batches, two-layer model. Not full-model, real-data quality, repeated-seed or original-error-budget acceptance. Reported scalar losses are preserved separately from higher-precision CPU re-evaluation of saved BF16 logits; investigate that discrepancy before interpreting tiny differences.",
+  "tiny_fresh_process_resume": {
+    "status": "DIRECT_BF16_FRESH_PROCESS_32_TO_64_RESTORE_VERIFIED",
+    "new_updates": 32,
+    "parameters": 43,
+    "model_optimizer_rng_byte_equal": true,
+    "per_step_loss_and_grad_norm_exact": true,
+    "validation_logits_exact_reported_by_frozen_checker": true,
+    "native_fp64": false,
+    "final_file_sha256": "3a8fb864ac987da6a2b06a889889e7076f398a563e684d3b10ac1ef6f274d7b8",
+    "scope": "Main local original-byte re-read and state comparison. Tiny same-precision research trajectory only. Original per-step full gradient arrays were not saved; no claim of their bytewise equality, cross-precision acceptance, full24 or DDP recovery."
+  },
+  "tiny_ddp": {
+    "status": "CROSS_WORLD_TINY_FIRST_UPDATE_VERIFIED",
+    "rows": [
+      {
+        "world_size": 1,
+        "gradients": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "norm_ratio": 1.0,
+          "failed_elements": 0,
+          "measured_elements": 1631750,
+          "budget": [
+            0.002,
+            0.02
+          ]
+        },
+        "updates": {
+          "max_abs": 0.0,
+          "relative_l2": 0.0,
+          "cosine": 1.0,
+          "norm_ratio": 1.0,
+          "failed_elements": 0,
+          "measured_elements": 1631750,
+          "budget": [
+            2e-06,
+            0.02
+          ]
+        },
+        "serial_reference_bytes_equal": true,
+        "source_verification_sha256": "27875ed85c4859470e41e4f2c42d328951265bb617025699db4a1ff6cf31555c"
+      },
+      {
+        "world_size": 8,
+        "gradients": {
+          "max_abs": 5.960464477539063e-08,
+          "relative_l2": 4.4905154832286785e-08,
+          "cosine": 0.9999999999999988,
+          "norm_ratio": 1.0000000013809414,
+          "failed_elements": 0,
+          "measured_elements": 1631750,
+          "budget": [
+            0.002,
+            0.02
+          ]
+        },
+        "updates": {
+          "max_abs": 3.725290298461914e-09,
+          "relative_l2": 6.100561159473946e-08,
+          "cosine": 0.9999999999999981,
+          "norm_ratio": 1.0000000000543792,
+          "failed_elements": 0,
+          "measured_elements": 1631750,
+          "budget": [
+            2e-06,
+            0.02
+          ]
+        },
+        "serial_reference_bytes_equal": true,
+        "source_verification_sha256": "d9c9c1dc5ecf4029c41a0d6f1f337e28fd90ded5bf5ed274287081625ec8973f"
+      },
+      {
+        "world_size": 16,
+        "gradients": {
+          "max_abs": 7.450580596923828e-08,
+          "relative_l2": 4.50509313104529e-08,
+          "cosine": 0.9999999999999991,
+          "norm_ratio": 0.9999999999773479,
+          "failed_elements": 0,
+          "measured_elements": 1631750,
+          "budget": [
+            0.002,
+            0.02
+          ]
+        },
+        "updates": {
+          "max_abs": 3.725290298461914e-09,
+          "relative_l2": 7.503065645540504e-08,
+          "cosine": 0.9999999999999972,
+          "norm_ratio": 0.9999999999653048,
+          "failed_elements": 0,
+          "measured_elements": 1631750,
+          "budget": [
+            2e-06,
+            0.02
+          ]
+        },
+        "serial_reference_bytes_equal": true,
+        "source_verification_sha256": "01467cef421731301b82f4c39eedd244f2bc23e75fc4f38d833ce9ae77c5c5f1"
+      }
+    ],
+    "global_input_slots": 224,
+    "global_valid_labels": 126,
+    "input_microbatches": 16,
+    "scope": "Same initial two-layer model and first global16microbatch/126label update only. Next recovery step uses different global sample sets across worlds and is not compared across worlds. Not the required full-model262144token strong-scaling or16384token/rank weak-scaling experiment."
+  },
+  "tiny_same_world_resume": [
+    {
+      "world": 1,
+      "ranks": 1,
+      "adam_calls_per_rank": 4,
+      "exact_next_step_model_optimizer_rng_gradients": true,
+      "ranks_share_identical_model_optimizer_gradients": true,
+      "native_image_instances": 6
+    },
+    {
+      "world": 8,
+      "ranks": 8,
+      "adam_calls_per_rank": 4,
+      "exact_next_step_model_optimizer_rng_gradients": true,
+      "ranks_share_identical_model_optimizer_gradients": true,
+      "native_image_instances": 48
+    },
+    {
+      "world": 16,
+      "ranks": 16,
+      "adam_calls_per_rank": 4,
+      "exact_next_step_model_optimizer_rng_gradients": true,
+      "ranks_share_identical_model_optimizer_gradients": true,
+      "native_image_instances": 96
+    }
+  ],
+  "jobs": {
+    "w1": "khdn-no64-ddp-w1-ffa8df3cb1fd",
+    "w8": "khdn-no64-ddp-w8-e01380a3b934",
+    "w16": "khdn-no64-ddp-w16-95001458abe2"
+  },
+  "retained_failed_attempt": {
+    "job": "khdn-no64-ddp-w8-4df8df5de52f",
+    "status": "FAILED",
+    "reason": "Full-training CLI rejected single scaling in an eight-rank tiny fixture.",
+    "model_updates": 0,
+    "all_owned_reaped": true,
+    "correction": "Use the frozen W1 tiny argument namespace; model/config/data/kernel/budgets unchanged."
+  },
+  "cost_samples_uncompressed_sha256": "4265cf5353f1c675288bbae8e593b789ab9c47992dee4f27c448c3d3e2f25e22",
+  "source_record_sha256": {
+    "cost-probe/verified.json": "e0183f1853f5d20943a825a3145528daa7ecbb5ad37f46fe27e4a643e9d187f0",
+    "full-zero/verified.json": "800b8f35c71b22a9ee7a828d68456be2d02ece4fccf3db87d3384ca1d94e0bd0",
+    "finite-tradeoff/verified.json": "104323b9259acfc813406914c6e80312bc93e8b670d7a3801465ccf7d0d3eb14",
+    "resume-study/verified.json": "bde5bd9b79bd9fc201270604fbdc16670fedf11e5e6fb2661e717b3271b14035",
+    "acceptance-v1/approval.json": "023b06cff1180c82726d73e1057869813c385eb1366ab2dfcbd1946dddd81bee",
+    "ddp-study/cross-world-verified.json": "fc9019a980da5dcfd18b631befd287cb61c3c53c3afb8d342d9fbcaabc8e5bfd",
+    "ddp-study/w1-raw/verified.json": "27875ed85c4859470e41e4f2c42d328951265bb617025699db4a1ff6cf31555c",
+    "ddp-study/w1-raw/rank0/files.json": "e9d630923d312768a71d2283822d67e68d61d27ce9c819c01c901b289393e5c0",
+    "ddp-study/w8-r2/raw/verified.json": "d9c9c1dc5ecf4029c41a0d6f1f337e28fd90ded5bf5ed274287081625ec8973f",
+    "ddp-study/w8-r2/raw/rank0/files.json": "e1c8ee2311a5f020046a683e63a3758bbf00e3d8203439bbaf296f235022d8a2",
+    "ddp-study/w8-r2/raw/rank1/files.json": "80b34e8107c58d650bccb511650ee3c2d1c4c88c1fccba68f2efa282ba9e16f7",
+    "ddp-study/w8-r2/raw/rank2/files.json": "950b94bb58555c6ec20ecfa8be4bf2fc60e34e2c02fb44aec527ab85e7610f7c",
+    "ddp-study/w8-r2/raw/rank3/files.json": "5b776a0087a9e8d10b944ad162d5dbd1412b9f84162ce56e640e46b1a139bfb3",
+    "ddp-study/w8-r2/raw/rank4/files.json": "adbc5817a58a82db93fbce31d07ab1151a670f8e243e823131f28a8092ed5706",
+    "ddp-study/w8-r2/raw/rank5/files.json": "1785257976f5504118ef12a00b933c9cc09143721d388f6bf4c778b07865ce48",
+    "ddp-study/w8-r2/raw/rank6/files.json": "20a7498d137af9f9f6b75c3bb023fb0246997787b370f105869559b1473b25c5",
+    "ddp-study/w8-r2/raw/rank7/files.json": "9c295d78483ca4d35ac727b8ce3dbd862ccb85e9c6c13620cec91750052543e1",
+    "ddp-study/w16/raw/verified.json": "01467cef421731301b82f4c39eedd244f2bc23e75fc4f38d833ce9ae77c5c5f1",
+    "ddp-study/w16/raw/rank0/files.json": "4fac9e941585b69503e7b93948d99872f2f2b396b2548863c4d33e2705a23678",
+    "ddp-study/w16/raw/rank1/files.json": "ed4de19cc88d8b6343aee21f99cb9d17ac70aecea793058bba4e78d12109a19b",
+    "ddp-study/w16/raw/rank2/files.json": "3dbb304785ac1891242f191bdd6f01c817d72cb210980b8ce857219618a201cf",
+    "ddp-study/w16/raw/rank3/files.json": "b6a0ad8b592c0d9912b25c6f229daa4cdd4f3e4019cea0543ac6986329397b09",
+    "ddp-study/w16/raw/rank4/files.json": "a1d350b02772db15564fdb670a60e13e7e0dbd838b16338345b5dc529d8d1d70",
+    "ddp-study/w16/raw/rank5/files.json": "3470f887154032d93f64841eda080a0e933ddb22bfdfcb922be1e8f4221a6211",
+    "ddp-study/w16/raw/rank6/files.json": "d9488ba4ce3a6eda16dd768384cc003482c724ce6814e654315962b9db035ff5",
+    "ddp-study/w16/raw/rank7/files.json": "3c0a453442cd1d810b6f33beb100689df4abd2f3311b7c838e1cfe8fa3fb7b58",
+    "ddp-study/w16/raw/rank8/files.json": "fd9f22863c6ae7d5354b2bbcf99e2c28153ffda5ca2e03a3f6906b6a59524808",
+    "ddp-study/w16/raw/rank9/files.json": "9be7bcccfcc45dd90991e5f2f0110f87154624ee11123ec4c01583c87a7decfb",
+    "ddp-study/w16/raw/rank10/files.json": "d6b7f28bc9efca55d1e70e3657ec4d14c0df03b521555751a6b555d3e05342bf",
+    "ddp-study/w16/raw/rank11/files.json": "44f62c7c6cd8339f4100434fe1c83f922877295efd2951f09b0443d7250e3338",
+    "ddp-study/w16/raw/rank12/files.json": "0a51cd5e31e07c96f971cc097277530b8dcafe0115cefc961b76bef206e59dfe",
+    "ddp-study/w16/raw/rank13/files.json": "e709940a5d8184e861d3822b3ad4810c4f1e4abd571cca7ec04851ff8f335cf4",
+    "ddp-study/w16/raw/rank14/files.json": "8564ebe10a03829ac30589522c1b8598519ff562a05a723d71f318b9cb9c3e25",
+    "ddp-study/w16/raw/rank15/files.json": "e535c837c9e34fdb19eaf12f4f33034efd75fe3262c3b2af388819d4b9a6ffe8",
+    "ddp-study/w8-raw/supervisor.json": "6e345451ede8f7c9f73568293aeced836092ba3794da920f44b2b42090922964",
+    "ddp-study/w16/release.json": "509ee672d542ec8a037fc3dbb6e25cf8596bd27ea98c280c6e336404aa0813e8",
+    "full-zero/probe-release.json": "fbf7801ea00a90eb6c74d2cd22bba82306d13d21bc117f61c8d44188bb8f9e15",
+    "cost-probe/execution/raw/execution.json": "bc127088b67e0e90df638125d3e49d9305eeabd972e471da1a1e8cc435addb8f",
+    "cost-probe/execution/raw/samples.json": "4265cf5353f1c675288bbae8e593b789ab9c47992dee4f27c448c3d3e2f25e22"
+  },
+  "artifact_scope": "Summaries and original cost observations. GPU probe archives, compiled images, complete logs and raw model tensors/checkpoints remain external research artifacts bound by the recorded hashes. The included summarizer recomputes cost statistics; it does not rerun GPU training or independently recreate tensor checks."
+}

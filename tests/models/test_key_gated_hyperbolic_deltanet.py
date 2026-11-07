@@ -13,6 +13,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+# autopep8: off
 pytest.importorskip('triton', reason='Actual FLA import requires the Triton runtime, including on CPU.')
 pytest.importorskip('transformers')
 
@@ -27,6 +28,8 @@ from fla.models import (
     KeyGatedHyperbolicDeltaNetPreTrainedModel,
 )
 from fla.models.cache_utils import Cache
+
+# autopep8: on
 
 
 def tiny_config(**kwargs):
@@ -375,3 +378,82 @@ def test_optimized_gradient_acceptance_rejects_suppressed_paths():
                     assert_parameter_gradient(name, reference * factor, reference)
             checked.append(name)
     assert len(checked) == 6
+
+
+@pytest.mark.parametrize('override', [
+    {}, {'precision_policy': 'strict'}, {'head_dim': 64}, {'group_size': 16},
+    {'carry_mode': 'y_carry'}, {'attn_mode': 'fused_recurrent'},
+])
+def test_c128_configuration_domain(tmp_path, override):
+    options = dict(hidden_size=256, head_dim=128, num_heads=2, num_hidden_layers=1,
+                   intermediate_size=512, vocab_size=97, chunk_size=128, group_size=32,
+                   precision_policy='bf16', attn_mode='chunk', carry_mode='no_carry')
+    options.update(override)
+    if override:
+        with pytest.raises(ValueError, match='C128'):
+            KeyGatedHyperbolicDeltaNetConfig(**options)
+        return
+    config = KeyGatedHyperbolicDeltaNetConfig(**options)
+    config.save_pretrained(tmp_path)
+    restored = KeyGatedHyperbolicDeltaNetConfig.from_pretrained(tmp_path)
+    model = KeyGatedHyperbolicDeltaNetForCausalLM(restored)
+    assert model.config.chunk_size == model.model.layers[0].attn.chunk_size == 128
+    assert model.model.layers[0].attn.precision_policy == 'bf16'
+
+
+def test_c128_native_model_update_and_restore(monkeypatch):
+    from benchmarks.fp32_adamw import FP32AdamW
+    from benchmarks.hyperbolic_benchmark_utils import _NoFP64Training
+    from fla.ops.key_gated_hyperbolic_delta_rule import chunk128, fused_prepare
+    from fla.utils import IS_NVIDIA, device
+
+    if not IS_NVIDIA:
+        pytest.skip('C128 native training requires NVIDIA CUDA.')
+    chunk128._require_runtime(torch.zeros((), device=device))
+    torch.manual_seed(42)
+    config = KeyGatedHyperbolicDeltaNetConfig(
+        hidden_size=256, head_dim=128, num_heads=2, num_hidden_layers=1, intermediate_size=512,
+        vocab_size=97, group_size=32, chunk_size=128, curvature=.6, learnable_curvature=True,
+        precision_policy='bf16', use_short_conv=False, fuse_norm=False, fuse_swiglu=False,
+        fuse_cross_entropy=False, use_cache=False,
+    )
+    calls = []
+    launch, prepare_launch = chunk128.launch, fused_prepare.launch
+
+    def observed(kernel, grid, args, telemetry, **kwargs):
+        calls.append(kernel.__name__)
+        return launch(kernel, grid, args, telemetry, **kwargs)
+
+    def observed_prepare(kernel, grid, args, **kwargs):
+        calls.append(kernel.__name__)
+        return prepare_launch(kernel, grid, args, **kwargs)
+
+    monkeypatch.setattr(chunk128, 'launch', observed)
+    monkeypatch.setattr(fused_prepare, 'launch', observed_prepare)
+    model = KeyGatedHyperbolicDeltaNetForCausalLM(config).to(device).train()
+    optimizer = FP32AdamW(model.parameters(), lr=1e-4, betas=(.9, .95))
+    ids = torch.randint(1, 97, (1, 129), device=device)
+
+    def update(current, opt):
+        opt.zero_grad(set_to_none=True)
+        with _NoFP64Training():
+            with torch.autocast('cuda', dtype=torch.bfloat16):
+                loss = current(ids, labels=ids, use_cache=False).loss
+            loss.backward()
+            assert torch.isfinite(loss)
+            assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in current.parameters())
+            opt.step()
+        return loss.detach()
+
+    update(model, optimizer)
+    restored = KeyGatedHyperbolicDeltaNetForCausalLM(config).to(device).train()
+    restored.load_state_dict(copy.deepcopy(model.state_dict()))
+    resumed = FP32AdamW(restored.parameters(), lr=1e-4, betas=(.9, .95))
+    resumed.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+    torch.testing.assert_close(update(model, optimizer), update(restored, resumed), atol=0, rtol=0)
+    for a, b in zip(model.parameters(), restored.parameters()):
+        torch.testing.assert_close(a, b, atol=0, rtol=0)
+        for key in ('step', 'exp_avg', 'exp_avg_sq'):
+            torch.testing.assert_close(optimizer.state[a][key], resumed.state[b][key], atol=0, rtol=0)
+    for name in ('preprocessing_fwd', 'preprocessing_bwd', 'state_fwd_kernel', 'state_bwd_kernel'):
+        assert calls.count(name) == 3

@@ -52,11 +52,13 @@ def compare_bf16(actual, expected, backward=False):
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize('packed', [False, True])
-@pytest.mark.parametrize('chunk,carry', [(16, 'no_carry'), (32, 'no_carry'), (16, 'y_carry')])
+@pytest.mark.parametrize('chunk,carry,length', [
+    (16, 'no_carry', 35), (32, 'no_carry', 35), (16, 'y_carry', 35), (128, 'no_carry', 129),
+])
 @pytest.mark.parametrize('cotangent', ['output', 'state', 'joint'])
 @pytest.mark.usefixtures('qualified_bf16')
-def test_bf16_chunk_sources(dtype, packed, chunk, carry, cotangent):
-    sources, cu = make_case(35, 128, 128, 32, dtype, packed=packed)
+def test_bf16_chunk_sources(dtype, packed, chunk, carry, length, cotangent):
+    sources, cu = make_case(length, 128, 128, 32, dtype, packed=packed)
     reference = tuple(x.detach().double().requires_grad_() for x in sources)
     expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
         *reference[:5], curvature=reference[6], initial_state=reference[5], output_final_state=True,

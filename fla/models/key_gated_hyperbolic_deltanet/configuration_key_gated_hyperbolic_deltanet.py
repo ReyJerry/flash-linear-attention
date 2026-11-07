@@ -84,14 +84,17 @@ class KeyGatedHyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         if (isinstance(group_size, bool) or not isinstance(group_size, int)
                 or group_size not in (1, 16, 32) or head_v_dim % group_size):
             raise ValueError('group_size must be 1, 16 or 32 and divide head_v_dim.')
-        if chunk_size not in (16, 32, 64) or attn_mode not in ('chunk', 'fused_recurrent', 'naive'):
-            raise ValueError('Unsupported attn_mode or chunk_size (expected 16, 32 or 64).')
+        if chunk_size not in (16, 32, 64, 128) or attn_mode not in ('chunk', 'fused_recurrent', 'naive'):
+            raise ValueError('Unsupported attn_mode or chunk_size (expected 16, 32, 64 or 128).')
         if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16'):
             raise ValueError('precision_policy must be strict, mixed_readout, bf16_fs6, or bf16.')
         if precision_policy == 'bf16' and attn_mode == 'naive':
             raise ValueError('bf16 precision requires a native chunk or fused_recurrent mode.')
         if precision_policy in ('mixed_readout', 'bf16_fs6') and attn_mode != 'chunk':
             raise ValueError('experimental precision requires attn_mode=chunk.')
+        if chunk_size == 128 and (precision_policy != 'bf16' or attn_mode != 'chunk'
+                                  or head_dim != 128 or head_v_dim != 128 or group_size != 32 or carry_mode != 'no_carry'):
+            raise ValueError('C128 requires BF16 chunk mode, K=V128, g32 and no_carry.')
         self.precision_policy = precision_policy
         if carry_mode not in ('no_carry', 'y_carry'):
             raise ValueError('carry_mode must be no_carry or y_carry.')

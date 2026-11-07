@@ -220,3 +220,49 @@ def test_compiled_policy_roundtrips_json_and_rejects_assembly_hash_drift():
     row['compiled_precision_inventory']['assembly_sha256']['ptx'] = 'b' * 64
     with pytest.raises(AssertionError, match='assembly hash'):
         attest_compiled_policy(row, 'mixed_readout')
+
+
+@pytest.mark.parametrize('options,accepted', [
+    ({'name': 'state_fwd_kernel', 'count': 3}, True),
+    ({'name': 'common_finish_tiles', 'count': 1}, True),
+    ({'name': 'inverse_offdiagonal_kernel', 'count': 6}, True),
+    ({'name': 'state_fwd_kernel', 'dtype': 'f32'}, False),
+    ({'name': 'common_finish_tiles', 'scalar': 'f64'}, False),
+    ({'name': 'unknown_kernel'}, False),
+])
+def test_c128_compiled_operand_and_control_policy(options, accepted):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    row = bf16_launch(**options)
+    row['arguments']['C'] = 128
+    if accepted:
+        attest_compiled_policy(row, 'bf16')
+    else:
+        with pytest.raises(AssertionError):
+            attest_compiled_policy(row, 'bf16')
+
+
+def test_c128_copy_stage_requires_real_load_store_evidence():
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    image = compiled('%x = tt.load %p : !tt.ptr<bf16>\ntt.store %q, %x : !tt.ptr<bf16>',
+                     'ld.global.u16 %r, [%p];\nst.global.u16 [%q], %r;')
+    with pytest.raises(AssertionError):
+        compiled_precision_inventory(image)
+    inventory = compiled_precision_inventory(image, allow_data_movement=True)
+    row = dict(kernel='gauge_collect', arguments=dict(C=128), kernel_source_sha256='b'*64,
+               compiled_precision_inventory=inventory)
+    attest_compiled_policy(row, 'bf16')
+    row['kernel'] = 'state_fwd_kernel'
+    with pytest.raises(AssertionError):
+        attest_compiled_policy(row, 'bf16')
+
+
+def test_c128_inverse_can_use_fp32_inline_assembly_without_arith_addf():
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    row = bf16_launch(name='inverse_offdiagonal_kernel', count=6)
+    raw = row['compiled_precision_inventory']['raw_assembly']
+    raw['ttir'] = '\n'.join(line for line in raw['ttir'].splitlines() if 'arith.mulf' not in line)
+    raw['ttir'] += '\n%sum = tt.elementwise_inline_asm "add.rn.f32 $0, $1, $2;" : f32, f32 -> f32'
+    row['compiled_precision_inventory'] = compiled_precision_inventory(compiled(raw['ttir'], raw['ptx']))
+    row['arguments']['C'] = 128
+    assert row['compiled_precision_inventory']['multiply_add_ir_dtypes'] == {}
+    attest_compiled_policy(row, 'bf16')

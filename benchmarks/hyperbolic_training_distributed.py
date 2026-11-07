@@ -298,6 +298,9 @@ def optimizer_groups(model, weight_decay):
 
 
 def make_optimizer(model, args):
+    if getattr(args, 'optimizer_backend', 'native') == 'fp32':
+        from benchmarks.fp32_adamw import FP32AdamW
+        return FP32AdamW(optimizer_groups(model, args.weight_decay), lr=args.lr, betas=(0.9, 0.95))
     return torch.optim.AdamW(optimizer_groups(model, args.weight_decay), lr=args.lr, betas=(0.9, 0.95),
                              fused=next(model.parameters()).is_cuda)
 
@@ -382,15 +385,19 @@ def checkpoint_contract(args, name, world_size):
     if os.environ.get('FLA_SOURCE_MANIFEST'):
         from benchmarks.hyperbolic_benchmark_utils import validated_source_snapshot
         snapshot = validated_source_snapshot(ROOT, os.environ['FLA_SOURCE_MANIFEST'])['snapshot_sha256']
-    return {'schema': 2, 'method': name, 'config': model_configuration(args, name), 'world_size': world_size,
-            'scaling': scaling_plan(args, world_size), 'data_seed': args.data_seed, 'layout': args.data_layout,
-            'batch': args.batch, 'seq_len': args.seq_len, 'cursor_unit': 'absolute_global_microbatch_offset',
-            'modes': args.modes, 'outer_checkpoint': not args.no_layer_checkpoint, 'use_reentrant': False,
-            'parameter_dtype': 'fp32', 'dtype': args.dtype, 'loss_backend': effective_loss_backend(args, name),
-            'backend_environment': policy, 'source_snapshot_sha256': snapshot, 'matmul_precision': torch.get_float32_matmul_precision(),
-            'allow_tf32': torch.backends.cuda.matmul.allow_tf32, 'torch_version': str(torch.__version__),
-            'lr': args.lr, 'weight_decay': args.weight_decay, 'clip_grad': args.clip_grad,
-            'memory_only': args.memory_only}
+    contract = {'schema': 2, 'method': name, 'config': model_configuration(args, name), 'world_size': world_size,
+                'scaling': scaling_plan(args, world_size), 'data_seed': args.data_seed, 'layout': args.data_layout,
+                'batch': args.batch, 'seq_len': args.seq_len, 'cursor_unit': 'absolute_global_microbatch_offset',
+                'modes': args.modes, 'outer_checkpoint': not args.no_layer_checkpoint, 'use_reentrant': False,
+                'parameter_dtype': 'fp32', 'dtype': args.dtype, 'loss_backend': effective_loss_backend(args, name),
+                'backend_environment': policy, 'source_snapshot_sha256': snapshot, 'matmul_precision': torch.get_float32_matmul_precision(),
+                'allow_tf32': torch.backends.cuda.matmul.allow_tf32, 'torch_version': str(torch.__version__),
+                'lr': args.lr, 'weight_decay': args.weight_decay, 'clip_grad': args.clip_grad,
+                'memory_only': args.memory_only}
+
+    if getattr(args, 'optimizer_backend', 'native') == 'fp32':
+        contract['optimizer_backend'] = 'triton_fp32_adamw_v1'
+    return contract
 
 
 def state_digest(value):
@@ -1182,7 +1189,8 @@ def run_benchmark(args, payload, benchmark):
                                'run_id': os.environ.get('TORCHELASTIC_RUN_ID'), 'pod_uid': os.environ.get('POD_UID'),
                                'image_digest': os.environ.get('IMAGE_DIGEST'), 'job_id': os.environ.get('JOB_ID')}
     payload['training_contract'].update(
-        optimizer='AdamW(fused on CUDA, betas=(0.9,0.95)); _no_weight_decay groups enforced after resume',
+        optimizer=(('FP32AdamW(device FP32 bias corrections)' if getattr(args, 'optimizer_backend', 'native') == 'fp32'
+                    else 'AdamW(fused on CUDA)') + '; betas=(0.9,0.95); _no_weight_decay groups enforced after resume'),
         loss='sum CE / (global valid shifted labels / world size); no extra accumulation division',
         timing_scope='aligned synchronized wall; DDP communication, clipping and optimizer included; '
                      'data/counts/zero_grad/health/reporting excluded; phases measured independently',

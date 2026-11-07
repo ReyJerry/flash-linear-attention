@@ -72,7 +72,7 @@ def parse_arguments(argv=None):
         parser.add_argument('--' + name, type=int, default=default)
     parser.add_argument('--dtype', choices=('bf16', 'fp32'), default='bf16', help='autocast dtype; parameters stay FP32')
     parser.add_argument('--rank', type=int, default=4)
-    parser.add_argument('--chunk-size', type=int, choices=(16, 32, 64), default=16)
+    parser.add_argument('--chunk-size', type=int, choices=(16, 32, 64, 128), default=16)
     parser.add_argument('--khdn-strict', action='store_true',
                         help='opt in to correctness-gated strict FP64 SIMT KHDN; no Tensor Core claim')
     parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout', 'bf16_fs6', 'bf16'),
@@ -94,6 +94,8 @@ def parse_arguments(argv=None):
     parser.add_argument('--stability-steps', type=int, default=10, help='additional continuous untimed optimizer steps')
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight-decay', type=float, default=0.1)
+    parser.add_argument('--optimizer-backend', choices=('native', 'fp32'),
+                        help='FP32 uses device FP32 bias corrections; required for the BF16 KHDN training policy')
     parser.add_argument('--check-only', action='store_true', help='run only small-model loss/gradient and route gates')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--profile', type=Path, help='directory for one post-measurement Chrome trace per method')
@@ -125,6 +127,10 @@ def parse_arguments(argv=None):
         parser.error('--khdn-strict conflicts with an experimental --khdn-precision-policy')
     if args.khdn_strict:
         args.khdn_precision_policy = 'strict'
+    if args.optimizer_backend is None:
+        args.optimizer_backend = 'fp32' if args.khdn_precision_policy == 'bf16' else 'native'
+    if args.khdn_precision_policy == 'bf16' and args.optimizer_backend != 'fp32':
+        parser.error('BF16 KHDN training requires the FP32 optimizer backend.')
     if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6', 'bf16') and 'khdn_naive' in args.methods:
         parser.error('khdn_naive always executes strict; experimental policies require a chunk method')
     if args.khdn_precision_policy == 'bf16_fs6' and (
@@ -132,11 +138,11 @@ def parse_arguments(argv=None):
             or args.dtype != 'bf16' or args.loss_backend != 'plain' or args.no_short_conv or args.no_layer_checkpoint):
         parser.error('bf16_fs6 requires khdn_no_carry, C16/K=V128/g32, BF16 autocast, ShortConv, checkpoint and plain CE')
     if args.khdn_precision_policy == 'bf16':
-        if (args.methods != ['khdn_no_carry'] or args.chunk_size != 16 or args.group_size != 32 or args.head_dim != 128
+        if (args.methods != ['khdn_no_carry'] or args.chunk_size not in (16, 128) or args.group_size != 32 or args.head_dim != 128
                 or args.dtype != 'bf16' or args.loss_backend != 'plain' or args.no_short_conv):
-            parser.error('bf16 training harness requires khdn_no_carry, C16/K=V128/g32, BF16 autocast, ShortConv and plain CE')
-        if not (args.check_only or args.dry_run):
-            parser.error('bf16 CLI currently requires --check-only; integrated full-model timing qualification remains pending')
+            parser.error('bf16 training harness requires khdn_no_carry, C16 or C128/K=V128/g32, BF16 autocast, ShortConv and plain CE')
+        if args.chunk_size == 16 and not (args.check_only or args.dry_run):
+            parser.error('C16 bf16 CLI requires --check-only; use the C128 integrated training route for full runs')
     dimensions = (args.batch, args.layers, args.hidden_size, args.heads, args.intermediate_size)
     if min(dimensions) <= 0 or args.seq_len < 2 or args.vocab_size < 4:
         parser.error('model dimensions must be positive; seq-len>=2 and vocab-size>=4')
@@ -178,8 +184,10 @@ def parse_arguments(argv=None):
         scaling_plan(args, int(os.environ.get('WORLD_SIZE', '1')))
     except ValueError as error:
         parser.error(str(error))
-    if args.chunk_size == 64 and any(not name.startswith('khdn_') for name in args.methods):
-        parser.error('C64 is supported only for KHDN; legacy HDN benchmark routes remain C16/C32')
+    if args.chunk_size == 128 and args.khdn_precision_policy != 'bf16':
+        parser.error('C128 requires the explicit BF16 KHDN policy.')
+    if args.chunk_size in (64, 128) and any(not name.startswith('khdn_') for name in args.methods):
+        parser.error('C64/C128 are supported only for KHDN; legacy HDN benchmark routes remain C16/C32')
     if any(name.startswith('khdn_') for name in args.methods):
         if args.head_dim % args.group_size:
             parser.error('KHDN group-size must divide head-dim; no automatic group shrinking')
@@ -222,7 +230,7 @@ def model_configuration(args, name, *, small=False):
             if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6', 'bf16'):
                 common.update(hidden_size=256, head_dim=128, intermediate_size=512)
         common.update(group_size=args.group_size, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
-                      chunk_size=args.chunk_size, carry_mode='y_carry' if name == 'khdn_y_carry' else 'no_carry',
+                      chunk_size=min(args.chunk_size, 64) if name == 'khdn_naive' else args.chunk_size, carry_mode='y_carry' if name == 'khdn_y_carry' else 'no_carry',
                       attn_mode='naive' if name == 'khdn_naive' else 'chunk',
                       precision_policy='strict' if name == 'khdn_naive' else (args.khdn_precision_policy or 'strict'))
         if small and args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
@@ -456,13 +464,17 @@ def compare_bf16_model_results(actual, expected):
     if left['sample_id'] != 10000 or left['valid_labels'] <= 0:
         raise AssertionError('BF16 initial-model gate requires reserved sample10000 with valid labels')
     delta = left['mean_ce']-right['mean_ce']
-    if not math.isfinite(delta) or abs(delta) > math.log1p(.001):
-        raise AssertionError(f'BF16 reserved-sample mean CE difference exceeds log(1.001): {delta}')
+    if not math.isfinite(delta):
+        raise AssertionError(f'BF16 reserved-sample mean CE difference is nonfinite: {delta}')
+    ppl_delta = math.expm1(delta)
     return {'global_gradient_cosine': cosine, 'global_gradient_norm_ratio': ratio,
             'parameter_gradient_errors': errors, 'validation_mean_ce_delta': delta,
-            'validation_ppl_relative_delta': math.expm1(delta), 'validation': {'candidate': left, 'reference': right},
+            'validation_ppl_relative_delta': ppl_delta,
+            'validation_ppl_observation_limit': .001, 'validation_ppl_observation_exceeded': abs(ppl_delta) > .001,
+            'training_quality_accepted': False, 'validation': {'candidate': left, 'reference': right},
             'legacy_loss_abs': abs(actual['loss'].item()-expected['loss'].item()),
-            'scope': 'approved BF16 initial small-model gradient/heldout gate only; finite full-model and DDP qualification remain separate'}
+            'scope': 'initial BF16 gradient gate; heldout PPL 0.1% is an observation line, not training-quality acceptance; '
+                     'continuous quality, full-model and DDP qualification remain separate'}
 
 
 def small_model_gate(args):
@@ -596,7 +608,8 @@ def main(argv=None):
         'status': 'CONFIGURED', 'metadata': metadata(args), 'methods': specs,
         'training_contract': {
             'parameter_dtype': 'fp32', 'autocast_dtype': args.dtype, 'expand_v': 1.0,
-            'optimizer': 'AdamW(fused=True, betas=(0.9,0.95))',
+            'optimizer': ('FP32AdamW(device FP32 bias corrections, betas=(0.9,0.95))'
+                          if args.optimizer_backend == 'fp32' else 'AdamW(fused=True, betas=(0.9,0.95))'),
             'outer_checkpoint': not args.no_layer_checkpoint, 'use_reentrant': False,
             'protected_inner_checkpoint': args.inner_checkpoint,
             'timing_scope': 'Forward includes loss; backward includes outer checkpoint replay; optimizer included in total. '

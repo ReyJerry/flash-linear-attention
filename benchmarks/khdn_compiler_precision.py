@@ -51,7 +51,7 @@ def _dot_types(ir):
     return rows
 
 
-def compiled_precision_inventory(compiled):
+def compiled_precision_inventory(compiled, *, allow_data_movement=False):
     """Return parsed instruction evidence; correctness and route qualification are separate gates."""
     assembly = getattr(compiled, 'asm', {})
     ir, ptx = assembly.get('ttir', ''), assembly.get('ptx', '')
@@ -59,7 +59,7 @@ def compiled_precision_inventory(compiled):
         raise AssertionError('KHDN precision inventory requires compiled TTIR and PTX')
     scalar_types = _parse_mlir_contraction_types(ir)
     dots = _dot_types(ir)
-    if not scalar_types and not dots:
+    if not scalar_types and not dots and not allow_data_movement:
         raise AssertionError('KHDN precision inventory found no supported multiply/add/dot IR operations')
     if any(dtype not in ('f16', 'bf16', 'f32', 'f64') for dtype in scalar_types):
         raise AssertionError('KHDN unrecognized compiled multiply/add dtype')
@@ -74,7 +74,11 @@ def compiled_precision_inventory(compiled):
     mma = [opcode for opcode in observed if re.fullmatch(
         r'(?:mma\.sync|wmma\.mma|wgmma\.mma_async|tcgen05\.mma)(?:\.[\w]+)+', opcode)]
     if not floating and not mma:
-        raise AssertionError('KHDN precision inventory found no supported PTX arithmetic instructions')
+        if not (allow_data_movement and re.search(r'\btt.load\b', _compiler_without_comments(ir))
+                and re.search(r'\btt.store\b', _compiler_without_comments(ir))
+                and any(op.startswith('ld.global.') for op in observed)
+                and any(op.startswith('st.global.') for op in observed)):
+            raise AssertionError('KHDN precision inventory found no supported PTX arithmetic instructions')
     casts = [line.strip() for line in _compiler_without_comments(ir).splitlines()
              if re.search(r'\barith\.(?:truncf|extf)\b', line)]
     return {'raw_assembly': {'ttir': ir, 'ptx': ptx}, 'ir_float_casts': casts,
@@ -116,7 +120,8 @@ def attest_compiled_policy(launch, precision_policy):
     if not re.fullmatch('[0-9a-f]{64}', launch.get('kernel_source_sha256', '')):
         raise AssertionError('KHDN missing/invalid kernel source hash')
     raw = inventory.get('raw_assembly', {})
-    parsed = compiled_precision_inventory(SimpleNamespace(asm=raw))
+    parsed = compiled_precision_inventory(SimpleNamespace(asm=raw), allow_data_movement=(
+        precision_policy == 'bf16' and launch['kernel'] == 'gauge_collect' and flags.get('C') == 128))
     for key in ('ttir_sha256', 'ptx_sha256', 'multiply_add_ir_dtypes', 'dot_operations',
                 'ptx_floating_opcodes', 'ptx_tensor_core_opcodes', 'ir_float_casts'):
         if json.dumps(inventory.get(key), sort_keys=True) != json.dumps(parsed[key], sort_keys=True):
@@ -151,14 +156,19 @@ def attest_compiled_policy(launch, precision_policy):
 
 
 def _attest_bf16_arithmetic(launch, inventory):
-    """Attest the measured C16/K=V128/g32 no-carry per-GEMM specialization."""
+    """Check C16 product counts or the source-bound C128 BF16/FP32 specialization."""
     counts = dict(common_base_fwd_kernel=0, common_interval_fwd_kernel=0, common_system_fwd_kernel=9,
                   group_fwd_kernel=3, group_af_fwd_kernel=0, state_fwd_kernel=9, output_fwd_kernel=6,
                   output_bwd_kernel=8, state_bwd_kernel=12, parameter_bwd_kernel=12,
                   gauge_bwd_kernel=0, common_matrix_bwd_kernel=24, common_interval_bwd_kernel=0)
     name, flags = launch['kernel'], launch['arguments']
-    if name not in counts or flags.get('C') != 16:
-        raise AssertionError('KHDN bf16 compiler gate currently covers C16 no-carry only')
+    c128 = flags.get('C') == 128
+    if c128:
+        from benchmarks.khdn_c128_trace import BACKWARD, FORWARD
+        if name not in (*FORWARD, *BACKWARD):
+            raise AssertionError('Unknown C128 computational kernel')
+    elif name not in counts or flags.get('C') != 16:
+        raise AssertionError('KHDN bf16 compiler gate requires C16 or C128 no-carry')
     if name in ('state_fwd_kernel', 'state_bwd_kernel'):
         expected = dict(K=128, G=32, KD=128, VD=128, GS=32, CARRY=False)
         if flags.get('MIXED', False) is not False or flags.get('BF16_FS6', False) is not False:
@@ -168,10 +178,12 @@ def _attest_bf16_arithmetic(launch, inventory):
     raw = inventory['raw_assembly']
     if re.search(r'\bf64\b|xf64\b', raw['ttir']) or re.search(r'\.f64\b', raw['ptx']):
         raise AssertionError('KHDN bf16 compiled FP64 type or instruction is forbidden')
-    if set(inventory['multiply_add_ir_dtypes']) != {'f32'}:
+    scalar_types = set(inventory['multiply_add_ir_dtypes'])
+    if (not scalar_types <= {'f32'} or (not c128 and scalar_types != {'f32'})
+            or (c128 and name == 'gauge_collect' and scalar_types)):
         raise AssertionError('KHDN bf16 scalar/control arithmetic must be FP32')
     dots, mma = inventory['dot_operations'], inventory['ptx_tensor_core_opcodes']
-    if len(dots) != counts[name] or any(
+    if (not c128 and len(dots) != counts[name]) or any(
         dot['operand_dtypes'] != ['bf16', 'bf16'] or dot['result_dtype'] != 'f32'
         or dot['max_num_imprecise_acc'] not in (None, 0) for dot in dots
     ):

@@ -444,7 +444,10 @@ def chunk_key_gated_hyperbolic_delta_rule(
     """
     _reset_telemetry(telemetry, precision_policy)
     if precision_policy == 'bf16':
-        from fla.ops.key_gated_hyperbolic_delta_rule.bf16 import chunk_bf16
+        if chunk_size == 128:
+            from fla.ops.key_gated_hyperbolic_delta_rule.chunk128 import chunk_bf16
+        else:
+            from fla.ops.key_gated_hyperbolic_delta_rule.bf16 import chunk_bf16
         return chunk_bf16(
             q=q, k=k, v=v, beta=beta, log_decay=log_decay, curvature=curvature,
             initial_state=initial_state, output_final_state=output_final_state, scale=scale,

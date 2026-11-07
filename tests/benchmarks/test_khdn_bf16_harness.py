@@ -26,6 +26,7 @@ FLAGS = ['--methods', 'khdn_no_carry', '--khdn-precision-policy', 'bf16', '--los
 
 def test_bf16_cli_and_small_model_keep_physical_geometry():
     args = benchmark.parse_arguments(FLAGS)
+    assert args.optimizer_backend == 'fp32'
     config = benchmark.model_configuration(args, 'khdn_no_carry', small=True)
     assert (config['hidden_size'], config['head_dim'], config['group_size']) == (256, 128, 32)
     assert config['learnable_curvature'] and config['precision_policy'] == 'bf16'
@@ -35,7 +36,7 @@ def test_bf16_cli_and_small_model_keep_physical_geometry():
 
 
 @pytest.mark.parametrize('extra', [
-    ['--dtype', 'fp32'], ['--group-size', '16'], ['--chunk-size', '32'], ['--no-short-conv'],
+    ['--optimizer-backend', 'native'], ['--dtype', 'fp32'], ['--group-size', '16'], ['--chunk-size', '32'], ['--no-short-conv'],
     ['--head-dim', '64', '--hidden-size', '1024'], ['--methods', 'khdn_y_carry'], ['--methods', 'khdn_naive'],
 ])
 def test_bf16_cli_rejects_unqualified_geometry(extra):
@@ -75,7 +76,7 @@ def test_bf16_model_gate_preserves_elementwise_failures_as_diagnostics():
     lambda row: row['gradients'].update(weight=None),
     lambda row: row.update(initial_weights_sha256='c'*64),
     lambda row: row.update(loss=torch.tensor(float('nan'))),
-    lambda row: row['validation'].update(mean_ce=4.01),
+    lambda row: row['validation'].update(mean_ce=float('nan')),
     lambda row: row['validation'].update(sample_id=0),
     lambda row: row['validation'].update(valid_labels=0),
     lambda row: row['validation'].update(batch_sha256='c'*64),
@@ -116,11 +117,16 @@ def test_bf16_tensor_guard_rejects_inputs_and_results():
     assert torch.ones(1, dtype=torch.float64).dtype == torch.float64
 
 
+@pytest.mark.parametrize('chunk_size', [16, 128])
 @pytest.mark.parametrize('checkpoint', [False, True])
-def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, monkeypatch):
+def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, chunk_size, monkeypatch):
     pytest.importorskip('triton')
+    from benchmarks.fp32_adamw import FP32AdamW
     from fla.models import KeyGatedHyperbolicDeltaNetConfig, KeyGatedHyperbolicDeltaNetForCausalLM
-    from fla.ops.key_gated_hyperbolic_delta_rule import bf16
+    if chunk_size == 128:
+        from fla.ops.key_gated_hyperbolic_delta_rule import chunk128 as bf16
+    else:
+        from fla.ops.key_gated_hyperbolic_delta_rule import bf16
     from fla.utils import IS_NVIDIA, device
     if not IS_NVIDIA:
         pytest.skip('Actual BF16 compiler/graph trace requires NVIDIA CUDA.')
@@ -131,16 +137,16 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
     torch.manual_seed(42)
     config = KeyGatedHyperbolicDeltaNetConfig(
         hidden_size=256, head_dim=128, num_heads=2, num_hidden_layers=2, intermediate_size=512,
-        vocab_size=97, group_size=32, chunk_size=16, curvature=.6, learnable_curvature=True,
+        vocab_size=97, group_size=32, chunk_size=chunk_size, curvature=.6, learnable_curvature=True,
         precision_policy='bf16', use_short_conv=True, fuse_norm=False, fuse_swiglu=False,
         fuse_cross_entropy=False, use_cache=False,
     )
     model = KeyGatedHyperbolicDeltaNetForCausalLM(config).to(device).train()
     if checkpoint:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
-    ids = torch.randint(1, 97, (2, 17), device=device)
+    ids = torch.randint(1, 97, (2, chunk_size + 1), device=device)
     original_forward = vars(bf16._ChunkBF16)['forward']
-    trace = utils.KHDNTrace(16, 32, 'no_carry', 2, 'bf16').bind_model(model)
+    trace = utils.KHDNTrace(chunk_size, 32, 'no_carry', 2, 'bf16').bind_model(model)
     trace.expected_checkpoint = checkpoint
     with utils.KHDNExceptionGuard('bf16') as guard, trace:
         with torch.autocast('cuda', dtype=torch.bfloat16):
@@ -181,15 +187,15 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
         mutate(row)
         with pytest.raises(AssertionError):
             utils.reparse_khdn_trace(altered, expected_source_binding=binding)
-    batch = training.Batch(dict(input_ids=ids, labels=ids), 32, 34, 34, 0,
+    batch = training.Batch(dict(input_ids=ids, labels=ids), 2*chunk_size, ids.numel(), ids.numel(), 0,
                            training.batch_digest(dict(input_ids=ids, labels=ids)))
     args = SimpleNamespace(khdn_precision_policy='bf16', no_layer_checkpoint=not checkpoint, dtype='bf16')
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = FP32AdamW(model.parameters(), lr=1e-4)
     records = []
     optimizer.zero_grad(set_to_none=True)
     with training.khdn_update_guard(args, 'khdn_no_carry', 'native_update', records,
                                     model=model, batches=[batch], source_binding=binding):
-        training.weighted_loss(model, batch, args, 32, 1).backward()
+        training.weighted_loss(model, batch, args, batch.valid_labels, 1).backward()
     assert records[-1]['positive_observation']['attested_before_optimizer_step']
     optimizer.step()
     for corruption in ('policy', 'batch_identity', 'missing_layer'):
@@ -215,3 +221,97 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
         for name, value in model.named_parameters():
             torch.testing.assert_close(value, before[name], atol=0, rtol=0)
     (tmp_path/'update-guards.json.gz').write_bytes(gzip.compress(json.dumps(records).encode(), mtime=0))
+
+
+def test_fp32_optimizer_factory_retains_parameter_group_policy(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    captured = {}
+
+    def construct(groups, **kwargs):
+        captured.update(groups=groups, **kwargs)
+        return captured
+
+    module = ModuleType('benchmarks.fp32_adamw')
+    module.FP32AdamW = construct
+    monkeypatch.setitem(sys.modules, 'benchmarks.fp32_adamw', module)
+    model = torch.nn.Linear(3, 2)
+    model.bias._no_weight_decay = True
+    args = SimpleNamespace(lr=1e-4, weight_decay=.1, optimizer_backend='fp32')
+    result = training.make_optimizer(model, args)
+    assert result is captured and result['lr'] == args.lr and result['betas'] == (.9, .95)
+    assert [group['weight_decay'] for group in result['groups']] == [.1, 0.]
+    assert result['groups'][0]['params'][0] is model.weight
+    assert result['groups'][1]['params'][0] is model.bias
+
+
+def test_c128_cli_and_explicit_reference_configuration():
+    args = benchmark.parse_arguments(FLAGS + ['--chunk-size', '128'])
+    actual = benchmark.model_configuration(args, 'khdn_no_carry', small=True)
+    oracle = benchmark.model_configuration(args, 'khdn_naive', small=True)
+    assert actual['chunk_size'] == 128 and actual['precision_policy'] == 'bf16'
+    assert oracle['chunk_size'] == 64 and oracle['attn_mode'] == 'naive'
+    assert args.optimizer_backend == 'fp32'
+    full = benchmark.parse_arguments([value for value in FLAGS if value != '--check-only'] + ['--chunk-size', '128'])
+    assert not full.check_only and full.chunk_size == 128 and full.optimizer_backend == 'fp32'
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'phase', 'inverse_level', 'mode', 'rho'])
+def test_c128_schedule_rejects_incomplete_or_wrong_specializations(mutation):
+    from collections import defaultdict
+
+    from benchmarks.khdn_c128_trace import BACKWARD, FORWARD, attest_schedule
+
+    seen = defaultdict(int)
+    launches = []
+    for name in (*FORWARD, *BACKWARD):
+        index = seen[name]
+        seen[name] += 1
+        args = dict(C=128)
+        if name == 'diagonal_inverse_kernel':
+            args['B'] = 16
+        if name == 'inverse_offdiagonal_kernel':
+            args.update(N=[16, 32, 64][index % 3], SINGLE=False)
+        if name in ('common_finish_tiles', 'shared_coefficients_bwd', 'common_products_bwd'):
+            args['MODE'] = index
+        if name in ('state_fwd_kernel', 'state_bwd_kernel'):
+            args['RHO_MATERIALIZED'] = False
+        launches.append(dict(kernel=name, phase='forward' if name in FORWARD else 'backward', arguments=args))
+    attest_schedule(launches, True)
+    if mutation == 'missing':
+        launches.pop()
+    elif mutation == 'duplicate':
+        launches.append(launches[-1])
+    elif mutation == 'phase':
+        launches[-1]['phase'] = 'forward'
+    elif mutation == 'inverse_level':
+        next(x for x in launches if x['kernel'] == 'inverse_offdiagonal_kernel')['arguments']['N'] = 64
+    elif mutation == 'mode':
+        next(x for x in launches if x['kernel'] == 'shared_coefficients_bwd')['arguments']['MODE'] = 3
+    elif mutation == 'rho':
+        next(x for x in launches if x['kernel'] == 'state_bwd_kernel')['arguments']['RHO_MATERIALIZED'] = True
+    with pytest.raises(AssertionError):
+        attest_schedule(launches, True)
+
+
+@pytest.mark.parametrize('relative_gap', [.001228, .01])
+def test_bf16_ppl_observation_preserves_excess_without_claiming_quality(relative_gap):
+    import math
+    actual, expected = parity_results()
+    actual['validation']['mean_ce'] = expected['validation']['mean_ce'] + math.log1p(relative_gap)
+    result = benchmark.compare_bf16_model_results(actual, expected)
+    assert result['validation_ppl_relative_delta'] == pytest.approx(relative_gap)
+    assert result['validation_ppl_observation_exceeded']
+    assert result['validation_ppl_observation_limit'] == .001
+    assert not result['training_quality_accepted']
+
+
+def test_checkpoint_contract_distinguishes_fp32_optimizer_from_native(monkeypatch):
+    monkeypatch.delenv('FLA_SOURCE_MANIFEST', raising=False)
+    args = benchmark.parse_arguments(['--methods', 'kda', '--optimizer-backend', 'fp32', '--check-only'])
+    current = training.checkpoint_contract(args, 'kda', 1)
+    args.optimizer_backend = 'native'
+    legacy = training.checkpoint_contract(args, 'kda', 1)
+    assert current.pop('optimizer_backend') == 'triton_fp32_adamw_v1'
+    assert 'optimizer_backend' not in legacy and current == legacy

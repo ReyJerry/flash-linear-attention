@@ -203,7 +203,7 @@ def test_fs6_kernel_contract_and_current_public_source_binding(request):
         assert binding[key] == retained[key]
     assert len(binding['jit_functions']) == 23
     assert utils._binding_hash(retained) == 'b97aa379fc039ad484cdcc107f17be28013d41090e262ebea3c3b18e0a793d95'
-    assert utils._binding_hash(binding) == '446aea25e9dbf2a632dbcf9649a3d0e8dc001acbb49d607e2d29b3dcac753c38'
+    assert utils._binding_hash(binding) == '80a1f5488e2d4534bac07dbf75b5dabd4ce9b458e571775db51c35886c4f6581'
     assert all(inspect.getsource(getattr(modules[1], name).fn).startswith('@triton.jit\n')
                for name in binding['jit_functions'])
 

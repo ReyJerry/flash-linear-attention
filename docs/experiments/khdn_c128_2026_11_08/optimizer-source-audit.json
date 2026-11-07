@@ -1,0 +1,21 @@
+{
+  "historical_source_finding": {
+    "status": "SOURCE_LEVEL_FP64_BIAS_CORRECTION_FOUND",
+    "torch": "2.9.0+cu128",
+    "worker": "mpi-1851700310-worker-3",
+    "source": "/opt/conda/lib/python3.11/site-packages/torch/include/ATen/native/cuda/fused_adam_utils.cuh",
+    "lines": {
+      "110": "C10_DEVICE __forceinline__ void operator()",
+      "115": "const double& beta1",
+      "116": "const double& beta2",
+      "130": "[&]() -> std::pair<double, double>",
+      "133": "const auto bias_correction1 = 1 - at::native::pow_(beta1, *step_count);",
+      "135": "const auto bias_correction2_sqrt = std::sqrt(bias_correction2);"
+    },
+    "scope": "Read actual installed CUDAheader. Prior tensor-dtype and customkernel checks did not certify whole-step absence of FP64. Not a SASS audit.",
+    "remedy": "Prepared explicitFP32AdamW;GPUimagescheckedbeforeexecution,CPUreferenceandresumechecksprepared;notyetGPUexecuted"
+  },
+  "current_backend": "benchmarks.fp32_adamw.FP32AdamW",
+  "current_evidence": "Public C128 CLI update/recovery results in observations.json.gz; executable optimizer AST bound to measured sources.",
+  "scope": "Historical native-optimizer finding is source-level, not an old native SASS audit."
+}

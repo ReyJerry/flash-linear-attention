@@ -1,5 +1,7 @@
 # KHDN device operator
 
+The strict implementation described below is the historical correctness route. BF16 training is selected explicitly with `precision_policy="bf16"`; it rejects unsupported inputs and never falls back to FP64.
+
 `chunk_key_gated_hyperbolic_delta_rule` implements the reviewed strict-past, positive-mass chunk graph in Triton. `no_carry` is the default. `y_carry` prepares shared next-block E/H coefficients, advances both S and Y, and folds E/H/target source derivatives into the next block's F owner. The public cache contains canonical S only. Calls reinitialize Y from S.
 
 This is an initial correctness implementation. Its device arithmetic is FP64, including when public inputs/outputs are FP32, BF16 or FP16. It is not an FP32 internal kernel or a Tensor Core performance result. The initial numerical evidence is recorded in `evidence/production-first-report.md`; the subsequent compiler-layout repair and its validation are recorded in `evidence/race-repair-report.md`.
@@ -49,3 +51,16 @@ Triton 3.5 can lower replicated FP64 reduction layouts to overlapping shared-mem
 For padded execution widths C/K/G, common storage is `11CK + 7C² + 5C` FP64 elements per chunk/head. Group preparation is `5C² + 3C` per chunk/head/group. Saved entry S/Y require `KG + CG` per chunk/head/group. Carry storage is `CK + C²` per chunk/head (also allocated on no_carry in this initial implementation). The reverse owner buffers require `4C² + 6CK + 5C` per chunk/head/group, plus one curvature owner. Metadata, original sources, public results and source gradients are additional.
 
 These buffers live through backward. Local output/mass/state residuals are recomputed from the saved S/Y and full-precision prepared coefficients; no rounded public output is used to reconstruct a residual. C1 recurrent saves all entry states. Relative decay uses a C-by-K register tile per left endpoint; there is no global C²K interval or interval-gradient scratch. Matrix multiply uses SIMT FP64 and can spill registers; compiler/profile data must guide any subsequent tiling or precision work. Live-buffer accounting is not a measured peak-memory or speed claim.
+
+
+## Experimental C128 BF16 execution
+
+The public chunk entry accepts `precision_policy="bf16", chunk_size=128, carry_mode="no_carry"` for K=128, mathematical group size 32, and V in {32, 64, 128}. The Layer/config entry supports K=V128. This path requires the pinned SM90/PyTorch/Triton runtime checked by `chunk128.py`; other chunk sizes retain their existing routes. The default precision and checkpoint schema are unchanged.
+
+C128 is the state execution chunk. Internal 16/32/64 tiles prepare its full block system; they do not advance canonical state through eight separate C16 updates. Output forward/backward and parameter VJPs run separately from the state scans. Hierarchical triangular inversion retains three BF16 products, while the main contractions use one BF16 product with FP32 accumulation. Canonical state, scalar controls and normalization remain FP32.
+
+The training Layer fuses query/key normalization, the Value transform, beta and Key-channel gates. Bounded gauges reconstruct the relative rho matrix from saved scales; inputs outside that bound retain the materialized FP32 representation. Source validation and finite checks remain active. Trainable curvature retains its source gradient; fixed curvature omits only work exclusively needed for that gradient.
+
+`benchmarks.fp32_adamw.FP32AdamW` provides device FP32 bias corrections, moments and updates for contiguous CUDA FP32 parameters with unscaled gradients. The training benchmark selects this optimizer for its BF16 KHDN policy; matched controls can select `--optimizer-backend fp32` explicitly. Optimizer writes advance tensor version counters, including after checkpoint restoration.
+
+C128 is still under qualification. The native small-model update/restore check passes, but current operator tests retain gradient elementwise failures on some dense/packed inputs. The C128 compiler trace and pre-update graph checks support checkpointed and non-checkpointed execution. Public CLI validation, continuous full-model quality, long training and distributed acceptance remain incomplete. Initial heldout PPL differences beyond 0.1% are recorded as observations; they do not by themselves establish or reject training quality. Research timing does not establish those qualifications.

@@ -1,0 +1,10 @@
+{
+  "files": {
+    "observations.json.gz": "ffbf653fca552ca3bdc2b14dde16a0083381e9c78b1c1ae94d17bb7c70644d84",
+    "source-binding.json": "6fc3ce9864339184089e4b5336e741b3e4072b220ca40b56af64738863e079a2",
+    "measured-sources.tar.gz": "5614b70609c3849901650b841513b7454122477e348ef61829d2e8c299d5fb2f",
+    "optimizer-source-audit.json": "c9a07e05c7a780ff3df570595096d0bc446785729d63e7961759319f45cbb321",
+    "summarize.py": "5d159d87548b6d4be0b2dab29add7311c618a05016c6358a9b27033e9cd877bc",
+    "README.md": "a2de14f071712a986946607d3c120f99abc65070d087bde53eeca71a498bd242"
+  }
+}

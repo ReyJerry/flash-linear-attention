@@ -66,7 +66,7 @@ The optional H20 GEMM backend only accelerates projection weight gradients. It d
 | Prefix backward      | Segmented parallel backward                                  | Sequential reverse traversal when its workspace budget is insufficient                  |
 | Canonical metadata   | Int32 sort keys when the key range fits                      | Int64 keys for larger ranges                                                            |
 
-The public and internal attention paths use deterministic backward, direct query loads and storage-rounded dot operands with FP32 accumulation. The FP64 naive formula and storage-aware references are used for validation and are not selected automatically in training. Missing or incompatible FlashAttention fails its preflight; PHBA does not silently switch to a CPU or dense implementation.
+The public and internal attention paths use deterministic backward, direct query loads and storage-rounded dot operands with FP32 accumulation. The FP64 mathematical reference (`naive_phba`) and storage-aware reference (`reference_a_chunkwise`) both live in `fla/ops/phba/naive.py` and are used for validation and are not selected automatically in training. Missing or incompatible FlashAttention fails its preflight; PHBA does not silently switch to a CPU or dense implementation.
 
 The retained fallbacks preserve the supported shape range under fixed workspace limits. For example, prefix reverse-state storage is `4 * Nc * H * M * D` bytes: at H=16, M=D=128 and chunk=128 it grows from 64 MiB for 8K tokens to 512 MiB for 64K tokens, exceeding the 256 MiB parallel-backward budget. Sequential reverse traversal avoids that additional buffer while preserving deterministic execution.
 

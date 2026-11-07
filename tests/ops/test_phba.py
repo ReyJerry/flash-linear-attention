@@ -9,8 +9,7 @@ import pytest
 import torch
 
 from fla.ops.phba import SequenceLengthPlan, chunk_phba
-from fla.ops.phba.reference import HostLayout, reference_a_chunkwise
-from fla.ops.phba.reference_float64 import highest_precision
+from fla.ops.phba.naive import HostLayout, highest_precision, reference_a_chunkwise
 from fla.ops.phba.routing import build_routes
 from fla.utils import IS_NVIDIA, assert_close, device, find_spec_cached
 
@@ -85,7 +84,7 @@ def test_rejected_geometry(chunk_size, topk):
 
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
 def test_prefix_final_state(dtype):
-    from fla.ops.phba.reference import gate_from_storage, local_cumsum, prefix_forward
+    from fla.ops.phba.naive import gate_from_storage, local_cumsum, prefix_forward
 
     torch.manual_seed(42)
     lengths = (65, 17)

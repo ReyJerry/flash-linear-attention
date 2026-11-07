@@ -161,7 +161,7 @@ def routing_scores(q_rope: torch.Tensor, centroids: torch.Tensor, layout: Routin
         c = centroids.to(q_rope.dtype).to(torch.float64)
         s = torch.einsum("thd,bhd->htb", q, c).to(torch.float32)
     else:
-        from fla.ops.phba.reference_float64 import highest_precision
+        from fla.ops.phba.naive import highest_precision
 
         with highest_precision():
             s = torch.einsum("thd,bhd->htb", q_rope.detach().float(), centroids.float())

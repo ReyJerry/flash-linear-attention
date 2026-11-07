@@ -40,11 +40,11 @@ def _delta_kernel(do, out, delta, T, sot, soh, sdt, sdh,
 @triton.jit(do_not_specialize=['T'])
 def _sparse_bwd_kernel(
     q, kmem, vmem, do, lse, delta, count, offset, rho, block_ptr, prefix_valid,
-    dq, dk, dv, T, scale,
+    dk, dv, T, scale,
     sqt, sqh, skt, skh, svt, svh, sdt, sdh,
     spb, spm, sph, sgb, sgm, sgh,
     H: tl.constexpr, D: tl.constexpr, M: tl.constexpr,
-    BC: tl.constexpr, BQ: tl.constexpr, BD: tl.constexpr, BRANCH: tl.constexpr, WRITE_DQ: tl.constexpr = True,
+    BC: tl.constexpr, BQ: tl.constexpr, BD: tl.constexpr, BRANCH: tl.constexpr,
 ):
     e = tl.program_id(0)
     block = e // H
@@ -99,9 +99,6 @@ def _sparse_bwd_kernel(
         ds_st = ds.to(qt.dtype)
         dk_acc += tl.dot(tl.trans(ds_st), qt, out_dtype=tl.float32) * scale
         dv_acc += tl.dot(tl.trans(prob.to(dot.dtype)), dot, out_dtype=tl.float32)
-        if WRITE_DQ:
-            dq_tile = tl.dot(ds_st, k, out_dtype=tl.float32) * scale
-            tl.atomic_add(dq + (t[:, None] * H + h) * D + d[None, :], dq_tile, qm)
     tl.store(dk + grad_addr, dk_acc, mm)
     tl.store(dv + grad_addr, dv_acc, mm)
 
@@ -143,34 +140,31 @@ class SparseGradients:
     dpv: torch.Tensor
 
 
-def launch_branch(q, k, v, dout, lse, delta, meta, block_ptr, prefix_valid, dq, dk, dv,
-                  *, branch, chunk_size, num_slots, bc=32, bq=16, write_dq=True):
+def launch_branch(q, k, v, dout, lse, delta, meta, block_ptr, prefix_valid, dk, dv,
+                  *, branch, chunk_size, num_slots, bc=32, bq=16):
     T, H, D = q.shape
     extent = chunk_size if branch == 0 else num_slots
     ps = k.stride()[:3] if branch else (0, 0, 0)
     gs = dk.stride()[:3] if branch else (0, 0, 0)
     _sparse_bwd_kernel[(meta.count.numel(), triton.cdiv(extent, bc), 1)](
         q, k, v, dout, lse, delta, meta.count, meta.offset, meta.rho, block_ptr, prefix_valid.view(torch.uint8),
-        dq, dk, dv, T, D ** -0.5,
+        dk, dv, T, D ** -0.5,
         q.stride(0), q.stride(1), k.stride(0), k.stride(1), v.stride(0), v.stride(1),
         dout.stride(0), dout.stride(1), *ps, *gs,
-        H=H, D=D, M=num_slots, BC=bc, BQ=bq, BD=max(16, triton.next_power_of_2(D)), BRANCH=branch, WRITE_DQ=write_dq,
+        H=H, D=D, M=num_slots, BC=bc, BQ=bq, BD=max(16, triton.next_power_of_2(D)), BRANCH=branch,
         num_warps=NUM_WARPS, num_stages=NUM_STAGES)
 
 
 def direct_sparse_backward(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, metadata,
                            block_ptr, prefix_valid, *, chunk_size, bc=32, bq=16, n_query_split=1,
-                           backward_mode='atomic', rtok=None, rstate=None, tape_plan=None):
+                           rtok=None, rstate=None, tape_plan=None):
     if n_query_split != 1:
         raise fail('n_query_split_unsupported', 'Sparse backward requires n_query_split=1')
     if bq not in (16, 32) or bc not in (16, 32, 64):
         raise fail('invalid_config', 'unsupported PHBA backward tiles')
     if not lse.is_contiguous() or not delta.is_contiguous():
         raise fail('non_contiguous_input', 'L/Delta must be contiguous [H,T]')
-    if backward_mode not in ('atomic', 'query_owner_deterministic'):
-        raise fail('invalid_config', f'unknown backward mode: {backward_mode}')
-    deterministic = backward_mode == 'query_owner_deterministic'
-    if deterministic and (rtok is None or rstate is None):
+    if rtok is None or rstate is None:
         raise fail('invalid_config', 'query-owner backward requires its saved forward routes')
     T, H, D = q_rope.shape
 
@@ -178,33 +172,31 @@ def direct_sparse_backward(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, m
         return torch.zeros((T, H, D), device=q_rope.device, dtype=torch.float32)
 
     def q_buffer():
-        return torch.empty((T, H, D), device=q_rope.device, dtype=torch.float32) if deterministic else z()
+        return torch.empty((T, H, D), device=q_rope.device, dtype=torch.float32)
 
     grads = SparseGradients(q_buffer(), z(), z(), q_buffer(), torch.zeros_like(pk, dtype=torch.float32),
                             torch.zeros_like(pv, dtype=torch.float32))
-    if deterministic:
-        from fla.ops.phba.plans import owner_tape_plan
-        if tape_plan is None:
-            tape_plan = owner_tape_plan(T, H, pk.shape[0], chunk_size, pk.shape[1], rtok.shape[-1],
-                                        rstate.shape[-1], bc, q_rope.element_size())
-        if tape_plan.enabled:
-            from fla.ops.phba.tape import backward_with_tape
-            return backward_with_tape(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, metadata,
-                                      block_ptr, prefix_valid, rtok, rstate, grads, tape_plan,
-                                      chunk_size=chunk_size, bc=bc, bq=bq)
+    from fla.ops.phba.plans import owner_tape_plan
+    if tape_plan is None:
+        tape_plan = owner_tape_plan(T, H, pk.shape[0], chunk_size, pk.shape[1], rtok.shape[-1],
+                                    rstate.shape[-1], bc, q_rope.element_size())
+    if tape_plan.enabled:
+        from fla.ops.phba.tape import backward_with_tape
+        return backward_with_tape(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, metadata,
+                                  block_ptr, prefix_valid, rtok, rstate, grads, tape_plan,
+                                  chunk_size=chunk_size, bc=bc, bq=bq)
     args = (dout, lse, delta)
     if metadata.tok is not None:
         launch_branch(q_rope, k_rope, v, *args, metadata.tok, block_ptr, prefix_valid,
-                      grads.dq_rope, grads.dk_rope, grads.dv, branch=0, chunk_size=chunk_size,
-                      num_slots=pk.shape[1], bc=bc, bq=bq, write_dq=not deterministic)
+                      grads.dk_rope, grads.dv, branch=0, chunk_size=chunk_size,
+                      num_slots=pk.shape[1], bc=bc, bq=bq)
     launch_branch(q_raw, pk, pv, *args, metadata.state, block_ptr, prefix_valid,
-                  grads.dq_raw, grads.dpk, grads.dpv, branch=1, chunk_size=chunk_size,
-                  num_slots=pk.shape[1], bc=bc, bq=bq, write_dq=not deterministic)
-    if deterministic:
-        from fla.ops.phba.query_owner import deterministic_sparse_dq
-        deterministic_sparse_dq(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, rtok, rstate,
-                                block_ptr, prefix_valid, chunk_size=chunk_size, bc=bc,
-                                outputs=(grads.dq_rope, grads.dq_raw))
+                  grads.dpk, grads.dpv, branch=1, chunk_size=chunk_size,
+                  num_slots=pk.shape[1], bc=bc, bq=bq)
+    from fla.ops.phba.query_owner import deterministic_sparse_dq
+    deterministic_sparse_dq(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, rtok, rstate,
+                            block_ptr, prefix_valid, chunk_size=chunk_size, bc=bc,
+                            outputs=(grads.dq_rope, grads.dq_raw))
     return grads
 
 

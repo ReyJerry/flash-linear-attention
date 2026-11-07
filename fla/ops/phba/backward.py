@@ -12,20 +12,18 @@ def attention_backward(ctx, dout, _dlse):
     from fla.ops.phba.metadata import BranchMetadata, DirectMetadata
 
     qr, qw, kr, v, pk, pv, out, lse, bp, valid, sc, so, sr, *token = ctx.saved_tensors
-    c, bc, bq, deterministic, backward_mode = ctx.settings
-    rtok = rstate = None
-    if backward_mode != 'atomic':
-        rtok, rstate = token[-2:]
-        token = token[:-2]
+    c, bc, bq = ctx.settings
+    rtok, rstate = token[-2:]
+    token = token[:-2]
     state = BranchMetadata(sc, so, sr, sr.numel())
     tok = BranchMetadata(*token, token[-1].numel()) if ctx.has_token else None
     metadata = DirectMetadata(tok, state, int(ctx.has_token))
     dout, _copy_bytes = prepare_grad_output(dout, out)
     dout = dout.contiguous()
     delta = compute_delta(dout, out)
-    local = local_backward(dout, qr, kr, v, out, lse, bp, ctx.batches, deterministic=deterministic)
+    local = local_backward(dout, qr, kr, v, out, lse, bp, ctx.batches, deterministic=True)
     sparse = direct_sparse_backward(qr, qw, kr, v, pk, pv, dout, lse, delta, metadata, bp, valid,
-                                    chunk_size=c, bc=bc, bq=bq, backward_mode=backward_mode, rtok=rtok, rstate=rstate,
+                                    chunk_size=c, bc=bc, bq=bq, rtok=rtok, rstate=rstate,
                                     tape_plan=getattr(ctx, 'owner_tape_plan', None))
     dq = merge_gradient(local[0], sparse.dq_rope, output_dtype=qr.dtype)
     dk = merge_gradient(local[1], sparse.dk_rope, output_dtype=kr.dtype)

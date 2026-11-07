@@ -36,23 +36,6 @@ def _count_kernel(route_ptr, count_ptr, T, K, stride_rh, stride_rt, H: tl.conste
     tl.atomic_add(count_ptr + e, 1, mask=valid)
 
 
-@triton.jit(do_not_specialize=["T", "K", "stride_rh", "stride_rt"])
-def _scatter_kernel(route_ptr, offset_ptr, cursor_ptr, rho_ptr, T, K, stride_rh, stride_rt, H: tl.constexpr,
-                    BT: tl.constexpr, KPAD: tl.constexpr):
-    pid_t = tl.program_id(0)
-    h = tl.program_id(1)
-    t = pid_t * BT + tl.arange(0, BT)
-    slot = tl.arange(0, KPAD)
-    m = (t < T)[:, None] & (slot < K)[None, :]
-    b = tl.load(route_ptr + h * stride_rh + t.to(tl.int64)[:, None] * stride_rt + slot[None, :], mask=m, other=-1)
-    valid = b >= 0
-    e = tl.where(valid, b, 0) * H + h
-    p = tl.atomic_add(cursor_ptr + e, 1, mask=valid)
-    base = tl.load(offset_ptr + e, mask=valid, other=0)
-    r = (t * H + h)[:, None] + tl.zeros([BT, KPAD], dtype=tl.int32)
-    tl.store(rho_ptr + (base + p).to(tl.int64), r, mask=valid)
-
-
 @dataclass(frozen=True)
 class BranchMetadata:
     count: torch.Tensor          # [Nc * H] int32
@@ -89,7 +72,6 @@ def _branch(
     kpad: int,
     *,
     scan_impl: str,
-    backward_mode: str = 'atomic',
     retain_slots: bool = False,
     sorted_counts: bool = False,
 ) -> BranchMetadata:
@@ -99,7 +81,7 @@ def _branch(
     cap = T * H * K
     if cap > INT32_MAX or nc * H + 1 > INT32_MAX:
         raise fail("int32_overflow", f"Rho 上界 T*H*K = {cap} 或 Nc*H 超出 int32")
-    if sorted_counts and backward_mode == 'query_owner_deterministic':
+    if sorted_counts:
         if scan_impl != 'torch_cumsum':
             raise fail('invalid_config', f'unsupported metadata scan: {scan_impl}')
         from fla.ops.phba.canonical import canonical_rho
@@ -108,47 +90,39 @@ def _branch(
     dev = route.device
     n_e = nc * H
     count = torch.zeros(n_e, dtype=torch.int32, device=dev)
-    cursor = torch.zeros(n_e, dtype=torch.int32, device=dev) if backward_mode == 'atomic' else None
     # Offset[0] = 0；不用标量写入（会同步）
     offset = torch.zeros(n_e + 1, dtype=torch.int32, device=dev)
-    rho = torch.empty(cap, dtype=torch.int32, device=dev) if backward_mode == 'atomic' else None
     grid = (triton.cdiv(T, META_BT), H)
     args = (T, K, route.stride(0), route.stride(1))
     _count_kernel[grid](route, count, *args, H=H, BT=META_BT, KPAD=kpad, num_warps=META_NUM_WARPS)
     if scan_impl != "torch_cumsum":
         raise fail("invalid_config", f"metadata_scan_impl = {scan_impl!r} is unsupported; use torch_cumsum")
     torch.cumsum(count, dim=0, dtype=torch.int32, out=offset[1:])
+    from fla.ops.phba.canonical import canonical_rho
+
     source_slots = None
-    if backward_mode == 'query_owner_deterministic':
-        from fla.ops.phba.canonical import canonical_rho
-        result = canonical_rho(route, nc, return_slots=retain_slots)
-        if retain_slots:
-            rho, source_slots = result
-        else:
-            rho = result
+    result = canonical_rho(route, nc, return_slots=retain_slots)
+    if retain_slots:
+        rho, source_slots = result
     else:
-        _scatter_kernel[grid](route, offset, cursor, rho, *args, H=H, BT=META_BT, KPAD=kpad, num_warps=META_NUM_WARPS)
+        rho = result
     return BranchMetadata(count=count, offset=offset, rho=rho, capacity=cap, source_slots=source_slots)
 
 
 def build_direct_metadata(rtok: torch.Tensor, rstate: torch.Tensor, nc: int, *,
-                          metadata_scan_impl: str = "torch_cumsum", backward_mode: str = 'atomic',
+                          metadata_scan_impl: str = "torch_cumsum",
                           retain_token_slots: bool = False, derived_state_layout=None) -> DirectMetadata:
     """Rtok [H, T, Kh]、Rstate [H, T, Ks = Kh + 1] → token / state 两套 block-major metadata。"""
     H, T, kh = rtok.shape
-    if retain_token_slots and backward_mode != 'query_owner_deterministic':
-        raise fail('invalid_config', 'forward slot reuse requires canonical deterministic metadata')
-    if backward_mode not in ('atomic', 'query_owner_deterministic'):
-        raise fail('invalid_config', f'unknown backward mode: {backward_mode}')
     if rstate.shape != (H, T, kh + 1):
         raise fail("invalid_shape", f"Rstate 必须是 [H, T, Kh + 1] = {(H, T, kh + 1)}，收到 {tuple(rstate.shape)}")
-    tok = _branch(rtok, nc, kpad_tok(kh), scan_impl=metadata_scan_impl, backward_mode=backward_mode,
+    tok = _branch(rtok, nc, kpad_tok(kh), scan_impl=metadata_scan_impl,
                   retain_slots=retain_token_slots, sorted_counts=derived_state_layout is not None) if kh > 0 else None
-    if derived_state_layout is not None and tok is not None and backward_mode == 'query_owner_deterministic':
+    if derived_state_layout is not None and tok is not None:
         from fla.ops.phba.derived_state import derive_state
         state = derive_state(tok, derived_state_layout, H, T * H * (kh + 1))
     else:
-        state = _branch(rstate, nc, kpad_state(kh + 1), scan_impl=metadata_scan_impl, backward_mode=backward_mode)
+        state = _branch(rstate, nc, kpad_state(kh + 1), scan_impl=metadata_scan_impl)
     return DirectMetadata(tok=tok, state=state, kh=kh)
 
 

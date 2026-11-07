@@ -28,7 +28,7 @@ def main():
     args = parse_args()
     stages = (
         (parallel, 'local_attention'), (parallel, 'build_window_metadata'),
-        (parallel, 'launch_gather'), (parallel, 'launch_history'), (parallel, 'launch_owner'),
+        (parallel, 'launch_history'), (parallel, 'launch_owner'),
         (prefix, '_prefix_forward'), (prefix, '_prefix_backward_pair'),
     )
     with ExitStack() as stack:

@@ -146,7 +146,7 @@ def test_routing_and_metadata(topk):
     assert torch.equal(token, expected_token)
     assert torch.equal(state, expected_state)
     metadata = build_direct_metadata(
-        token, state, layout.Nc, backward_mode='query_owner_deterministic',
+        token, state, layout.Nc,
         retain_token_slots=True, derived_state_layout=layout,
     )
     for route, actual in ((token, metadata.tok), (state, metadata.state)):

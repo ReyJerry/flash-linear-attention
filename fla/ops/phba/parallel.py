@@ -25,30 +25,16 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 @dataclass(frozen=True)
 class BlockMajorConfig:
     derive_state_metadata: bool = True
-    q_mode: str = 'indirect'
     window_tokens: int = 2048
     bq: int = 64
     bc: int = 32
     owner_br: int = 16
     workspace_budget_bytes: int = 256 * 1024 * 1024
     bq_backward: int = 16
-    fp32_partial: bool = False
     fa_segment_batch_max: int = 65535
     fa_rows_per_call_max: int = 1 << 20
-    fa_deterministic: bool = False
-    backward_mode: str = 'query_owner_deterministic'
 
     def __post_init__(self):
-        if self.backward_mode not in ('atomic', 'query_owner_deterministic'):
-            raise ValueError('unknown PHBA backward mode')
-        if type(self.fa_deterministic) is not bool:
-            raise ValueError('fa_deterministic must be bool')
-        if self.backward_mode == 'query_owner_deterministic':
-            object.__setattr__(self, 'fa_deterministic', True)
-        if self.q_mode not in ('indirect', 'cached'):
-            raise ValueError('q_mode must be indirect or cached')
-        if type(self.fp32_partial) is not bool:
-            raise ValueError('fp32_partial must be bool')
         for name in ('window_tokens', 'workspace_budget_bytes', 'fa_segment_batch_max', 'fa_rows_per_call_max'):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f'{name} must be a positive integer')
@@ -73,14 +59,13 @@ def workspace_plan(t, h, d, kh, nc, config):
     owner_capacity = triton.cdiv(w, config.owner_br) + min(w, nc) + 1
     metadata_bytes = 4 * (5 * experts + 2 + 2 * edges + 2 * task_capacity) if kh else 0
     partial_bytes = 4 * edges * (d + 2)
-    cache_bytes = 4 * edges * d if config.q_mode == 'cached' else 0
     owner_bytes = 12 * owner_capacity
-    total = metadata_bytes + partial_bytes + cache_bytes + owner_bytes
+    total = metadata_bytes + partial_bytes + owner_bytes
     if total > config.workspace_budget_bytes:
         raise fail('invalid_config', f'PHBA workspace {total} exceeds budget {config.workspace_budget_bytes}')
     return dict(window_tokens=w, edge_capacity=edges, expert_count=experts, task_capacity=task_capacity,
                 owner_capacity=owner_capacity, metadata_bytes=metadata_bytes, partial_bytes=partial_bytes,
-                q_cache_bytes=cache_bytes, workspace_bytes=total)
+                workspace_bytes=total)
 
 
 @triton.jit(do_not_specialize=['T', 'Q0', 'W', 'K', 'RH', 'RT'])
@@ -132,43 +117,22 @@ def _task_scatter(offset, task_count, task_offset, work_expert, work_edge, BQ: t
         tl.store(work_edge + start + tile, edge + tile * BQ, tile < count)
 
 
-@triton.jit(do_not_specialize=['E', 'EXPERTS'])
-def _gather_q(qr, qw, cache, rho, offset, E, EXPERTS, SQT, SQH, SWT, SWH,
-              H: tl.constexpr, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr):
-    edge = tl.program_id(0) * BT + tl.arange(0, BT)
-    nedge = tl.load(offset + EXPERTS)
-    valid = (edge < E) & (edge < nedge)
-    r = tl.load(rho + edge, valid, other=0)
-    t, h = (r // H).to(tl.int64), (r % H).to(tl.int64)
-    d = tl.arange(0, BD)
-    mask = valid[:, None] & (d < D)[None, :]
-    a = tl.load(qr + t[:, None] * SQT + h[:, None] * SQH + d[None, :], mask, other=0)
-    b = tl.load(qw + t[:, None] * SWT + h[:, None] * SWH + d[None, :], mask, other=0)
-    address = edge.to(tl.int64)[:, None] * (2 * D) + d[None, :]
-    tl.store(cache + address, a, mask)
-    tl.store(cache + address + D, b, mask)
-
-
 @triton.jit
-def _update(m, z, u, scores, values, FP32_PARTIAL: tl.constexpr):
+def _update(m, z, u, scores, values):
     maximum = tl.maximum(m, tl.max(scores, 1, keep_dims=True))
     maximum = tl.where(maximum == float('-inf'), 0.0, maximum)
     alpha = tl.where(z > 0, tl.exp(m - maximum), 0.0)
     p = tl.exp(scores - maximum)
-    if FP32_PARTIAL:
-        update = tl.dot(p, values.to(tl.float32), input_precision='ieee', out_dtype=tl.float32)
-    else:
-        update = tl.dot(p.to(values.dtype), values, out_dtype=tl.float32)
+    update = tl.dot(p.to(values.dtype), values, out_dtype=tl.float32)
     return maximum, alpha * z + tl.sum(p, 1, keep_dims=True), alpha * u + update
 
 
 @triton.jit(do_not_specialize=['T', 'EXPERTS'])
-def _history_partial(qr, qw, kr, v, pk, pv, cache, rho, offset, task_offset, work_expert, work_edge,
+def _history_partial(qr, qw, kr, v, pk, pv, rho, offset, task_offset, work_expert, work_edge,
                      bp, prefix_valid, pm, pz, pu, T, EXPERTS, SCALE,
                      SQT, SQH, SWT, SWH, SKT, SKH, SVT, SVH, SPB, SPM, SPH,
                      H: tl.constexpr, D: tl.constexpr, M: tl.constexpr, C: tl.constexpr,
-                     BQ: tl.constexpr, BC: tl.constexpr, BD: tl.constexpr, CACHED: tl.constexpr,
-                     FP32_PARTIAL: tl.constexpr):
+                     BQ: tl.constexpr, BC: tl.constexpr, BD: tl.constexpr):
     task = tl.program_id(0)
     if task >= tl.load(task_offset + EXPERTS):
         return
@@ -182,13 +146,8 @@ def _history_partial(qr, qw, kr, v, pk, pv, cache, rho, offset, task_offset, wor
     t = (r // H).to(tl.int64)
     d = tl.arange(0, BD)
     qm = valid[:, None] & (d < D)[None, :]
-    if CACHED:
-        q_address = pos.to(tl.int64)[:, None] * (2 * D) + d[None, :]
-        qrt = tl.load(cache + q_address, qm, other=0)
-        qwt = tl.load(cache + q_address + D, qm, other=0)
-    else:
-        qrt = tl.load(qr + t[:, None] * SQT + head * SQH + d[None, :], qm, other=0)
-        qwt = tl.load(qw + t[:, None] * SWT + head * SWH + d[None, :], qm, other=0)
+    qrt = tl.load(qr + t[:, None] * SQT + head * SQH + d[None, :], qm, other=0)
+    qwt = tl.load(qw + t[:, None] * SWT + head * SWH + d[None, :], qm, other=0)
     m = tl.full((BQ, 1), float('-inf'), tl.float32)
     z = tl.zeros((BQ, 1), tl.float32)
     u = tl.zeros((BQ, BD), tl.float32)
@@ -202,7 +161,7 @@ def _history_partial(qr, qw, kr, v, pk, pv, cache, rho, offset, task_offset, wor
         vt = tl.load(v + ix.to(tl.int64)[:, None] * SVT + head * SVH + d[None, :], mask, other=0)
         score = tl.dot(qrt, tl.trans(kt), out_dtype=tl.float32) * SCALE
         score = tl.where(valid[:, None] & memory[None, :], score, float('-inf'))
-        m, z, u = _update(m, z, u, score, vt, FP32_PARTIAL)
+        m, z, u = _update(m, z, u, score, vt)
     if tl.load(prefix_valid + block) != 0:
         for k0 in range(0, M, BC):
             slot = k0 + lane
@@ -212,7 +171,7 @@ def _history_partial(qr, qw, kr, v, pk, pv, cache, rho, offset, task_offset, wor
             vt = tl.load(pv + address, mask, other=0)
             score = tl.dot(qwt, tl.trans(kt), out_dtype=tl.float32) * SCALE
             score = tl.where(valid[:, None] & (slot < M)[None, :], score, float('-inf'))
-            m, z, u = _update(m, z, u, score, vt, FP32_PARTIAL)
+            m, z, u = _update(m, z, u, score, vt)
     tl.store(pm + pos.to(tl.int64)[:, None], m, valid[:, None])
     tl.store(pz + pos.to(tl.int64)[:, None], z, valid[:, None])
     tl.store(pu + pos.to(tl.int64)[:, None] * D + d[None, :], u, qm)
@@ -222,7 +181,7 @@ def _history_partial(qr, qw, kr, v, pk, pv, cache, rho, offset, task_offset, wor
 def _owner_merge(qw, pk, pv, oloc, lloc, edge_pos, pm, pz, pu, owner_block, owner_start, owner_end,
                  prefix_valid, out, lse, T, Q0, K, SCALE, SWT, SWH, SPB, SPM, SPH,
                  H: tl.constexpr, D: tl.constexpr, M: tl.constexpr, BR: tl.constexpr, BC: tl.constexpr,
-                 BD: tl.constexpr, HISTORY: tl.constexpr, FP32_PARTIAL: tl.constexpr):
+                 BD: tl.constexpr, HISTORY: tl.constexpr):
     work, head = tl.program_id(0), tl.program_id(1).to(tl.int64)
     block = tl.load(owner_block + work)
     start, end = tl.load(owner_start + work), tl.load(owner_end + work)
@@ -245,7 +204,7 @@ def _owner_merge(qw, pk, pv, oloc, lloc, edge_pos, pm, pz, pu, owner_block, owne
             vt = tl.load(pv + address, mm, other=0)
             score = tl.dot(q, tl.trans(kt), out_dtype=tl.float32) * SCALE
             score = tl.where(valid[:, None] & (slot < M)[None, :], score, float('-inf'))
-            m, z, u = _update(m, z, u, score, vt, FP32_PARTIAL)
+            m, z, u = _update(m, z, u, score, vt)
     if HISTORY:
         for slot in range(K):
             row_edge = ((t - Q0) * H + head) * K + slot
@@ -266,7 +225,7 @@ def _owner_merge(qw, pk, pv, oloc, lloc, edge_pos, pm, pz, pu, owner_block, owne
 
 
 class WindowWorkspace:
-    def __init__(self, plan, d, dtype, device):
+    def __init__(self, plan, d, device):
         self.plan = plan
         e, n, tasks = plan['edge_capacity'], plan['expert_count'], plan['task_capacity']
         self.count = torch.zeros(n if e else 0, dtype=torch.int32, device=device)
@@ -281,7 +240,6 @@ class WindowWorkspace:
         self.pm = torch.empty(e, dtype=torch.float32, device=device)
         self.pz = torch.empty_like(self.pm)
         self.pu = torch.empty((e, d), dtype=torch.float32, device=device)
-        self.cache = torch.empty((e, 2, d) if plan['q_cache_bytes'] else (0,), dtype=dtype, device=device)
         self.owner_block = torch.empty(plan['owner_capacity'], dtype=torch.int32, device=device)
         self.owner_start = torch.empty_like(self.owner_block)
         self.owner_end = torch.empty_like(self.owner_block)
@@ -399,25 +357,16 @@ def build_window_metadata(rtok, layout, q0, q1, ws, config, *, canonical_token=N
     return len(owners[0])
 
 
-def launch_gather(qr, qw, ws):
-    t, h, d = qr.shape
-    _gather_q[(triton.cdiv(ws.plan['edge_capacity'], 16),)](
-        qr, qw, ws.cache, ws.rho, ws.offset, ws.plan['edge_capacity'], ws.plan['expert_count'],
-        qr.stride(0), qr.stride(1), qw.stride(0), qw.stride(1), H=h, D=d,
-        BD=triton.next_power_of_2(d), BT=16, num_warps=4)
-
-
 def launch_history(qr, qw, kr, v, pk, pv, layout, ws, config):
     t, h, d = qr.shape
     _history_partial[(ws.plan['task_capacity'],)](
-        qr, qw, kr, v, pk, pv, ws.cache if config.q_mode == 'cached' else qr, ws.rho, ws.offset,
+        qr, qw, kr, v, pk, pv, ws.rho, ws.offset,
         ws.task_offset, ws.work_expert, ws.work_edge, layout.block_ptr, layout.prefix_valid.view(torch.uint8),
         ws.pm, ws.pz, ws.pu, t, ws.plan['expert_count'], d ** -0.5,
         qr.stride(0), qr.stride(1), qw.stride(0), qw.stride(1), kr.stride(0), kr.stride(1),
         v.stride(0), v.stride(1), pk.stride(0), pk.stride(1), pk.stride(2),
         H=h, D=d, M=pk.shape[1], C=layout.chunk_size, BQ=config.bq, BC=config.bc,
-        BD=triton.next_power_of_2(d), CACHED=config.q_mode == 'cached',
-        FP32_PARTIAL=config.fp32_partial, num_warps=4, num_stages=1)
+        BD=triton.next_power_of_2(d), num_warps=4, num_stages=1)
 
 
 def launch_owner(qw, pk, pv, oloc, lloc, layout, ws, config, q0, kh, owners, out, lse):
@@ -427,7 +376,7 @@ def launch_owner(qw, pk, pv, oloc, lloc, layout, ws, config, q0, kh, owners, out
         ws.owner_block, ws.owner_start, ws.owner_end, layout.prefix_valid.view(torch.uint8), out, lse,
         t, q0, kh, d ** -0.5, qw.stride(0), qw.stride(1), pk.stride(0), pk.stride(1), pk.stride(2),
         H=h, D=d, M=pk.shape[1], BR=config.owner_br, BC=config.bc, BD=triton.next_power_of_2(d),
-        HISTORY=kh > 0, FP32_PARTIAL=config.fp32_partial, num_warps=4, num_stages=1)
+        HISTORY=kh > 0, num_warps=4, num_stages=1)
 
 
 def validate_inputs(qr, qw, kr, v, pk, pv, rtok, layout):
@@ -471,7 +420,7 @@ def block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, *, config=BlockMajo
             raise ValueError('invalid canonical route-slot metadata')
         if plan['workspace_bytes'] + slots.numel() * slots.element_size() > config.workspace_budget_bytes:
             raise ValueError('canonical reuse exceeds forward workspace budget')
-    ws = WindowWorkspace(plan, d, qr.dtype, qr.device)
+    ws = WindowWorkspace(plan, d, qr.device)
     if ws.bytes() != plan['workspace_bytes']:
         raise RuntimeError('workspace allocation does not match budget plan')
     out, lse = torch.empty_like(qr), torch.empty((h, t), dtype=torch.float32, device=qr.device)
@@ -483,8 +432,6 @@ def block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, *, config=BlockMajo
         q1 = min(q0 + plan['window_tokens'], t)
         owners = build_window_metadata(rtok, layout, q0, q1, ws, config, canonical_token=canonical_token)
         if kh:
-            if config.q_mode == 'cached':
-                launch_gather(qr, qw, ws)
             launch_history(qr, qw, kr, v, pk, pv, layout, ws, config)
         launch_owner(qw, pk, pv, oloc, lloc, layout, ws, config, q0, kh, owners, out, lse)
     return out, lse
@@ -500,13 +447,12 @@ class BlockMajorAttentionFn(torch.autograd.Function):
         if needs_backward is None:
             needs_backward = any(ctx.needs_input_grad[:6])
         retain_slots = False
-        if needs_backward and config.backward_mode == 'query_owner_deterministic' and rtok.shape[-1] > 0:
+        if needs_backward and rtok.shape[-1] > 0:
             t, h, d = qr.shape
             estimate = workspace_plan(t, h, d, rtok.shape[-1], layout.Nc, config)
             retain_slots = estimate['workspace_bytes'] + rtok.numel() <= config.workspace_budget_bytes
         meta = build_direct_metadata(
             rtok, rstate, layout.Nc,
-            backward_mode=config.backward_mode,
             retain_token_slots=retain_slots,
             derived_state_layout=layout if config.derive_state_metadata else None,
         ) if needs_backward else None
@@ -514,14 +460,11 @@ class BlockMajorAttentionFn(torch.autograd.Function):
                                        canonical_token=meta.tok if retain_slots else None)
         ctx.mark_non_differentiable(lse)
         if needs_backward:
-            ctx.settings = (layout.chunk_size, config.bc, config.bq_backward, config.fa_deterministic,
-                            config.backward_mode)
+            ctx.settings = (layout.chunk_size, config.bc, config.bq_backward)
             from fla.ops.phba.plans import owner_branch_tape_plan
-            ctx.owner_tape_plan = (
-                owner_branch_tape_plan(
-                    qr.shape[0], qr.shape[1], layout.Nc, layout.chunk_size,
-                    pk.shape[1], rtok.shape[-1], rstate.shape[-1], config.bc, qr.element_size(),
-                ) if config.backward_mode == 'query_owner_deterministic' else None
+            ctx.owner_tape_plan = owner_branch_tape_plan(
+                qr.shape[0], qr.shape[1], layout.Nc, layout.chunk_size,
+                pk.shape[1], rtok.shape[-1], rstate.shape[-1], config.bc, qr.element_size(),
             )
             ctx.batches = _local_fa_batches(layout.block_ptr_host, layout.chunk_size,
                                             config.fa_segment_batch_max, config.fa_rows_per_call_max)
@@ -530,8 +473,7 @@ class BlockMajorAttentionFn(torch.autograd.Function):
                      meta.state.count, meta.state.offset, meta.state.rho]
             if ctx.has_token:
                 saved.extend((meta.tok.count, meta.tok.offset, meta.tok.rho))
-            if config.backward_mode == 'query_owner_deterministic':
-                saved.extend((rtok, rstate))
+            saved.extend((rtok, rstate))
             ctx.save_for_backward(*saved)
         return out, lse
 
@@ -548,7 +490,5 @@ class BlockMajorAttentionFn(torch.autograd.Function):
 def block_major_attention(qr, qw, kr, v, pk, pv, rtok, rstate, layout, *, config=BlockMajorConfig()):
     if rstate.shape != (*rtok.shape[:2], rtok.shape[-1] + 1):
         raise ValueError('Rstate width differs from Kh+1')
-    if config.backward_mode == 'query_owner_deterministic':
-        needs_backward = torch.is_grad_enabled() and any(x.requires_grad for x in (qr, qw, kr, v, pk, pv))
-        return BlockMajorAttentionFn.apply(qr, qw, kr, v, pk, pv, rtok, rstate, layout, config, needs_backward)
-    return BlockMajorAttentionFn.apply(qr, qw, kr, v, pk, pv, rtok, rstate, layout, config)
+    needs_backward = torch.is_grad_enabled() and any(x.requires_grad for x in (qr, qw, kr, v, pk, pv))
+    return BlockMajorAttentionFn.apply(qr, qw, kr, v, pk, pv, rtok, rstate, layout, config, needs_backward)

@@ -15,8 +15,7 @@ from torch import nn
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
 from fla.ops.phba import chunk_phba
-from fla.ops.phba.backends.cublaslt import exact_backend
-from fla.ops.phba.linear import _Linear
+from fla.ops.phba.backends.cublaslt import _Linear, exact_backend
 from fla.ops.phba.plans import _resolve_length_plan
 
 

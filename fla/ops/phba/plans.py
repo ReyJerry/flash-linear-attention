@@ -20,12 +20,12 @@ from fla.ops.phba.utils import fail
 
 MIN_DOT = 16
 INT32_MAX = 2**31 - 1
-# FA varlen 把 batch 放在 grid 的 y 维
+# FA varlen uses the grid y dimension for the batch
 FA_SEGMENT_BATCH_LIMIT = 65535
 # KPAD_tok <= 16
 MAX_KH = 15
 CHUNKWISE_VALIDATED_C = (32, 64, 128, 256, 512)
-# chunk_state backward 的 Triton 路径只支持 K <= 128、V <= 128
+# prefix backward supports state and value widths up to128
 CHUNKWISE_TRAIN_MAX_M = 128
 CHUNKWISE_TRAIN_MAX_DH = 128
 PREFIX_REVERSE_WORKSPACE_CAP = 256 * 1024**2
@@ -47,12 +47,12 @@ def next_pow2(x: int) -> int:
 
 
 def kpad_tok(kh: int) -> int:
-    """token route 的 slot tile：Kh <= 1 时为 1，否则 next_pow2(Kh)。"""
+    """Round the token-route width to a power of two, with a minimum tile width of one."""
     return 1 if kh <= 1 else next_pow2(kh)
 
 
 def kpad_state(ks: int) -> int:
-    """state route 的 slot tile：next_pow2(Ks)。不能由 KPAD_tok 推出（Kh = 3 / 4 时 KPAD_tok 都是 4）。"""
+    """Round state-route width independently; token-route padding cannot determine it."""
     return next_pow2(ks)
 
 
@@ -224,46 +224,40 @@ def owner_branch_tape_plan(t: int, h: int, nc: int, c: int, m: int, kh: int, ks:
     return min(choices, key=lambda row: row[0])[1] if choices else fallback
 
 
-def fa_head_dim_round(dh: int) -> int:
-    """flash-attn 2.8.3 mha_varlen_bwd：round_multiple(Dh, Dh <= 128 ? 32 : 64)。"""
-    m = 32 if dh <= 128 else 64
-    return cdiv(dh, m) * m
-
-
 def _require_int(name: str, value: Any, *, minimum: int = 1) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise fail("invalid_config", f"{name} 必须是 int，收到 {type(value).__name__}")
+        raise fail("invalid_config", f"{name} must be an int, got {type(value).__name__}")
     if value < minimum:
-        raise fail("invalid_config", f"{name} 必须 >= {minimum}，收到 {value}")
+        raise fail("invalid_config", f"{name} must be >= {minimum}, got {value}")
     return value
 
 
 def _check_int32(reason_detail: str, value: int) -> None:
     if value > INT32_MAX:
-        raise fail("int32_overflow", f"{reason_detail} = {value} 超出 int32", quantity=reason_detail, value=value)
+        raise fail("int32_overflow", f"{reason_detail} = {value} exceeds int32", quantity=reason_detail, value=value)
 
 
 def _validate_cu_seqlens_host(cu: Sequence[int]) -> tuple[int, ...]:
     values = tuple(cu)
     if len(values) < 2:
-        raise fail("invalid_cu_seqlens", "cu_seqlens 至少需要 2 个元素（Nseq > 0）；空 batch 在入口拒绝")
+        raise fail("invalid_cu_seqlens", "cu_seqlens must contain at least two elements; empty batches are unsupported")
     for v in values:
         if isinstance(v, bool) or not isinstance(v, int):
-            raise fail("invalid_cu_seqlens", f"cu_seqlens_host 只能包含 int，收到 {type(v).__name__}")
+            raise fail("invalid_cu_seqlens", f"cu_seqlens_host must contain ints, got {type(v).__name__}")
     if values[0] != 0:
-        raise fail("invalid_cu_seqlens", f"cu_seqlens_host[0] 必须为 0，收到 {values[0]}")
+        raise fail("invalid_cu_seqlens", f"cu_seqlens_host[0] must be zero, got {values[0]}")
     for i in range(len(values) - 1):
         if values[i + 1] <= values[i]:
-            raise fail("invalid_cu_seqlens", f"cu_seqlens_host 必须严格递增（空 sequence 在入口拒绝），位置 {i}: "
+            raise fail("invalid_cu_seqlens", f"cu_seqlens_host must be strictly increasing; empty sequence at index {i}: "
                        f"{values[i]} -> {values[i + 1]}", index=i)
     _check_int32("T (cu_seqlens[-1])", values[-1])
     return values
 
 
 class SequenceLengthPlan:
-    """长度的唯一 source of truth。用 ``from_host`` / ``from_device`` 构造，构造后不可修改。
+    """Immutable sequence geometry built with from_host or from_device.
 
-    device 上的 ``cu_seqlens`` 是本对象 owned 的 int32 连续副本；调用方不能原地修改它。
+    The plan owns a contiguous int32 cumulative-length tensor; callers must not modify it in place.
     """
 
     __slots__ = ("_cu_host", "_lengths", "_cu_device", "_block_layouts", "_routing_layouts",
@@ -271,7 +265,7 @@ class SequenceLengthPlan:
 
     def __init__(self, *_args: Any, _token: object = None, **_kwargs: Any) -> None:
         if _token is not _CONSTRUCT_TOKEN:
-            raise TypeError("请使用 SequenceLengthPlan.from_host / from_device")
+            raise TypeError("Use SequenceLengthPlan.from_host / from_device")
 
     @classmethod
     def _build(
@@ -301,21 +295,21 @@ class SequenceLengthPlan:
         return source._version == self._source_version
 
     def __setattr__(self, name: str, value: Any) -> None:
-        raise AttributeError("SequenceLengthPlan 创建后 immutable")
+        raise AttributeError("SequenceLengthPlan is immutable")
 
     def __delattr__(self, name: str) -> None:
-        raise AttributeError("SequenceLengthPlan 创建后 immutable")
+        raise AttributeError("SequenceLengthPlan is immutable")
 
     @classmethod
     @torch.inference_mode(False)
     def from_host(cls, lengths: Iterable[int], device: Any) -> SequenceLengthPlan:
-        """推荐入口：由 dataloader 的 CPU 长度构造；device cu_seqlens 由 plan 自己创建（一次 H2D 拷贝，不同步）。"""
+        """Construct a plan from host lengths using one asynchronous pinned-memory copy on CUDA."""
         lens = tuple(lengths)
         for v in lens:
             if isinstance(v, bool) or not isinstance(v, int):
-                raise fail("invalid_cu_seqlens", f"lengths 只能包含 int，收到 {type(v).__name__}")
+                raise fail("invalid_cu_seqlens", f"lengths must contain ints, got {type(v).__name__}")
             if v <= 0:
-                raise fail("invalid_cu_seqlens", f"sequence 长度必须 > 0（空 sequence 在入口拒绝），收到 {v}")
+                raise fail("invalid_cu_seqlens", f"Sequence lengths must be positive, got {v}")
         cu = [0]
         for v in lens:
             cu.append(cu[-1] + v)
@@ -326,7 +320,7 @@ class SequenceLengthPlan:
     @classmethod
     @torch.inference_mode(False)
     def from_device(cls, cu_seqlens: torch.Tensor) -> SequenceLengthPlan:
-        """兼容入口：每个 step 开始时把 device cu_seqlens 拷贝到 host 一次（一次 D2H 同步），再由 plan 持有两份 owned 副本。"""
+        """Validate device lengths with one host read, then retain owned host/device copies."""
         _check_cu_seqlens_tensor(cu_seqlens)
         cu_host = _validate_cu_seqlens_host([int(x) for x in cu_seqlens.tolist()])
         return cls._build(cu_host, cu_seqlens.detach().clone(memory_format=torch.contiguous_format), source=cu_seqlens)
@@ -363,8 +357,7 @@ class SequenceLengthPlan:
         return f"SequenceLengthPlan(Nseq={self.Nseq}, T={self.T}, max_seqlen={self.max_seqlen}, device={self.device})"
 
     def block_layout(self, chunk_size: int) -> BlockLayout:
-        """BlockPtr / SeqBlockPtr 的 host 值与 device int32 副本。host 值由 cu_seqlens_host 计算；
-        device 副本由 plan 持有的 device cu_seqlens 在 GPU 上构造（device_block_ptrs），不做 H2D 拷贝，也没有任何同步。"""
+        """Cache host block boundaries and device int32 pointers without copying device values to the host."""
         c = _require_int("chunk_size", chunk_size)
         layout = self._block_layouts.get(c)
         if layout is None:
@@ -418,8 +411,7 @@ def _resolve_length_plan(
 
 
 def _to_device_async(x: torch.Tensor, device: Any) -> torch.Tensor:
-    """host→device 拷贝。CUDA 上经 pinned memory 异步拷贝：从 pageable 内存拷贝是同步的 cudaMemcpy，会等待 stream 上
-    已排队的 kernel（torch.cuda.set_sync_debug_mode 也把它判为同步）。pinned 缓冲由 CachingHostAllocator 按 stream 事件回收。"""
+    """Use pinned host memory for an asynchronous CUDA copy; its lifetime is managed by the host allocator."""
     dev = torch.device(device)
     if dev.type != "cuda":
         return x.to(dev)
@@ -427,8 +419,10 @@ def _to_device_async(x: torch.Tensor, device: Any) -> torch.Tensor:
 
 
 def device_block_ptrs(cu: torch.Tensor, c: int, nc: int, T: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """在 GPU 上由 device cu_seqlens 构造 (BlockPtr [Nc+1], SeqBlockPtr [Nseq+1])，int32；尺寸 Nc / T 来自 host，
-    repeat_interleave 显式给 output_size，不读 device 值、不做标量写入（标量写入会产生一次同步的 H2D 拷贝）。"""
+    """Construct int32 block and sequence pointers on device using host-known output sizes.
+
+    Explicit repeat_interleave sizes avoid reading device values to determine allocation sizes.
+    """
     cu = cu.to(torch.int64)
     nseq = cu.numel() - 1
     nblk = torch.div(cu[1:] - cu[:-1] + (c - 1), c, rounding_mode="floor")
@@ -441,8 +435,7 @@ def device_block_ptrs(cu: torch.Tensor, c: int, nc: int, T: int) -> tuple[torch.
 
 @dataclass(frozen=True)
 class BlockLayout:
-    """一个 C 下的 block 划分。block_ptr [Nc + 1] 为 token 起点（最后一项为 T），seq_block_ptr [Nseq + 1] 为每条 sequence
-    的第一个 block。device tensor 由 SequenceLengthPlan 持有，调用方不能原地修改。"""
+    """Block boundaries for one chunk size, with host tuples and device tensors owned by the sequence plan."""
 
     chunk_size: int
     block_ptr_host: tuple[int, ...]
@@ -457,16 +450,16 @@ class BlockLayout:
 
 def _check_cu_seqlens_tensor(cu_seqlens: torch.Tensor) -> None:
     if not isinstance(cu_seqlens, torch.Tensor):
-        raise fail("invalid_cu_seqlens", f"cu_seqlens 必须是 torch.Tensor，收到 {type(cu_seqlens).__name__}")
+        raise fail("invalid_cu_seqlens", f"cu_seqlens must be a torch.Tensor, got {type(cu_seqlens).__name__}")
     if cu_seqlens.dim() != 1:
-        raise fail("invalid_cu_seqlens", f"cu_seqlens 必须是 1 维，收到 shape {tuple(cu_seqlens.shape)}")
+        raise fail("invalid_cu_seqlens", f"cu_seqlens must be one-dimensional, got shape {tuple(cu_seqlens.shape)}")
     if cu_seqlens.dtype != torch.int32:
-        raise fail("invalid_cu_seqlens", f"cu_seqlens 必须是 int32（cu_seqlens_layout），收到 {cu_seqlens.dtype}")
+        raise fail("invalid_cu_seqlens", f"cu_seqlens must use int32, got {cu_seqlens.dtype}")
 
 
 @dataclass(frozen=True)
 class LocalFABatch:
-    """LocalFABatchPlan_host 的一项：覆盖 block [b0, b1)、token [t0, t1)。"""
+    """A local-attention batch covering blocks [b0, b1) and tokens [t0, t1)."""
 
     b0: int
     b1: int
@@ -476,7 +469,7 @@ class LocalFABatch:
 
 
 def _block_layout(lengths: Sequence[int], c: int, br: int) -> tuple[tuple[int, ...], tuple[int, ...], int]:
-    """BlockPtr_host [Nc + 1]、SeqBlockPtr_host [Nseq + 1] 与 Nwork。"""
+    """Compute host block boundaries, sequence block boundaries and query-tile count."""
     block_ptr = [0]
     seq_block_ptr = [0]
     nwork = 0
@@ -493,7 +486,7 @@ def _block_layout(lengths: Sequence[int], c: int, br: int) -> tuple[tuple[int, .
 
 
 def _local_fa_batches(block_ptr: Sequence[int], c: int, seg_max: int, rows_per_call_max: int) -> tuple[LocalFABatch, ...]:
-    """按 block 顺序贪心切批：segment 数 <= FA_SEGMENT_BATCH_MAX，Q 行数 <= rows_cap = max(FA_ROWS_PER_CALL_MAX, 最大 block 长度)。"""
+    """Partition consecutive blocks within the segment and row limits, keeping each block intact."""
     nc = len(block_ptr) - 1
     rows_cap = max(rows_per_call_max, c)
     batches: list[LocalFABatch] = []

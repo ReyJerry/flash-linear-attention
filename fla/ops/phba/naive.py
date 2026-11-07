@@ -17,16 +17,13 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
-from fla.ops.phba.utils import fail
-
 if TYPE_CHECKING:
-    from fla.ops.phba.metadata import BranchMetadata
     from fla.ops.phba.routing import RoutingLayout
 
 
 @dataclass(frozen=True)
 class HostLayout:
-    """Reference 只需要 host 上的 block 划分（与 plans.BlockLayout 的 host 部分相同）。"""
+    """Host-side block boundaries for the independent PHBA references."""
 
     chunk_size: int
     block_ptr: tuple[int, ...]
@@ -64,7 +61,7 @@ def compute_dtype(storage: torch.dtype) -> torch.dtype:
 
 
 def _st(x: torch.Tensor, storage: torch.dtype) -> torch.Tensor:
-    """cast 到 storage 再回到 compute dtype（模拟“storage 操作数进入 dot / 写回 HBM”）。"""
+    """Round through storage dtype before returning to the accumulation dtype."""
     return x.to(storage).to(x.dtype)
 
 
@@ -79,10 +76,7 @@ def local_cumsum(x: torch.Tensor, layout: HostLayout, *, reverse: bool = False, 
 
 
 def prefix_forward(s, z, gk, layout: HostLayout):
-    """s: [T, H, M] storage；z: [T, H, D] storage；gk: [T, H, M] compute。
-
-    返回 (Prefix [Nc, M, H, D] storage, final state [Nseq, H, M, D] compute dtype)。
-    """
+    """Return storage-dtype prefixes [Nc, M, H, D] and accumulation-dtype final states [Nseq, H, M, D]."""
     storage, cd = z.dtype, gk.dtype
     T, H, M = s.shape
     D = z.shape[-1]
@@ -103,7 +97,7 @@ def prefix_forward(s, z, gk, layout: HostLayout):
 
 
 def prefix_backward_branch(s, z, gk, prefix, dprefix, layout: HostLayout):
-    """_prefix_bwd_kernel 的公式（一个 branch）。返回 compute dtype 的 (ds [T,H,M], dz [T,H,D], dg [T,H,M])。"""
+    """Differentiate one prefix branch while preserving storage rounding of dot operands."""
     storage, cd = z.dtype, gk.dtype
     T, H, M = s.shape
     D = z.shape[-1]
@@ -161,7 +155,7 @@ class RefChunkwisePrefixFn(torch.autograd.Function):
 
 
 def route_masks(rtok: torch.Tensor, rstate: torch.Tensor, layout: HostLayout, h: int, M: int):
-    """返回 (local [T,T], token [T,T], state [T, Nc*M]) 三个 bool mask（head h）。"""
+    """Build local [T, T], historical-token [T, T] and prefix-state [T, Nc * M] masks for one head."""
     T = rtok.shape[1]
     dev = rtok.device
     tb = layout.token_block(dev)
@@ -212,7 +206,7 @@ def _joint_forward_head(q, k, vv, qr, pk, pv, masks, scale, storage, local_seed=
 
 
 class RefJointAttentionFn(torch.autograd.Function):
-    """输入 q_rope, k_rope, v, q_raw [T,H,D] 与 prefix_k, prefix_v [Nc,M,H,D]（storage）；输出 O [T,H,D] storage 与 L [H,T]。"""
+    """Joint attention reference with storage-dtype inputs/output and FP32 log-normalizers."""
 
     @staticmethod
     def forward(ctx, q_rope, k_rope, v, q_raw, prefix_k, prefix_v, rtok, rstate, layout: HostLayout, scale: float,
@@ -320,7 +314,7 @@ class RefJointAttentionFn(torch.autograd.Function):
 
 
 def gate_from_storage(a_storage: torch.Tensor, tau: float, storage: torch.dtype):
-    """与 chunk.py / gate.py 的生产公式相同：g_log = logsigmoid(fp32(a)) / tau；s = storage(-expm1(g_log))（autograd）。"""
+    """Match the production gate formula and storage rounding while retaining autograd connectivity."""
     cd = compute_dtype(storage)
     g_log = F.logsigmoid(a_storage.to(cd)) / tau
     return g_log, (-torch.expm1(g_log)).to(storage)
@@ -330,10 +324,9 @@ def reference_a_chunkwise(q_raw, q_rope, k_rope, k_raw, v, a_storage, *, tau: fl
                           rtok: torch.Tensor, rstate: torch.Tensor, scale: float | None = None,
                           local_impl='torch', fa_segment_batch_max=65535, fa_rows_per_call_max=1 << 20,
                           fa_deterministic=False):
-    """Reference A(chunkwise_cuda) 的 operator：RoPE 在外（q_rope / k_rope 为输入），返回 (O, L, PrefixK, PrefixV)。
+    """Return output, log-normalizers and key/value prefixes using the production storage boundaries.
 
-    autograd 只负责把各手写 backward 的 Function 与 gate 的逐元素运算连起来；dV 由 attention 与 Prefix 两个 Function
-    的返回值相加（storage dtype，与生产实现中 autograd 的行为一致）。
+    Autograd combines attention and prefix value gradients in storage dtype, matching the production path.
     """
     storage = v.dtype
     scale = 1.0 / math.sqrt(q_rope.shape[-1]) if scale is None else scale
@@ -346,7 +339,7 @@ def reference_a_chunkwise(q_raw, q_rope, k_rope, k_raw, v, a_storage, *, tau: fl
 
 @contextlib.contextmanager
 def highest_precision():
-    """Reference B 与 fp32 routing oracle 显式关闭 TF32。"""
+    """Disable TF32 for the mathematical and routing references."""
     old = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32, torch.get_float32_matmul_precision())
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -359,7 +352,7 @@ def highest_precision():
 
 
 def prefix_states_recurrent(k_raw, v, g_log, layout: HostLayout):
-    """返回 PrefixK, PrefixV [Nc, M, H, D]（与 g_log 同 dtype，逐 token 递推，可导）。"""
+    """Compute differentiable prefixes [Nc, M, H, D] by token recurrence in the gate dtype."""
     T, H, M = g_log.shape
     D = k_raw.shape[-1]
     A = torch.exp(g_log)
@@ -380,7 +373,7 @@ def prefix_states_recurrent(k_raw, v, g_log, layout: HostLayout):
 def reference_b(q_raw, q_rope, k_rope, k_raw, v, a_storage, *, tau: float, layout: HostLayout,
                 rtok: torch.Tensor, rstate: torch.Tensor, dtype: torch.dtype = torch.float32,
                 scale: float | None = None):
-    """返回 (O, L, PrefixK, PrefixV)，全部为 dtype；输入保持与调用方的 autograd 连接。"""
+    """Return output, log-normalizers and key/value prefixes in the requested dtype, retaining autograd links."""
     with highest_precision():
         q_raw, q_rope, k_rope, k_raw, v, a = (x.to(dtype) for x in (q_raw, q_rope, k_rope, k_raw, v, a_storage))
         T, H, D = q_rope.shape
@@ -426,7 +419,7 @@ def naive_phba(q, k, v, q_rope, k_rope, gate, lengths, token_routes, state_route
 
 
 def metadata_reference(route: torch.Tensor, nc: int) -> tuple[torch.Tensor, torch.Tensor, list[list[int]]]:
-    """逐 slot 读取 route 的参照：返回 (Count, Offset, 每个 e 的 row 列表（升序）)。"""
+    """Return counts, offsets and sorted row indices from an independent route-slot traversal."""
     H, T, K = route.shape
     count = torch.zeros(nc * H, dtype=torch.int64)
     rows: list[list[int]] = [[] for _ in range(nc * H)]
@@ -443,30 +436,8 @@ def metadata_reference(route: torch.Tensor, nc: int) -> tuple[torch.Tensor, torc
     return count.to(torch.int32), offset.to(torch.int32), [sorted(x) for x in rows]
 
 
-def sort_rho_segments(meta: BranchMetadata) -> list[list[int]]:
-    """把每个 (block, head) 段内的 row 排序后返回（需要同步；correctness 与确定性调试模式用）。"""
-    off = meta.offset.tolist()
-    rho = meta.rho[: off[-1]].tolist()
-    return [sorted(rho[off[e]:off[e + 1]]) for e in range(len(off) - 1)]
-
-
-def verify_against_host(layout: RoutingLayout) -> None:
-    """调试模式：GPU 构造的 layout 与 host 值逐元素一致，SeqBlockPtr 与 BlockSeq 互相一致。需要同步。"""
-    t = {n: x.tolist() for n, x in layout.tensors().items()}
-    if tuple(t["block_ptr"]) != layout.block_ptr_host:
-        raise fail("invalid_cu_seqlens", "GPU BlockPtr 与 BlockPtr_host 不一致")
-    if tuple(t["seq_block_ptr"]) != layout.seq_block_ptr_host:
-        raise fail("invalid_cu_seqlens", "GPU SeqBlockPtr 与 host 不一致")
-    sbp = t["seq_block_ptr"]
-    for b, s in enumerate(t["block_seq"]):
-        if not sbp[s] <= b < sbp[s + 1]:
-            raise fail("invalid_cu_seqlens", f"BlockSeq[{b}] = {s} 与 SeqBlockPtr 不一致")
-    if len(t["work_block"]) != layout.Nwork or len(t["current_block"]) != layout.T:
-        raise fail("invalid_cu_seqlens", "QueryWorkList / CurrentBlock 长度与 host 计算的 Nwork / T 不一致")
-
-
 def centroid_reference(k_rope: torch.Tensor, block_ptr_host) -> torch.Tensor:
-    """fp32 求和后除以有效 token 数（与 kernel 的累加顺序不同，按 fp32 容差比较）。"""
+    """Average each block in FP32; its reduction order can differ from the production kernel."""
     T, H, D = k_rope.shape
     nc = len(block_ptr_host) - 1
     out = torch.zeros((nc, H, D), dtype=torch.float32, device=k_rope.device)
@@ -478,7 +449,7 @@ def centroid_reference(k_rope: torch.Tensor, block_ptr_host) -> torch.Tensor:
 
 
 def _history_mask(layout: RoutingLayout, device) -> torch.Tensor:
-    """[T, Nc] bool：BlockSeq[b] == seq(t) 且 b < CurrentBlock[t]。"""
+    """Mask blocks outside the query sequence or at/after the current block."""
     cb = layout.current_block.to(device).long()
     bs = layout.block_seq.to(device).long()
     b = torch.arange(layout.Nc, device=device)
@@ -486,11 +457,11 @@ def _history_mask(layout: RoutingLayout, device) -> torch.Tensor:
 
 
 def routing_scores(q_rope: torch.Tensor, centroids: torch.Tensor, layout: RoutingLayout, *, production: bool):
-    """[H, T, Nc] 分数，无效候选为 -inf。
+    """Return scores [H, T, Nc], masking invalid candidates with negative infinity.
 
-    production=True ：Centroid 先转为 Qrope 的 dtype（与 kernel 相同的 cast），乘积与求和在 fp64 中计算后舍入为 fp32；
-                      bf16 / fp16 的乘积在 fp32 / fp64 中都是精确的，所以只剩“求和顺序”一项与 kernel 不同
-    production=False：fp32 oracle，Qrope.float() @ Centroid.float().T（Centroid 不 cast），TF32 关闭
+    Production mode rounds centroids to query dtype before an FP64 dot and FP32 output conversion.
+    FP16/BF16 products are exact in FP32/FP64; reduction order can still differ from the kernel.
+    The alternate oracle uses unrounded FP32 centroids with TF32 disabled.
     """
     dev = q_rope.device
     mask = _history_mask(layout, dev)
@@ -506,7 +477,7 @@ def routing_scores(q_rope: torch.Tensor, centroids: torch.Tensor, layout: Routin
 
 
 def topk_from_scores(scores: torch.Tensor, kh: int) -> torch.Tensor:
-    """稳定 Top-K：分数降序，同分时 block id 较小者优先；-inf 记为 -1。scores [H, T, Nc] → [H, T, Kh] int32。"""
+    """Sort scores descending with lower block IDs breaking ties; map invalid scores to -1."""
     H, T, nc = scores.shape
     if kh == 0 or nc == 0:
         return torch.full((H, T, kh), -1, dtype=torch.int32, device=scores.device)
@@ -528,34 +499,10 @@ def rstate_from_rtok(rtok: torch.Tensor, layout: RoutingLayout) -> torch.Tensor:
 
 
 def route_reference(q_rope, centroids, layout: RoutingLayout, kh: int):
-    """production-matched routing reference：返回 (Rtok, Rstate, scores)。"""
+    """Return token routes, state routes and scores using production-matched operand rounding."""
     scores = routing_scores(q_rope, centroids, layout, production=True)
     rtok = topk_from_scores(scores, kh)
     return rtok, rstate_from_rtok(rtok, layout), scores
-
-
-def check_route_invariants(rtok: torch.Tensor, rstate: torch.Tensor, layout: RoutingLayout) -> None:
-    """调试模式：distinct、[0, Nc)、同一 sequence、< CurrentBlock；Rstate slot 0 / PrefixValid。需要同步。"""
-    H, T, kh = rtok.shape
-    dev = rtok.device
-    cb = layout.current_block.to(dev).long()
-    bs = layout.block_seq.to(dev).long()
-    r = rtok.long()
-    valid = r >= 0
-    if bool((r[valid] >= layout.Nc).any()) or bool((r < -1).any()):
-        raise fail("invalid_shape", "Rtok 有越界的 block id")
-    safe = r.clamp(min=0)
-    if bool((valid & (bs[safe] != bs[cb][None, :, None])).any()):
-        raise fail("invalid_shape", "Rtok 含其他 sequence 的 block")
-    if bool((valid & (safe >= cb[None, :, None])).any()):
-        raise fail("invalid_shape", "Rtok 含非严格历史的 block")
-    if kh > 1:
-        s = torch.sort(torch.where(valid, r, torch.arange(-kh, 0, device=dev).expand_as(r)), -1).values
-        if bool((s[..., 1:] == s[..., :-1]).any()):
-            raise fail("invalid_shape", "Rtok 同一行有重复 block id")
-    expect = rstate_from_rtok(rtok, layout)
-    if not torch.equal(rstate, expect):
-        raise fail("invalid_shape", "Rstate 与 [current; Rtok] + PrefixValid 不一致")
 
 
 __all__ = [
@@ -563,7 +510,6 @@ __all__ = [
     'RefChunkwisePrefixFn',
     'RefJointAttentionFn',
     'centroid_reference',
-    'check_route_invariants',
     'compute_dtype',
     'gate_from_storage',
     'highest_precision',
@@ -579,7 +525,5 @@ __all__ = [
     'route_reference',
     'routing_scores',
     'rstate_from_rtok',
-    'sort_rho_segments',
     'topk_from_scores',
-    'verify_against_host',
 ]

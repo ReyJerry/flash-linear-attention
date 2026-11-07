@@ -5,11 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-'PHBA input validation, structured errors and isolated autograd probes.'
+'PHBA input validation, structured errors and gradient alignment.'
 
 from __future__ import annotations
 
-import contextlib
 from typing import Any
 
 import torch
@@ -36,11 +35,11 @@ REASON_CLASSES: dict[str, str] = {
 
 
 class PHBAError(RuntimeError):
-    """PHBA 的统一异常。``fallback_reason`` 必须是 ``REASON_CLASSES`` 中登记的名字。"""
+    """PHBA runtime error carrying a registered reason and optional diagnostic details."""
 
     def __init__(self, reason: str, message: str = "", **details: Any) -> None:
         if reason not in REASON_CLASSES:
-            raise ValueError(f"未登记的 PHBA fallback_reason: {reason!r}")
+            raise ValueError(f"Unregistered PHBA fallback_reason: {reason!r}")
         self.fallback_reason = reason
         self.fallback_class = REASON_CLASSES[reason]
         self.details = details
@@ -49,7 +48,7 @@ class PHBAError(RuntimeError):
 
 
 def fail(reason: str, message: str = "", **details: Any) -> PHBAError:
-    """构造异常（调用方 ``raise fail(...)``），便于在表达式里使用。"""
+    """Construct a structured PHBA runtime error."""
     return PHBAError(reason, message, **details)
 
 
@@ -57,34 +56,23 @@ ALIGNMENT_BYTES = 16
 
 
 def prepare_grad_output(grad_out: torch.Tensor, out: torch.Tensor) -> tuple[torch.Tensor, int]:
-    """backward 入口的 dO。返回 (dO, grad_output_copy_bytes)。
+    """Validate gradient dtype and return the aligned gradient with its copy size in bytes.
 
-    dtype 与 O 相同（autograd 已转换，这里只断言）；最后一维不连续或 data_ptr % 16 != 0 时强制新分配 aligned contiguous
-    copy。不能只调用 .contiguous()：未对齐但 stride 合法的 view 会被原样返回。loss = O.sum() 时 dO 是 stride 全 0 的广播 tensor。
+    A contiguous view can still be unaligned; such views require a fresh allocation.
     """
     if grad_out.dtype != out.dtype:
-        raise fail("dtype_mismatch", f"dO 的 dtype {grad_out.dtype} 与 O 的 {out.dtype} 不一致")
+        raise fail("dtype_mismatch", f"dO dtype {grad_out.dtype} does not match output dtype {out.dtype}")
     return prepare_grad_output_meta(grad_out, out.dtype, tuple(out.shape))
 
 
 def prepare_grad_output_meta(grad_out: torch.Tensor, dtype: torch.dtype, shape: tuple[int, ...]) -> tuple[torch.Tensor, int]:
-    """与 prepare_grad_output 相同，只用 O 的 dtype / shape（autograd.Function 不必为此保存 O）。"""
+    """Align the output gradient using saved dtype/shape metadata without retaining the output tensor."""
     if grad_out.dtype != dtype:
-        raise fail("dtype_mismatch", f"dO 的 dtype {grad_out.dtype} 与 O 的 {dtype} 不一致")
+        raise fail("dtype_mismatch", f"dO dtype {grad_out.dtype} does not match output dtype {dtype}")
     if tuple(grad_out.shape) != tuple(shape):
-        raise fail("invalid_shape", f"dO shape {tuple(grad_out.shape)} 与 O shape {tuple(shape)} 不一致")
+        raise fail("invalid_shape", f"dO shape {tuple(grad_out.shape)} does not match output shape {tuple(shape)}")
     if grad_out.stride(-1) == 1 and grad_out.data_ptr() % ALIGNMENT_BYTES == 0:
         return grad_out, 0
     fresh = torch.empty(grad_out.shape, dtype=grad_out.dtype, device=grad_out.device)
     fresh.copy_(grad_out)
     return fresh, fresh.numel() * fresh.element_size()
-
-
-@contextlib.contextmanager
-def isolated_autograd():
-    """预检 / probe 自己做 forward + backward：开启 grad、退出 inference_mode，并压入恒等 saved-tensor hooks，
-    使它们即使在 non-reentrant activation checkpoint 的 forward 内运行，也不会被 checkpoint 的 hook 记录
-    （checkpoint 按保存的 tensor 个数与 metadata 校验重算结果）。"""
-    with torch.inference_mode(False), torch.enable_grad(), \
-            torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
-        yield

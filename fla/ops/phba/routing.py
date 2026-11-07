@@ -43,10 +43,6 @@ class RoutingLayout:
     def device(self) -> torch.device:
         return self.block_ptr.device
 
-    def tensors(self) -> dict[str, torch.Tensor]:
-        return {n: getattr(self, n) for n in ("block_ptr", "seq_block_ptr", "block_seq", "current_block", "prefix_valid",
-                                              "work_block", "work_start", "work_end", "work_seq")}
-
 
 def _i32(x: torch.Tensor) -> torch.Tensor:
     return x.to(torch.int32).contiguous()
@@ -54,7 +50,7 @@ def _i32(x: torch.Tensor) -> torch.Tensor:
 
 @torch.inference_mode(False)
 def build_block_layout(length_plan: SequenceLengthPlan, chunk_size: int, br: int) -> RoutingLayout:
-    """由 SequenceLengthPlan 构造（必要时）并返回缓存的 RoutingLayout。"""
+    """Build or reuse the routing layout cached by a sequence plan."""
     c = _require_int("chunk_size", chunk_size)
     br = _require_int("Br", br)
     cache = length_plan._routing_layouts  # noqa: SLF001
@@ -70,16 +66,16 @@ def _construct(lp: SequenceLengthPlan, c: int, br: int) -> RoutingLayout:
     block_ptr_host, seq_block_ptr_host, nwork = _block_layout(lp.lengths, c, br)
     nc, nseq, T = len(block_ptr_host) - 1, lp.Nseq, lp.T
     dev = lp.device
-    # BlockPtr / SeqBlockPtr 与 prefix states 共用 SequenceLengthPlan.block_layout(C) 的 device 副本（同一份 source of truth）
+    # reuse the sequence plan's device block pointers for routing and prefix states
     blayout = lp.block_layout(c)
     block_ptr = blayout.block_ptr.to(torch.int64)
     seq_block_ptr = blayout.seq_block_ptr.to(torch.int64)
     nblk = seq_block_ptr[1:] - seq_block_ptr[:-1]
     block_seq = torch.repeat_interleave(torch.arange(nseq, device=dev), nblk, output_size=nc)       # [Nc]
-    block_len = block_ptr[1:] - block_ptr[:-1]                            # [Nc]，最后一个 block 可能不满
+    block_len = block_ptr[1:] - block_ptr[:-1]                            # [Nc], including partial tails
     current_block = torch.repeat_interleave(torch.arange(nc, device=dev), block_len, output_size=T)  # [T]
     prefix_valid = torch.arange(nc, device=dev) > seq_block_ptr[block_seq]                         # [Nc] bool
-    # 每个 block 的 query tile 数
+    # query tiles per block
     nq = torch.div(block_len + (br - 1), br, rounding_mode="floor")
     work_block = torch.repeat_interleave(torch.arange(nc, device=dev), nq, output_size=nwork)       # [Nwork]
     work_ptr = torch.zeros(nc + 1, dtype=torch.int64, device=dev)
@@ -132,11 +128,11 @@ def _centroid_kernel(
 
 def compute_block_centroids(k_rope: torch.Tensor, layout: RoutingLayout, *, block_tok: int = 64,
                             block_d: int = 64) -> torch.Tensor:
-    """Krope [T, H, Dh] → Centroid [Nc, H, Dh] fp32（在 no_grad 下调用；输入按 detach 处理）。"""
+    """Average detached keys [T, H, Dh] into FP32 block centroids [Nc, H, Dh]."""
     if k_rope.dim() != 3 or k_rope.shape[0] != layout.T:
-        raise fail("invalid_shape", f"Krope 必须是 [T, H, Dh]，T = {layout.T}，收到 {tuple(k_rope.shape)}")
+        raise fail("invalid_shape", f"Krope must be [T, H, Dh] with T={layout.T}, got {tuple(k_rope.shape)}")
     if k_rope.stride(-1) != 1:
-        raise fail("non_contiguous_input", "Krope 的最后一维必须连续")
+        raise fail("non_contiguous_input", "Krope must have a contiguous final dimension")
     T, H, D = k_rope.shape
     out = torch.empty((layout.Nc, H, D), dtype=torch.float32, device=k_rope.device)
     if layout.Nc == 0:
@@ -195,7 +191,7 @@ def _topk_kernel(
             score += tl.dot(q, tl.trans(c.to(q.dtype)), out_dtype=tl.float32)
         score = tl.where(qvalid[:, None] & bvalid[None, :], score, float("-inf"))
 
-        # 固定 KPAD 轮的选择合并：已有区（rank 顺序）与新 tile（block id 递增）
+        # merge ranked entries with the ascending block-ID tile in a fixed number of selection rounds
         old_s = best_s
         old_i = best_i
         new_s = tl.full([BR_DOT, KPAD], float("-inf"), tl.float32)
@@ -236,18 +232,18 @@ def _topk_kernel(
 
 def route_topk(q_rope: torch.Tensor, centroids: torch.Tensor, layout: RoutingLayout, kh: int, *, bc: int = 32,
                block_d: int = 64) -> tuple[torch.Tensor, torch.Tensor]:
-    """返回 (Rtok [H, T, Kh], Rstate [H, T, Kh + 1])，int32，-1 无效。不可导（输入按 detach 处理）。"""
+    """Return nondifferentiable int32 token/state routes, with -1 marking invalid slots."""
     if not 0 <= kh <= MAX_KH:
-        raise fail("routing_unsupported", f"Kh = {kh} 不在 [0, {MAX_KH}]（KPAD_tok <= 16）")
+        raise fail("routing_unsupported", f"Kh={kh} must be in [0, {MAX_KH}] with KPAD_tok<=16")
     T, H, D = q_rope.shape
     if T != layout.T or centroids.shape != (layout.Nc, H, D):
-        raise fail("invalid_shape", f"Qrope {tuple(q_rope.shape)} / Centroid {tuple(centroids.shape)} 与 layout 不一致")
+        raise fail("invalid_shape", f"Qrope {tuple(q_rope.shape)} / Centroid {tuple(centroids.shape)} do not match the layout")
     if q_rope.stride(-1) != 1 or not centroids.is_contiguous():
-        raise fail("non_contiguous_input", "Qrope 最后一维与 Centroid 必须连续")
+        raise fail("non_contiguous_input", "Qrope must have a contiguous final dimension and Centroid must be contiguous")
     if centroids.dtype != torch.float32:
-        raise fail("dtype_mismatch", f"Centroid 必须是 fp32，收到 {centroids.dtype}")
+        raise fail("dtype_mismatch", f"Centroid must use FP32, got {centroids.dtype}")
     if bc < MIN_DOT or block_d < MIN_DOT:
-        raise fail("invalid_config", f"Bc / BLOCK_D 必须 >= {MIN_DOT}")
+        raise fail("invalid_config", f"Bc and BLOCK_D must be >= {MIN_DOT}")
     dev = q_rope.device
     rtok = torch.empty((H, T, kh), dtype=torch.int32, device=dev)
     if kh == 0:
@@ -270,7 +266,7 @@ def route_topk(q_rope: torch.Tensor, centroids: torch.Tensor, layout: RoutingLay
 
 def build_routes(q_rope: torch.Tensor, k_rope: torch.Tensor, length_plan, *, chunk_size: int, topk: int, br: int = 8,
                  bc: int = 32, block_d: int = 64, block_tok: int = 64):
-    """返回 (layout, Rtok [H, T, topk - 1], Rstate [H, T, topk])。"""
+    """Return the layout, token routes [H, T, topk - 1] and state routes [H, T, topk]."""
     layout: RoutingLayout = build_block_layout(length_plan, chunk_size, br)
     with torch.no_grad():
         cen = compute_block_centroids(k_rope, layout, block_tok=block_tok, block_d=block_d)

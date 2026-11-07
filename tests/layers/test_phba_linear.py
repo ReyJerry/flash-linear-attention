@@ -62,7 +62,7 @@ def test_linear_unscreened_fallback():
 
 def _compare_swiglu_down(input_offset=None, grad_offset=0):
     from fla.modules.activations import swiglu_linear
-    from fla.ops.phba.linear import _SwiGLULinear
+    from fla.ops.phba.backends.cublaslt import _SwiGLULinear
 
     torch.manual_seed(42)
     x = torch.randn(1, 8192, 4272, device=device, dtype=torch.bfloat16)

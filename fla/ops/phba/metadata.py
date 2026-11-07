@@ -127,8 +127,8 @@ def _count_kernel(route_ptr, count_ptr, T, K, stride_rh, stride_rt, H: tl.conste
 @dataclass(frozen=True)
 class BranchMetadata:
     count: torch.Tensor          # [Nc * H] int32
-    offset: torch.Tensor         # [Nc * H + 1] int32；offset[-1] = Nedge（device）
-    rho: torch.Tensor            # [capacity] int32；只有前 Nedge 个有效
+    offset: torch.Tensor         # [Nc * H + 1] int32; offset[-1] = Nedge(device)
+    rho: torch.Tensor            # [capacity] int32; valid prefix of length Nedge
     capacity: int
     # retain original route slots for forward metadata reuse
     source_slots: torch.Tensor | None = None
@@ -136,7 +136,7 @@ class BranchMetadata:
 
 @dataclass(frozen=True)
 class DirectMetadata:
-    tok: BranchMetadata | None   # Kh = 0 时为 None
+    tok: BranchMetadata | None   # None when Kh is zero
     state: BranchMetadata
 
 
@@ -151,10 +151,11 @@ def _branch(
 ) -> BranchMetadata:
     H, T, K = route.shape
     if route.dtype != torch.int32 or route.stride(-1) != 1:
-        raise fail("invalid_shape", f"route 必须是最后一维连续的 int32，收到 {route.dtype} stride {route.stride()}")
+        raise fail("invalid_shape",
+                   f"Routes must be int32 with a contiguous final dimension, got {route.dtype} and strides {route.stride()}")
     cap = T * H * K
     if cap > INT32_MAX or nc * H + 1 > INT32_MAX:
-        raise fail("int32_overflow", f"Rho 上界 T*H*K = {cap} 或 Nc*H 超出 int32")
+        raise fail("int32_overflow", f"Rho capacity T*H*K={cap} or expert count Nc*H exceeds int32")
     if sorted_counts:
         if scan_impl != 'torch_cumsum':
             raise fail('invalid_config', f'unsupported metadata scan: {scan_impl}')
@@ -163,7 +164,7 @@ def _branch(
     dev = route.device
     n_e = nc * H
     count = torch.zeros(n_e, dtype=torch.int32, device=dev)
-    # Offset[0] = 0；不用标量写入（会同步）
+    # initialize offset[0] without a synchronizing scalar write
     offset = torch.zeros(n_e + 1, dtype=torch.int32, device=dev)
     grid = (triton.cdiv(T, META_BT), H)
     args = (T, K, route.stride(0), route.stride(1))
@@ -184,10 +185,10 @@ def _branch(
 def build_direct_metadata(rtok: torch.Tensor, rstate: torch.Tensor, nc: int, *,
                           metadata_scan_impl: str = "torch_cumsum",
                           retain_token_slots: bool = False, derived_state_layout=None) -> DirectMetadata:
-    """Rtok [H, T, Kh]、Rstate [H, T, Ks = Kh + 1] → token / state 两套 block-major metadata。"""
+    """Build canonical metadata for token routes [H, T, Kh] and state routes [H, T, Kh + 1]."""
     H, T, kh = rtok.shape
     if rstate.shape != (H, T, kh + 1):
-        raise fail("invalid_shape", f"Rstate 必须是 [H, T, Kh + 1] = {(H, T, kh + 1)}，收到 {tuple(rstate.shape)}")
+        raise fail("invalid_shape", f"Rstate must have shape [H, T, Kh + 1]={(H, T, kh + 1)}, got {tuple(rstate.shape)}")
     tok = _branch(rtok, nc, kpad_tok(kh), scan_impl=metadata_scan_impl,
                   retain_slots=retain_token_slots, sorted_counts=derived_state_layout is not None) if kh > 0 else None
     if derived_state_layout is not None and tok is not None:

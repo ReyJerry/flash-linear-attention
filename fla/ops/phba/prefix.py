@@ -64,7 +64,7 @@ def _local_cumsum_kernel(
     x_ptr, y_ptr, block_ptr,
     H: tl.constexpr, M: tl.constexpr, C: tl.constexpr, BS: tl.constexpr, REVERSE: tl.constexpr,
 ):
-    """y[r] = sum_{j<=r} x[j]（REVERSE: sum_{j>=r}），在每个 block 内，按 token 维；输入 [T, H, M]，输出 fp32。"""
+    """Compute inclusive block-local sums over tokens, or suffix sums in reverse mode, with FP32 output."""
     i_b = tl.program_id(0)
     i_h = tl.program_id(1)
     i_s = tl.program_id(2)
@@ -85,10 +85,10 @@ def _prefix_fwd_kernel(
     H: tl.constexpr, M: tl.constexpr, D: tl.constexpr, C: tl.constexpr,
     BK: tl.constexpr, BV: tl.constexpr, STORE_FINAL: tl.constexpr,
 ):
-    """grid = (Nseq * H, cdiv(M, BK), cdiv(D, BV))。每个 program 顺序遍历本 sequence 的 block，fp32 carry 在寄存器中。
+    """Traverse each sequence in block order with FP32 recurrent state.
 
-    s, gk : [T, H, M]；z : [T, H, D]；out : [Nc, M, H, D]（storage）；ht : [Nseq, H, M, D]（fp32，可选）
-    Insertion operands are rounded to storage dtype before the FP32 state update.
+    Insertion operands are rounded to storage dtype before each FP32 state update.
+    Prefixes use [Nc, M, H, D] storage; optional final states use [Nseq, H, M, D] FP32.
     """
     i_nh = tl.program_id(0)
     i_k = tl.program_id(1)
@@ -137,11 +137,10 @@ def _prefix_bwd_kernel(
     H: tl.constexpr, M: tl.constexpr, D: tl.constexpr, C: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_V: tl.constexpr, ACCUMULATE: tl.constexpr,
 ):
-    """grid = (Nseq, H)。按固定逆序遍历本 sequence 的 block。
+    """Traverse each sequence in fixed reverse block order.
 
-    prefix / dprefix : [Nc, M, H, D]；ds, dg : [T, H, M] fp32；dz : [T, H, D] fp32
-    ACCUMULATE：ds / dg 在已有值上相加（第二路 V 在第一路 K 之后，同一 stream 顺序执行，结果确定）。
-    每个 block 最后一行的 dg 在寄存器中加上 gate correction 后只 store 一次。
+    The value branch accumulates ds/dg after the key branch on the same stream.
+    Apply the final-row gate correction before the single store of that row.
     """
     i_n = tl.program_id(0)
     i_h = tl.program_id(1)
@@ -332,7 +331,7 @@ def _launch_kwargs(name: str) -> dict:
 
 
 def local_cumsum(x: torch.Tensor, layout: BlockLayout, *, reverse: bool = False) -> torch.Tensor:
-    """block 内沿 token 维的 inclusive cumsum（reverse 时为 suffix sum）。x: [T, H, M] → fp32 [T, H, M]。"""
+    """Compute block-local inclusive token sums, or suffix sums in reverse mode, in FP32."""
     T, H, M = x.shape
     y = torch.empty((T, H, M), dtype=torch.float32, device=x.device)
     grid = (layout.Nc, H, triton.cdiv(M, CUMSUM_BS))
@@ -422,9 +421,9 @@ def _aligned_contiguous(x: torch.Tensor | None, like: torch.Tensor) -> torch.Ten
 
 
 class ChunkwisePrefixStateFn(torch.autograd.Function):
-    """Prefix-State（chunkwise）的 autograd 边界：在 PHBA attention Function 之外。
+    """Differentiate prefix states independently of joint attention.
 
-    输入 s_val, k_raw, v, g_log；输出 PrefixK, PrefixV（[Nc, M, H, D] storage）与可选的 final state（fp32，不可导）。
+    Prefixes use [Nc, M, H, D] storage; optional FP32 final states are nondifferentiable.
     """
 
     @staticmethod
@@ -444,7 +443,7 @@ class ChunkwisePrefixStateFn(torch.autograd.Function):
             ht_k = ht_v = None
         _prefix_forward(s_val, k_raw, gk, layout, prefix_k, ht_k)
         _prefix_forward(s_val, v, gk, layout, prefix_v, ht_v)
-        # ctx 只保存 host 元信息；backward 需要的 device tensor（含 BlockPtr / SeqBlockPtr）一律 save_for_backward
+        # save device tensors through save_for_backward; keep only host geometry on ctx
         ctx.layout_host = (layout.chunk_size, layout.block_ptr_host, layout.seq_block_ptr_host)
         ctx.backward_plan = prefix_backward_plan(nc, H, M, D)
         ctx.save_for_backward(s_val, k_raw, v, g_log, block_ptr, seq_block_ptr, prefix_k, prefix_v)
@@ -465,7 +464,8 @@ class ChunkwisePrefixStateFn(torch.autograd.Function):
         D = k_raw.shape[-1]
         if M > CHUNKWISE_TRAIN_MAX_M or D > CHUNKWISE_TRAIN_MAX_DH:
             raise fail("prefix_kernel_unsupported",
-                       f"chunkwise backward 要求 M <= {CHUNKWISE_TRAIN_MAX_M} 且 Dh <= {CHUNKWISE_TRAIN_MAX_DH}，收到 M={M}, Dh={D}")
+                       f"Prefix backward requires M<={CHUNKWISE_TRAIN_MAX_M} and Dh<={CHUNKWISE_TRAIN_MAX_DH}; "
+                       f"got M={M}, Dh={D}")
         gk = local_cumsum(g_log, layout)
         d_prefix_k = _aligned_contiguous(d_prefix_k, prefix_k)
         d_prefix_v = _aligned_contiguous(d_prefix_v, prefix_v)
@@ -485,31 +485,32 @@ def check_inputs(s_val: torch.Tensor, k_raw: torch.Tensor, v: torch.Tensor, g_lo
     """Validate prefix geometry, storage types and device layout before launching kernels."""
     c = layout.chunk_size
     if c not in CHUNKWISE_VALIDATED_C:
-        raise fail("prefix_kernel_unsupported", f"chunkwise 的 C = {c} 不在 validated set {CHUNKWISE_VALIDATED_C}")
+        raise fail("prefix_kernel_unsupported", f"Chunk size C={c} is outside the validated set {CHUNKWISE_VALIDATED_C}")
     for name, x in (("s_val", s_val), ("k_raw", k_raw), ("v", v), ("g_log", g_log)):
         if x.device.type != "cuda" and not interpreter_enabled():
-            raise fail("prefix_kernel_unsupported", f"{name} 在 {x.device} 上；chunkwise 生产路径只支持 CUDA")
+            raise fail("prefix_kernel_unsupported", f"{name} is on {x.device}; prefix kernels require CUDA")
         if x.dim() != 3:
-            raise fail("prefix_kernel_unsupported", f"{name} 必须是 [T, H, *]，收到 {tuple(x.shape)}")
+            raise fail("prefix_kernel_unsupported", f"{name} must have shape [T, H, *], got {tuple(x.shape)}")
         if not x.is_contiguous():
-            raise fail("non_contiguous_input", f"{name} 必须连续（kernel 按 [T, H, *] 的行主序寻址）")
+            raise fail("non_contiguous_input", f"{name} must be contiguous for row-major [T, H, *] addressing")
     if s_val.dtype not in STORAGE_DTYPES or k_raw.dtype != s_val.dtype or v.dtype != s_val.dtype:
         raise fail("prefix_kernel_unsupported",
-                   f"s_val / k_raw / v 必须是相同的 fp16 / bf16，收到 {s_val.dtype} / {k_raw.dtype} / {v.dtype}")
+                   f"s_val, k_raw and v must share FP16/BF16 dtype; got {s_val.dtype}, {k_raw.dtype}, {v.dtype}")
     if g_log.dtype != torch.float32:
         raise fail("prefix_kernel_unsupported", f"g_log must be FP32, got {g_log.dtype}")
     T, H, M = s_val.shape
     if g_log.shape != s_val.shape or k_raw.shape[:2] != (T, H) or v.shape != k_raw.shape:
-        raise fail("prefix_kernel_unsupported", f"shape 不一致：s {tuple(s_val.shape)} g {tuple(g_log.shape)} "
+        raise fail("prefix_kernel_unsupported", f"Shape mismatch: s {tuple(s_val.shape)}, g {tuple(g_log.shape)}, "
                    f"k {tuple(k_raw.shape)} v {tuple(v.shape)}")
     if layout.block_ptr_host[-1] != T:
-        raise fail("invalid_cu_seqlens", f"block layout 的 T = {layout.block_ptr_host[-1]} 与输入 T = {T} 不一致")
+        raise fail("invalid_cu_seqlens", f"Block layout length {layout.block_ptr_host[-1]} does not match input length {T}")
     D = k_raw.shape[-1]
     if needs_backward and (M > CHUNKWISE_TRAIN_MAX_M or D > CHUNKWISE_TRAIN_MAX_DH):
         raise fail("prefix_kernel_unsupported",
-                   f"chunkwise 训练要求 M <= {CHUNKWISE_TRAIN_MAX_M} 且 Dh <= {CHUNKWISE_TRAIN_MAX_DH}，收到 M={M}, Dh={D}")
+                   f"Prefix training requires M<={CHUNKWISE_TRAIN_MAX_M} and Dh<={CHUNKWISE_TRAIN_MAX_DH}; got M={M}, Dh={D}")
     if layout.block_ptr.device != s_val.device:
-        raise fail("device_mismatch", f"block layout 在 {layout.block_ptr.device}，输入在 {s_val.device}")
+        raise fail("device_mismatch",
+                   f"Block layout device {layout.block_ptr.device} does not match input device {s_val.device}")
 
 
 def chunkwise_prefix_states(
@@ -521,7 +522,7 @@ def chunkwise_prefix_states(
     *,
     output_final_state: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    """返回 (PrefixK, PrefixV, final_k, final_v)。Prefix 为 [Nc, M, H, D] storage；final 为 [Nseq, H, M, D] fp32 或 None。"""
+    """Return key/value prefixes [Nc, M, H, D] and optional FP32 final states [Nseq, H, M, D]."""
     needs_backward = torch.is_grad_enabled() and any(x.requires_grad for x in (s_val, k_raw, v, g_log))
     check_inputs(s_val, k_raw, v, g_log, layout, needs_backward=needs_backward)
     pk, pv, hk, hv = ChunkwisePrefixStateFn.apply(s_val, k_raw, v, g_log, layout.block_ptr, layout.seq_block_ptr,
@@ -536,3 +537,73 @@ __all__ = [
     "check_inputs", "chunkwise_prefix_states", "interpreter_enabled",
     "local_cumsum",
 ]
+
+
+@triton.jit(do_not_specialize=['N'])
+def _gate_neg_store_kernel(u, out, N, B: tl.constexpr):
+    i = tl.program_id(0).to(tl.int64) * B + tl.arange(0, B).to(tl.int64)
+    value = tl.load(u + i, i < N, other=0)
+    negated = (value.to(tl.int32, bitcast=True) ^ -2147483648).to(tl.float32, bitcast=True)
+    tl.store(out + i, negated, i < N)
+
+
+@triton.jit(do_not_specialize=['N'])
+def _gate_algebra_backward_kernel(u, ds, dg, out, N, HAS_S: tl.constexpr, HAS_G: tl.constexpr, B: tl.constexpr):
+    i = tl.program_id(0).to(tl.int64) * B + tl.arange(0, B).to(tl.int64)
+    if HAS_S:
+        storage_grad = tl.load(ds + i, i < N, other=0).to(tl.float32)
+        saved = tl.load(u + i, i < N, other=0)
+        factor = saved + 1.0
+        negated = (storage_grad.to(tl.int32, bitcast=True) ^ -2147483648).to(tl.float32, bitcast=True)
+        value = negated * factor
+    if HAS_G:
+        direct = tl.load(dg + i, i < N, other=0)
+        if HAS_S:
+            value = direct + value
+        else:
+            value = direct
+    value = value * 0.125
+    tl.store(out + i, value, i < N)
+
+
+class GateAlgebraFn(torch.autograd.Function):
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(ctx, log_sigmoid, storage_dtype):
+        g = log_sigmoid / 8
+        u = torch.expm1(g)
+        s = torch.empty_like(u, dtype=storage_dtype)
+        _gate_neg_store_kernel[(triton.cdiv(u.numel(), 256),)](
+            u, s, u.numel(), B=256, num_warps=4, num_stages=1, enable_fp_fusion=False)
+        ctx.save_for_backward(g, u)
+        ctx.set_materialize_grads(False)
+        return g, s
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    def backward(ctx, dg, ds):
+        g, u = ctx.saved_tensors
+        if ds is None and dg is None:
+            return None, None
+        if torch.is_grad_enabled():
+            value = (-ds.float()) * (torch.expm1(g) + 1) if ds is not None else None
+            if dg is not None:
+                value = dg + value if value is not None else dg
+            return value / 8, None
+        ds = ds.contiguous() if ds is not None else None
+        dg = dg.contiguous() if dg is not None else None
+        out = torch.empty_like(u)
+        _gate_algebra_backward_kernel[(triton.cdiv(u.numel(), 256),)](
+            u, ds, dg, out, u.numel(), HAS_S=ds is not None, HAS_G=dg is not None,
+            B=256, num_warps=4, num_stages=1, enable_fp_fusion=False)
+        return out, None
+
+
+def gate_algebra(log_sigmoid, storage_dtype, tau):
+    if (tau == 8 and log_sigmoid.is_cuda and log_sigmoid.dtype == torch.float32
+            and log_sigmoid.is_contiguous() and storage_dtype in (torch.bfloat16, torch.float16)):
+        return GateAlgebraFn.apply(log_sigmoid, storage_dtype)
+    g = log_sigmoid / tau
+    return g, (-torch.expm1(g)).to(storage_dtype)

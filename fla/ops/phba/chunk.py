@@ -13,10 +13,9 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.phba.flash_attention import ensure_ready
-from fla.ops.phba.gate import gate_algebra
 from fla.ops.phba.parallel import BlockMajorConfig, block_major_attention
 from fla.ops.phba.plans import CHUNKWISE_VALIDATED_C, MAX_KH, SequenceLengthPlan, _resolve_length_plan
-from fla.ops.phba.prefix import chunkwise_prefix_states
+from fla.ops.phba.prefix import chunkwise_prefix_states, gate_algebra
 from fla.ops.phba.routing import build_routes
 from fla.utils import input_guard
 

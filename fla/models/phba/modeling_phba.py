@@ -17,7 +17,7 @@ from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedMod
 from fla.models.phba.configuration_phba import PHBAConfig
 from fla.modules import RMSNorm
 from fla.modules.activations import swiglu
-from fla.ops.phba.linear import _SwiGLULinear
+from fla.ops.phba.backends.cublaslt import _SwiGLULinear
 from fla.ops.phba.plans import _resolve_length_plan
 
 

@@ -26,15 +26,16 @@ Pointer arithmetic uses int64. Canonical sorting uses int32 keys only when the e
 
 ## Implementation layout
 
-The public entry is `chunk.py`, with sequence geometry and workspace limits in `plans.py`. `parallel.py` owns joint attention forward and autograd dispatch; `prefix.py` owns the recurrent prefix computation. Internal responsibilities are grouped as follows:
+The public entry is `chunk.py`, with sequence geometry and workspace limits in `plans.py`. `parallel.py` owns joint attention forward and autograd dispatch; `prefix.py` owns gate algebra and the recurrent prefix computation. Internal responsibilities are grouped as follows:
 
-| Module           | Responsibility                                                               |
-| ---------------- | ---------------------------------------------------------------------------- |
-| `routing.py`     | Block layout, centroids and discrete top-k routes                             |
-| `metadata.py`    | Canonical token metadata and derived prefix-state metadata                    |
-| `chunk_bwd.py`   | Attention backward dispatch, branch kernels and deterministic query ownership |
-| `tape.py`        | Grouped deterministic producer/owner workspaces and kernels                   |
-| `utils.py`       | Input contracts, structured errors and isolated preflight autograd            |
-| `naive.py`       | FP64 and storage-aware references, including routing and metadata oracles     |
+| Module         | Responsibility                                                             |
+| -------------- | -------------------------------------------------------------------------- |
+| `routing.py`   | Block layout, centroids and discrete top-k routes                          |
+| `metadata.py`  | Canonical token metadata and derived prefix-state metadata                 |
+| `chunk_bwd.py` | Attention backward, grouped tape kernels and deterministic query ownership |
+| `utils.py`     | Input contracts, structured errors and gradient alignment                  |
+| `naive.py`     | FP64 and storage-aware references, including routing and metadata oracles  |
 
-`flash_attention.py` adapts the local-attention interface. `linear.py` and `backends/` provide optional projection acceleration, with native fallbacks and packaged source resources. Profiling and algorithm-screening tools live under `benchmarks/`, outside the production operator. Internal module paths are implementation details; use the exports from `fla.ops.phba` for the public operator and sequence plan.
+`flash_attention.py` adapts the local-attention interface. `backends/cublaslt.py` owns projection autograd wrappers and optional acceleration, with native fallbacks and packaged source resources. Profiling and algorithm-screening tools live under `benchmarks/`, outside the production operator. Internal module paths are implementation details; use the exports from `fla.ops.phba` for the public operator and sequence plan.
+
+Production FlashAttention initialization checks dependencies, device support and the low-level parameter schema. Numerical ABI checks and layout/route assertions live in `tests/ops/test_phba.py`; initialization does not generate random tensors or run a numerical backward probe.

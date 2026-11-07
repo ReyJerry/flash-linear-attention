@@ -8,8 +8,8 @@
 import pytest
 import torch
 
-from fla.ops.phba import SequenceLengthPlan, chunk_phba
-from fla.ops.phba.naive import HostLayout, highest_precision, reference_a_chunkwise
+from fla.ops.phba import SequenceLengthPlan, chunk_phba, flash_attention
+from fla.ops.phba.naive import HostLayout, highest_precision, reference_a_chunkwise, rstate_from_rtok
 from fla.ops.phba.routing import build_routes
 from fla.utils import IS_NVIDIA, assert_close, device, find_spec_cached
 
@@ -130,11 +130,8 @@ def test_routing_and_metadata(topk):
     from fla.ops.phba.metadata import build_direct_metadata
     from fla.ops.phba.naive import (
         centroid_reference,
-        check_route_invariants,
         metadata_reference,
         route_reference,
-        sort_rho_segments,
-        verify_against_host,
     )
     from fla.ops.phba.routing import compute_block_centroids
 
@@ -143,8 +140,8 @@ def test_routing_and_metadata(topk):
     q = torch.ones(162, 2, 32, device=device, dtype=torch.bfloat16)
     k = (torch.arange(162, device=device) // 32 + 1).to(q.dtype)[:, None, None].expand_as(q).contiguous()
     layout, token, state = build_routes(q_rope=q, k_rope=k, length_plan=plan, chunk_size=32, topk=topk)
-    verify_against_host(layout)
-    check_route_invariants(token, state, layout)
+    _verify_against_host(layout)
+    _check_route_invariants(token, state, layout)
     centroids = compute_block_centroids(k, layout)
     assert torch.equal(centroids, centroid_reference(k, layout.block_ptr_host))
     expected_token, expected_state, _ = route_reference(q, centroids, layout, topk - 1)
@@ -161,7 +158,7 @@ def test_routing_and_metadata(topk):
         count, offset, rows = metadata_reference(route, layout.Nc)
         assert torch.equal(actual.count.cpu(), count)
         assert torch.equal(actual.offset.cpu(), offset)
-        assert sort_rho_segments(actual) == rows
+        assert _sort_rho_segments(actual) == rows
         assert torch.all(actual.rho[int(offset[-1]):] == -1)
 
 
@@ -251,3 +248,142 @@ def test_length_plan_source_identity_and_mutation(monkeypatch):
     cu[1] = 3
     with pytest.raises(ValueError, match='different boundaries'):
         _resolve_length_plan(1, 8, plan.device, cu, plan)
+
+
+def _sort_rho_segments(meta) -> list[list[int]]:
+    """Read and sort each expert segment for metadata comparisons."""
+    off = meta.offset.tolist()
+    rho = meta.rho[:off[-1]].tolist()
+    return [sorted(rho[off[e]:off[e + 1]]) for e in range(len(off) - 1)]
+
+
+def _verify_against_host(layout) -> None:
+    """Compare device block boundaries and sequence ownership with the host layout."""
+    names = ('block_ptr', 'seq_block_ptr', 'block_seq', 'current_block', 'prefix_valid',
+             'work_block', 'work_start', 'work_end', 'work_seq')
+    t = {name: getattr(layout, name).tolist() for name in names}
+    assert tuple(t['block_ptr']) == layout.block_ptr_host
+    assert tuple(t['seq_block_ptr']) == layout.seq_block_ptr_host
+    sbp = t['seq_block_ptr']
+    for b, s in enumerate(t['block_seq']):
+        assert sbp[s] <= b < sbp[s + 1]
+    assert len(t['work_block']) == layout.Nwork and len(t['current_block']) == layout.T
+
+
+def _check_route_invariants(rtok: torch.Tensor, rstate: torch.Tensor, layout) -> None:
+    """Check route uniqueness, sequence boundaries, strict history and prefix validity."""
+    H, T, kh = rtok.shape
+    dev = rtok.device
+    cb = layout.current_block.to(dev).long()
+    bs = layout.block_seq.to(dev).long()
+    r = rtok.long()
+    valid = r >= 0
+    assert not (bool((r[valid] >= layout.Nc).any()) or bool((r < -1).any())), 'Token routes contain out-of-range block IDs'
+    safe = r.clamp(min=0)
+    assert not bool((valid & (bs[safe] != bs[cb][None, :, None])).any()), 'Token routes cross sequence boundaries'
+    assert not bool((valid & (safe >= cb[None, :, None])).any()), 'Token routes contain nonhistorical blocks'
+    if kh > 1:
+        s = torch.sort(torch.where(valid, r, torch.arange(-kh, 0, device=dev).expand_as(r)), -1).values
+        assert not bool((s[..., 1:] == s[..., :-1]).any()), 'Token routes contain duplicate blocks in a row'
+    expect = rstate_from_rtok(rtok, layout)
+    assert torch.equal(rstate, expect), 'State routes do not match the current/token routes and prefix validity'
+
+
+def _reference_attention(q, k, v, cu, scale, causal):
+    """Compute FP32 output and log-normalizers independently for each packed sequence."""
+    T, H, D = q.shape
+    out = torch.empty(T, H, D, dtype=torch.float32, device=q.device)
+    lse = torch.empty(H, T, dtype=torch.float32, device=q.device)
+    cu = cu.tolist()
+    for s in range(len(cu) - 1):
+        a, b = cu[s], cu[s + 1]
+        qs, ks, vs = (x[a:b].float().transpose(0, 1) for x in (q, k, v))   # [H, L, D]
+        scores = qs @ ks.transpose(1, 2) * scale
+        if causal:
+            L = b - a
+            mask = torch.ones(L, L, dtype=torch.bool, device=q.device).triu(1)
+            scores = scores.masked_fill(mask, float("-inf"))
+        lse[:, a:b] = torch.logsumexp(scores, dim=-1)
+        out[a:b] = (torch.softmax(scores, dim=-1) @ vs).transpose(0, 1)
+    return out, lse
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ('dtype', 'head_dim'),
+    [
+        pytest.param(torch.float16, 16, id='fp16-minimum-width'),
+        pytest.param(torch.bfloat16, 64, id='bf16-aligned-width'),
+        pytest.param(torch.float16, 72, id='fp16-nonpower-width'),
+        pytest.param(torch.bfloat16, 128, id='bf16-maximum-width'),
+    ],
+)
+def test_flash_attention_contract(dtype, head_dim):
+    """Verify the packed low-level ABI and independent output/gradient reference."""
+    torch.manual_seed(42)
+    flash_attention.ensure_ready(device, dtype, head_dim)
+    lengths, heads = (5, 17), 2
+    total = sum(lengths)
+    cu = torch.tensor((0, 5, total), dtype=torch.int32, device=device)
+    q, k, v, do = [torch.randn(total, heads, head_dim, device=device, dtype=dtype) for _ in range(4)]
+    scale = head_dim ** -0.5
+    with highest_precision():
+        out, lse = flash_attention.varlen_forward(
+            q, k, v, cu, cu, max(lengths), max(lengths), softmax_scale=scale, causal=True,
+        )
+        assert out.shape == q.shape and out.dtype == dtype
+        assert lse.dtype == torch.float32 and lse.shape == (heads, total) and lse.is_contiguous()
+        leaves = [x.detach().float().requires_grad_() for x in (q, k, v)]
+        ref_out, ref_lse = _reference_attention(*leaves, cu, scale, causal=True)
+        tolerance = 2e-2 if dtype == torch.bfloat16 else 5e-3
+        assert (out.float() - ref_out.detach()).abs().max() <= tolerance
+        assert (lse - ref_lse.detach()).abs().max() <= 1e-2
+        actual = [torch.empty_like(x) for x in (q, k, v)]
+        # joint output/statistics must also work in independently allocated storage
+        softmax_d = flash_attention.varlen_backward(
+            do, q, k, v, out.clone(), lse.clone(), *actual, cu, cu, max(lengths), max(lengths),
+            softmax_scale=scale, causal=True, deterministic=True,
+        )
+        assert isinstance(softmax_d, torch.Tensor)
+        assert softmax_d.shape == (heads, total + 128 * len(lengths))
+        reference = torch.autograd.grad(ref_out, leaves, do.float())
+    for result, expected in zip(actual, reference):
+        assert torch.isfinite(result).all()
+        relative_max = (result.float() - expected).abs().max() / (expected.abs().max() + 1e-6)
+        assert relative_max <= 5e-2
+
+
+def test_flash_attention_preflight(monkeypatch):
+    """Keep cached dependency/device/schema checks free of numerical self-tests."""
+    def unexpected(*args, **kwargs):
+        pytest.fail('Production preflight must not allocate probe tensors or run autograd')
+
+    monkeypatch.setattr(flash_attention, '_READY', set())
+    monkeypatch.setattr(flash_attention, '_SCHEMA_OK', False)
+    monkeypatch.setattr(torch, 'randn', unexpected)
+    monkeypatch.setattr(torch.autograd, 'grad', unexpected)
+    monkeypatch.setattr(torch.Tensor, 'backward', unexpected)
+    with torch.inference_mode():
+        flash_attention.ensure_ready(device, torch.bfloat16, 64)
+        flash_attention.ensure_ready(device, torch.bfloat16, 64)
+    assert len(flash_attention._READY) == 1
+    with pytest.raises(RuntimeError, match='requires CUDA'):
+        flash_attention.ensure_ready(torch.device('cpu'), torch.bfloat16, 64)
+    with pytest.raises(RuntimeError, match='FP16/BF16'):
+        flash_attention.ensure_ready(device, torch.float32, 64)
+    with pytest.raises(RuntimeError, match='head dimension'):
+        flash_attention.ensure_ready(device, torch.bfloat16, 8)
+
+    def incompatible(q):
+        pass
+
+    check_schema = flash_attention.check_schema
+    monkeypatch.setattr(flash_attention, '_READY', set())
+    monkeypatch.setattr(flash_attention, '_SCHEMA_OK', False)
+    monkeypatch.setattr(
+        flash_attention, 'check_schema',
+        lambda: check_schema(forward_fn=incompatible, backward_fn=incompatible),
+    )
+    with pytest.raises(RuntimeError, match='Unsupported FA varlen'):
+        flash_attention.ensure_ready(device, torch.bfloat16, 64)
+    assert not flash_attention._READY and not flash_attention._SCHEMA_OK

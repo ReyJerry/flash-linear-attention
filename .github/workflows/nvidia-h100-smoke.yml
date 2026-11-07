@@ -74,16 +74,28 @@ jobs:
           echo "Found dependent test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
+      - name: Install and check PHBA attention dependency when selected
+        if: steps.detect.outputs.skip != 'true' && steps.setup.outputs.skip_tests == 'false' && contains(steps.find-tests.outputs.test_files, 'phba')
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/python -m pip install --no-build-isolation --no-deps 'flash-attn>=2.8.3.post1,<2.9'
+          $CONDA_BIN_PATH/python -c "import torch; from fla.utils import IS_NVIDIA; from fla.ops.phba.flash_attention import check_schema, check_device; assert IS_NVIDIA; check_schema(); check_device(torch.device('cuda'))"
+
       - name: Run tests (smoke-marked ops subset, full other suites)
         if: steps.find-tests.outputs.test_files
         shell: bash
         run: |
           # Per-file processes, same as the full suite (avoids runner OOM).
           # find_dependent_tests.py prints absolute paths; match */tests/ops/*.
-          # pytest exit 5 = no smoke-marked tests collected in this file, skip.
+          # other ops may lack smoke cases; PHBA requires a nonempty, non-skipped run.
           rc=0
           for f in ${{ steps.find-tests.outputs.test_files }}; do
             case "$f" in
+              */tests/ops/test_phba.py)
+                report="$RUNNER_TEMP/phba-smoke.xml"
+                FLA_CI_ENV=0 $CONDA_BIN_PATH/python -m pytest -s -v --exitfirst -m smoke --junitxml="$report" "$f" || exit 1
+                $CONDA_BIN_PATH/python -c "import sys, xml.etree.ElementTree as ET; cases=list(ET.parse(sys.argv[1]).iter('testcase')); assert cases, 'No PHBA smoke cases executed'; assert not any(c.find(tag) is not None for c in cases for tag in ('skipped', 'failure', 'error')), 'PHBA smoke must execute without skips or failures'" "$report" || exit 1
+                ;;
               */tests/ops/*)
                 $CONDA_BIN_PATH/pytest -s -v --exitfirst -m smoke "$f" || rc=$?
                 if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then exit 1; fi

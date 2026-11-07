@@ -116,6 +116,16 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
     assert "fla/backends.py" in core_names
+    phba_resources = {
+        'fla/ops/phba/backends/csrc/lt_exact.cpp',
+        'fla/ops/phba/backends/csrc/native_autocast.cpp',
+        'fla/ops/phba/backends/exact_gemm_algorithms.json',
+    }
+    assert phba_resources <= core_names
+    assert phba_resources.isdisjoint(ext_names)
+    with zipfile.ZipFile(core_wheel) as archive:
+        for name in phba_resources:
+            assert archive.read(name) == (ROOT / name).read_bytes()
     expected_sources = {path.relative_to(ROOT).as_posix() for path in (ROOT / "fla/modules").rglob("*.py")}
     assert expected_sources <= core_names
     assert "fla/utils/__init__.py" in core_names

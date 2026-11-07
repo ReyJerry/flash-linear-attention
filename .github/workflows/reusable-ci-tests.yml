@@ -69,6 +69,13 @@ jobs:
           echo "Found ops test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
+      - name: Install PHBA attention dependency when selected
+        if: steps.setup.outputs.skip_tests == 'false' && inputs.gpu_type == 'nvidia' && contains(steps.find-ops-tests.outputs.test_files, 'phba')
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pip install --no-build-isolation --no-deps 'flash-attn>=2.8.3.post1,<2.9'
+          $CONDA_BIN_PATH/python -c "from fla.ops.phba.flash_attention import check_schema; check_schema()"
+
       - name: Detect op/backend/dispatch changes
         if: steps.setup.outputs.skip_tests == 'false'
         id: check-dispatch
@@ -180,6 +187,13 @@ jobs:
           TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.setup.outputs.all_changed_files }}")
           echo "Found models test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
+
+      - name: Install PHBA attention dependency when selected
+        if: steps.setup.outputs.skip_tests == 'false' && inputs.gpu_type == 'nvidia' && contains(steps.find-models-tests.outputs.test_files, 'phba')
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pip install --no-build-isolation --no-deps 'flash-attn>=2.8.3.post1,<2.9'
+          $CONDA_BIN_PATH/python -c "from fla.ops.phba.flash_attention import check_schema; check_schema()"
 
       - name: Run pytest on models test files
         if: steps.find-models-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'

@@ -11,13 +11,42 @@ import torch
 from torch import nn
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from fla.layers.phba import PHBA
+from fla.layers.phba import PHBA, PHBALinear
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel
 from fla.models.phba.configuration_phba import PHBAConfig
 from fla.modules import RMSNorm
-from fla.modules.phba import PHBAMLP
+from fla.modules.activations import swiglu
 from fla.ops.phba import SequenceLengthPlan
+from fla.ops.phba.linear import _SwiGLULinear
+
+
+class PHBAMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        hidden_ratio: int | None = None,
+        intermediate_size: int | None = None,
+        hidden_act: str = 'swish',
+        fuse_swiglu: bool = True,
+    ):
+        super().__init__()
+        if hidden_act != 'swish':
+            raise ValueError('PHBA supports the swish-gated MLP')
+        hidden_ratio = 4 if hidden_ratio is None else hidden_ratio
+        if intermediate_size is None:
+            intermediate_size = int(hidden_size * hidden_ratio * 2 / 3)
+            intermediate_size = 256 * ((intermediate_size + 255) // 256)
+        self.fuse_swiglu = fuse_swiglu
+        self.gate_proj = PHBALinear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = PHBALinear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = PHBALinear(intermediate_size, hidden_size, bias=False)
+
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        gate, value = self.gate_proj(x), self.up_proj(x)
+        if self.fuse_swiglu:
+            return _SwiGLULinear.apply(gate, value, self.down_proj.weight, self.down_proj.bias)
+        return self.down_proj(swiglu(gate, value))
 
 
 class PHBABlock(GradientCheckpointingLayer):

@@ -137,4 +137,4 @@ force_grid_wrap = 0
 "legacy/training/flame/*.py" = ["C408"]
 
 [tool.setuptools.package-data]
-"fla.modules.phba" = ["csrc/*.cpp", "*.json"]
+"fla.ops.phba.backends" = ["csrc/*.cpp", "*.json"]

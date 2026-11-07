@@ -120,3 +120,37 @@ def test_naive_formula_gradients():
         )
 
     assert torch.autograd.gradcheck(formula, tuple(leaves), fast_mode=True)
+
+
+@pytest.mark.parametrize('topk', [1, 4], ids=['no-history', 'history-and-tail'])
+def test_routing_and_metadata(topk):
+    from fla.ops.phba.metadata import build_direct_metadata, metadata_reference, sort_rho_segments
+    from fla.ops.phba.routing.centroid import centroid_reference, compute_block_centroids
+    from fla.ops.phba.routing.layout import verify_against_host
+    from fla.ops.phba.routing.topk import check_route_invariants, route_reference
+
+    plan = SequenceLengthPlan.from_host((97, 65), device)
+    # integer block scores avoid near-tie ambiguity between reference and kernel reductions
+    q = torch.ones(162, 2, 32, device=device, dtype=torch.bfloat16)
+    k = (torch.arange(162, device=device) // 32 + 1).to(q.dtype)[:, None, None].expand_as(q).contiguous()
+    layout, token, state = build_routes(q_rope=q, k_rope=k, length_plan=plan, chunk_size=32, topk=topk)
+    verify_against_host(layout)
+    check_route_invariants(token, state, layout)
+    centroids = compute_block_centroids(k, layout)
+    assert torch.equal(centroids, centroid_reference(k, layout.block_ptr_host))
+    expected_token, expected_state, _ = route_reference(q, centroids, layout, topk - 1)
+    assert torch.equal(token, expected_token)
+    assert torch.equal(state, expected_state)
+    metadata = build_direct_metadata(
+        token, state, layout.Nc, backward_mode='query_owner_deterministic',
+        retain_token_slots=True, derived_state_layout=layout,
+    )
+    for route, actual in ((token, metadata.tok), (state, metadata.state)):
+        if route.shape[-1] == 0:
+            assert actual is None
+            continue
+        count, offset, rows = metadata_reference(route, layout.Nc)
+        assert torch.equal(actual.count.cpu(), count)
+        assert torch.equal(actual.offset.cpu(), offset)
+        assert sort_rho_segments(actual) == rows
+        assert torch.all(actual.rho[int(offset[-1]):] == -1)

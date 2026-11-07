@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 FA_MIN_COMPUTE_CAPABILITY = (8, 0)
 
 # 锁定的 flash-attn 2.8.3.post1 低层 op 的参数名集合（flash_attn/flash_attn_interface.py）。
-# forward 没有 num_splits，也没有 deterministic（4.6 节参数表）。
+# forward 没有 num_splits，也没有 deterministic。
 FORWARD_PARAMS = frozenset({
     "q", "k", "v", "cu_seqlens_q", "cu_seqlens_k", "max_seqlen_q", "max_seqlen_k",
     "dropout_p", "softmax_scale", "causal", "window_size_left", "window_size_right", "softcap",
@@ -131,7 +131,7 @@ def varlen_forward(
     softmax_scale: float,
     causal: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """返回 (out [total_q, H, Dh] storage dtype, lse [H, total_q] fp32)。所有参数显式传入（4.6 节 forward 参数表）。"""
+    """返回 (out [total_q, H, Dh] storage dtype, lse [H, total_q] fp32)。所有参数显式传入。"""
     out, lse, _s_dmask, _rng = _ops().forward(
         q=q, k=k, v=v, cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
         max_seqlen_q=int(max_seqlen_q), max_seqlen_k=int(max_seqlen_k),
@@ -163,7 +163,7 @@ def varlen_backward(
 ) -> torch.Tensor:
     """out / softmax_lse 必须是 PHBA 的 joint O / L（不是分支自己的 O / LSE）。softmax_lse 必须是连续的 [H, total_q]。"""
     if not softmax_lse.is_contiguous():
-        raise fail("fa_layout_probe_failed", "softmax_lse 必须是连续的 [H, total_q]（切片要先 .contiguous()，4.6 节）")
+        raise fail("fa_layout_probe_failed", "softmax_lse 必须是连续的 [H, total_q]（切片要先 .contiguous()）")
     return _ops().backward(
         dout=dout, q=q, k=k, v=v, out=out, softmax_lse=softmax_lse, dq=dq, dk=dk, dv=dv,
         cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k,
@@ -208,7 +208,7 @@ def _reference_attention(q, k, v, cu, scale, causal):
 
 
 def runtime_smoke_probe(device: torch.device, dtype: torch.dtype, head_dim: int, *, num_heads: int = 2) -> ProbeResult:
-    """小 shape 的 forward + backward（4.6 节）。检查：
+    """小 shape 的 forward + backward。检查：
     - forward：out 与输入同 dtype / shape；lse 为 fp32、shape == [H, total_q]、连续；数值与 fp32 reference 接近；
     - backward：接受调用方给出的 joint 形状 out / lse（这里用 forward 自己的 out / lse，布局与 joint 相同），
       写入调用方分配的 dq / dk / dv；softmax_d 的 shape 为 [H, total_q + 128 * batch]（workspace 公式的依据）；
@@ -256,7 +256,7 @@ def runtime_smoke_probe(device: torch.device, dtype: torch.dtype, head_dim: int,
     if not isinstance(softmax_d, torch.Tensor) or tuple(softmax_d.shape) != (H, T + 128 * batch):
         got = tuple(softmax_d.shape) if isinstance(softmax_d, torch.Tensor) else type(softmax_d).__name__
         raise bad(f"softmax_d 应为 [H, total_q + 128 * batch] = [{H}, {T + 128 * batch}]，实际 {got}；"
-                  "4.6 节 FA workspace 公式需要重新核对")
+                  "FlashAttention backward workspace layout differs from the supported ABI")
     ref_out.backward(do.float())
     err_dq = float((dq.float() - qr.grad).abs().max())
     scale_ref = float(qr.grad.abs().max()) + 1e-6
@@ -302,7 +302,7 @@ def ensure_ready(device: torch.device, dtype: torch.dtype, head_dim: int) -> Pro
 
 
 def local_backward(dout, q, k, v, joint_out, joint_lse, block_ptr, batches, *, deterministic=False, softmax_scale=None):
-    """§4.24: same block batches as forward, caller-provided joint O/L, storage gradients.
+    """Use the same block batches as forward, caller-provided joint O/L, storage gradients.
 
     C++ mha_varlen_bwd requires dq/dk/dv dtype == q.dtype and stride(-1)==1.
     L[:, t0:t1] must be copied: FA indexes L as contiguous [H, batch_total_q].
@@ -319,16 +319,9 @@ def local_backward(dout, q, k, v, joint_out, joint_lse, block_ptr, batches, *, d
     return grads
 
 
-def probe_records() -> list[dict[str, Any]]:
-    """已通过的 probe 结果（写入 startup record / benchmark）。"""
-    from dataclasses import asdict
-
-    return [asdict(r) for r in _READY.values()]
-
-
 __all__ = [
     "BACKWARD_PARAMS", "FORWARD_PARAMS", "ProbeResult",
-    "check_device", "check_schema", "ensure_ready", "probe_records", "runtime_smoke_probe",
+    "check_device", "check_schema", "ensure_ready", "runtime_smoke_probe",
     "varlen_backward", "varlen_forward",
 ]
 

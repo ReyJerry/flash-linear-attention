@@ -20,7 +20,7 @@ from fla.ops.phba.reference import HostLayout, route_masks
 
 @contextlib.contextmanager
 def highest_precision():
-    """Reference B 与 fp32 routing oracle 显式关闭 TF32（6.5 节）。"""
+    """Reference B 与 fp32 routing oracle 显式关闭 TF32。"""
     old = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32, torch.get_float32_matmul_precision())
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False

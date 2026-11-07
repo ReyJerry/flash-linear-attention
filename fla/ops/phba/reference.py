@@ -317,7 +317,7 @@ class RefJointAttentionFn(torch.autograd.Function):
 
 
 def rstate_from_rtok_host(rtok: torch.Tensor, layout: HostLayout) -> torch.Tensor:
-    """Rstate = [current_block; Rtok]，PrefixValid = 0（每个 sequence 的首 block）的 entry 为 -1（2.3 / 2.6 节）。"""
+    """Rstate = [current_block; Rtok]，PrefixValid = 0（每个 sequence 的首 block）的 entry 为 -1。"""
     H, T, kh = rtok.shape
     dev = rtok.device
     tb = layout.token_block(dev)
@@ -332,7 +332,7 @@ def rstate_from_rtok_host(rtok: torch.Tensor, layout: HostLayout) -> torch.Tenso
 def alg6_reference(q_rope, q_raw, k_rope, v, prefix_k, prefix_v, oloc, lloc, rtok, layout: HostLayout, scale: float):
     """Algorithm 6 merge 的参照：以给定的 (Oloc storage, Lloc fp32 [H, T]) 为种子，在 current prefix、历史 token、
     历史 aligned prefix 上做一次 joint softmax（与 kernel 的逐 tile online-softmax 代数等价）。
-    P 在进入 dot 前转为 storage dtype（2.1 节 dot 契约）；返回 (O storage [T,H,D], L compute [H,T])。"""
+    P 在进入 dot 前转为 storage dtype；返回 (O storage [T,H,D], L compute [H,T])。"""
     storage, cd = q_rope.dtype, compute_dtype(q_rope.dtype)
     T, H, D = q_rope.shape
     M = prefix_k.shape[1]
@@ -403,15 +403,6 @@ def reference_a_chunkwise(q_raw, q_rope, k_rope, k_raw, v, a_storage, *, tau: fl
     return out, lse, pk, pv
 
 
-def legacy_routes_to_full(topk_filtered: torch.Tensor, filtered_chunk_indices: torch.Tensor) -> torch.Tensor:
-    """legacy 的 topk_filtered（filtered chunk 空间）转为全量 block id，-1 保持 -1。"""
-    if topk_filtered.shape[-1] == 0 or filtered_chunk_indices.numel() == 0:
-        return torch.full(topk_filtered.shape, -1, dtype=torch.int32, device=topk_filtered.device)
-    idx = topk_filtered.long()
-    full = filtered_chunk_indices.long()[idx.clamp(min=0)]
-    return torch.where(idx >= 0, full, torch.full_like(full, -1)).to(torch.int32)
-
-
 __all__ = [
     "HostLayout",
     "RefChunkwisePrefixFn",
@@ -419,7 +410,6 @@ __all__ = [
     "alg6_reference",
     "compute_dtype",
     "gate_from_storage",
-    "legacy_routes_to_full",
     "local_cumsum",
     "local_reference",
     "prefix_backward_branch",

@@ -22,11 +22,7 @@ from functools import cache
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from filelock import FileLock
-from torch import nn
-
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 _BACKEND = None
 _INITIALIZED = False
@@ -158,48 +154,3 @@ def exact_backend(device: torch.device) -> _ExactBackend | None:
             warnings.warn(f'PHBA exact GEMM unavailable; using native linear operations: {error}', stacklevel=2)
         _INITIALIZED = True
     return _BACKEND
-
-
-def exact_weight_gradient(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16 or torch.is_grad_enabled():
-        return torch.mm(a, b)
-    backend = exact_backend(a.device)
-    return torch.mm(a, b) if backend is None else backend.weight_gradient(a=a, b=b)
-
-
-class _Linear(torch.autograd.Function):
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(ctx, x, weight):
-        ctx.save_for_backward(x, weight)
-        return F.linear(x, weight)
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    def backward(ctx, grad):
-        x, weight = ctx.saved_tensors
-        inputs = x.reshape(-1, x.shape[-1])
-        grad = grad.reshape(-1, weight.shape[0])
-        dx = torch.mm(grad, weight).reshape(x.shape) if ctx.needs_input_grad[0] else None
-        dw = exact_weight_gradient(a=grad.t(), b=inputs) if ctx.needs_input_grad[1] else None
-        return dx, dw
-
-
-class PHBALinear(nn.Linear):
-    """PHBA projection with an optional byte-validated H20 weight-gradient path."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        eligible = (
-            not torch.compiler.is_compiling() and type(x) in (torch.Tensor, nn.Parameter)
-            and type(self.weight) in (torch.Tensor, nn.Parameter)
-            and self.bias is None and self.training and torch.is_grad_enabled() and x.is_cuda
-            and torch.is_autocast_enabled('cuda') and torch.get_autocast_dtype('cuda') == torch.bfloat16
-            and x.is_contiguous() and self.weight.is_contiguous()
-            and x.shape[-1] == 2048 and x.numel() == 8192 * 2048 and self.out_features in (2048, 4272)
-        )
-        backend = exact_backend(x.device) if eligible else None
-        if backend is None:
-            return F.linear(x, self.weight, self.bias)
-        return _Linear.apply(backend.autocast.cached_bf16(x), backend.autocast.cached_bf16(self.weight))

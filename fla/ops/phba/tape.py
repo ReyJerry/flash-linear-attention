@@ -297,7 +297,7 @@ def build_group_metadata(route, meta, workspace, plan: OwnerTapePlan, *, head_st
 def run_tape_group(q, k, v, dout, lse, delta, route, meta, block_ptr, prefix_valid, dq, dk, dv,
                    workspace, plan: OwnerTapePlan, *, head_start, branch, chunk_size, num_slots, bc, bq,
                    index32: bool | None = None):
-    """Actual producer/consumer boundary: observers can verify plan, tensors, buffers and head_start."""
+    """Compute one deterministic producer/consumer head group using its saved forward plan."""
     producer_stages = owner_tape_producer_stages(plan, bc)
     tile_major = owner_tape_uses_tile_major(plan, branch)
     t, h, d = q.shape
@@ -314,8 +314,8 @@ def run_tape_group(q, k, v, dout, lse, delta, route, meta, block_ptr, prefix_val
     prefix_strides = k.stride()[:3] if branch else (0, 0, 0)
     gradient_strides = dk.stride()[:3] if branch else (0, 0, 0)
     nc = meta.count.numel() // h
-    # Targeted B1x8K paper geometry; only independent CTA mapping changes.
-    # Keep all original CTAs (including empty ones) and each CTA's Rho traversal.
+    # reorder only independent CTAs for the validated 8K geometry
+    # retain empty CTAs and each CTA's canonical row traversal
     ordered = (t == 8192 and h == 16 and d == 128 and num_slots == 128 and bq == 16 and bc == 32
                and chunk_size in (64, 128, 256, 512) and nc * plan.group_size <= 2048
                and workspace.nbytes <= 255 * 1024**2)

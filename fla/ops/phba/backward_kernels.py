@@ -5,10 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Algorithm 7 (§4.24–4.26): two branch launches, fp32 dQ atomics, single-writer dK/dV.
+"""Sparse attention gradients with deterministic tape and bounded-memory fallbacks.
 
 RoPE and chunkwise Prefix backward remain outside the attention Function.
-Every output is zero-initialized, including unrouted blocks and invalid prefixes.
+Key/value accumulators start at zero; deterministic query owners write their complete outputs.
 """
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ def direct_sparse_backward(q_rope, q_raw, k_rope, v, pk, pv, dout, lse, delta, m
                            block_ptr, prefix_valid, *, chunk_size, bc=32, bq=16, n_query_split=1,
                            backward_mode='atomic', rtok=None, rstate=None, tape_plan=None):
     if n_query_split != 1:
-        raise fail('n_query_split_unsupported', 'Algorithm 7 phase 1 requires n_query_split=1')
+        raise fail('n_query_split_unsupported', 'Sparse backward requires n_query_split=1')
     if bq not in (16, 32) or bc not in (16, 32, 64):
         raise fail('invalid_config', 'unsupported Algorithm 7 tiles')
     if not lse.is_contiguous() or not delta.is_contiguous():

@@ -20,7 +20,6 @@ from fla.ops.phba.plans import (
     CHUNKWISE_TRAIN_MAX_DH,
     CHUNKWISE_TRAIN_MAX_M,
     CHUNKWISE_VALIDATED_C,
-    PREFIX_REVERSE_WORKSPACE_CAP,
     BlockLayout,
     PrefixBackwardPlan,
     prefix_backward_plan,
@@ -63,26 +62,6 @@ def interpreter_enabled() -> bool:
     return os.environ.get("TRITON_INTERPRET", "0") == "1"
 
 
-def install_interpreter_range_shim() -> None:
-    """只用于 TRITON_INTERPRET=1 的 CPU 测试：kernel 中 range 的边界来自 tl.load，解释器给出的是 shape (1,) 的数组。"""
-    if not interpreter_enabled():
-        raise RuntimeError("install_interpreter_range_shim 只能在 TRITON_INTERPRET=1 时使用")
-    import builtins
-
-    import numpy as np
-
-    def _to_int(x):
-        handle = getattr(x, "handle", None)
-        data = getattr(handle, "data", None)
-        return int(np.asarray(data).reshape(-1)[0]) if data is not None else int(x)
-
-    def _range(*args):
-        return builtins.range(*(_to_int(a) for a in args))
-
-    globals()["range"] = _range
-
-
-# kernels
 @triton.jit
 def _local_cumsum_kernel(
     x_ptr, y_ptr, block_ptr,
@@ -112,7 +91,7 @@ def _prefix_fwd_kernel(
     """grid = (Nseq * H, cdiv(M, BK), cdiv(D, BV))。每个 program 顺序遍历本 sequence 的 block，fp32 carry 在寄存器中。
 
     s, gk : [T, H, M]；z : [T, H, D]；out : [Nc, M, H, D]（storage）；ht : [Nseq, H, M, D]（fp32，可选）
-    数值与 legacy chunk_fwd_kernel_h 的 USE_GK 路径相同：h *= exp(g_last)；k = (k * exp(g_last - g)).to(k.dtype)；h += dot(k, v)
+    Insertion operands are rounded to storage dtype before the FP32 state update.
     """
     i_nh = tl.program_id(0)
     i_k = tl.program_id(1)
@@ -161,7 +140,7 @@ def _prefix_bwd_kernel(
     H: tl.constexpr, M: tl.constexpr, D: tl.constexpr, C: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_V: tl.constexpr, ACCUMULATE: tl.constexpr,
 ):
-    """grid = (Nseq, H)。逆序遍历本 sequence 的 block；数值与 legacy _chunk_state_history_bwd_kernel 相同。
+    """grid = (Nseq, H)。按固定逆序遍历本 sequence 的 block。
 
     prefix / dprefix : [Nc, M, H, D]；ds, dg : [T, H, M] fp32；dz : [T, H, D] fp32
     ACCUMULATE：ds / dg 在已有值上相加（第二路 V 在第一路 K 之后，同一 stream 顺序执行，结果确定）。
@@ -350,7 +329,6 @@ def _prefix_bwd_segment_kernel(
         grad_next = grad_h + exp_g_last[:, None] * grad_next
 
 
-# host wrappers
 def _launch_kwargs(name: str) -> dict:
     cfg = LAUNCH[name]
     return {"num_warps": cfg.num_warps, "num_stages": cfg.num_stages}
@@ -389,21 +367,8 @@ def _prefix_backward(s, z, gk, prefix, dprefix, ds, dz, dg, layout: BlockLayout,
     )
 
 
-def prefix_backward_signature():
-    """Composite logical backward identity includes both algorithms compiled by preflight."""
-    scan = LAUNCH['prefix_reverse_state']
-    local = LAUNCH['prefix_bwd_local']
-    serial = LAUNCH['chunk_state_bwd']
-    return (('algorithm', 'reverse_state_then_local_v1'), ('workspace_cap', PREFIX_REVERSE_WORKSPACE_CAP),
-            ('scan_m', REVERSE_BLOCK_M), ('scan_d', REVERSE_BLOCK_D),
-            ('scan_warps', scan.num_warps), ('scan_stages', scan.num_stages),
-            ('local_bt', BWD_BLOCK_T), ('local_warps', local.num_warps), ('local_stages', local.num_stages),
-            ('segment_chunks', SEGMENT_CHUNKS),
-            ('serial_bt', BWD_BLOCK_T), ('serial_warps', serial.num_warps), ('serial_stages', serial.num_stages))
-
-
 def _prefix_reverse_state(gk, dprefix, layout: BlockLayout, out):
-    """Materialize the FP32 adjoint before each chunk; observer inputs retain actual gk/layout."""
+    """Materialize the FP32 adjoint before each chunk."""
     _, H, M = gk.shape
     D = dprefix.shape[-1]
     nseq = len(layout.seq_block_ptr_host) - 1
@@ -417,7 +382,7 @@ def _prefix_reverse_state(gk, dprefix, layout: BlockLayout, out):
 
 def _prefix_backward_segment(s, z, gk, prefix, dprefix, reverse_state, ds, dz, dg,
                              layout: BlockLayout, accumulate: bool):
-    """Launch rectangular sequence/segment ownership; observers receive actual gk/z/layout and dPrefix."""
+    """Launch deterministic backward over independent contiguous sequence segments."""
     _, H, M = s.shape
     D = z.shape[-1]
     boundaries = layout.seq_block_ptr_host
@@ -460,7 +425,7 @@ def _aligned_contiguous(x: torch.Tensor | None, like: torch.Tensor) -> torch.Ten
 
 
 class ChunkwisePrefixStateFn(torch.autograd.Function):
-    """Prefix-State（chunkwise）的 autograd 边界：在 PHBA attention Function 之外（4.24 节）。
+    """Prefix-State（chunkwise）的 autograd 边界：在 PHBA attention Function 之外。
 
     输入 s_val, k_raw, v, g_log；输出 PrefixK, PrefixV（[Nc, M, H, D] storage）与可选的 final state（fp32，不可导）。
     """
@@ -482,7 +447,7 @@ class ChunkwisePrefixStateFn(torch.autograd.Function):
             ht_k = ht_v = None
         _prefix_forward(s_val, k_raw, gk, layout, prefix_k, ht_k)
         _prefix_forward(s_val, v, gk, layout, prefix_v, ht_v)
-        # ctx 只保存 host 元信息；backward 需要的 device tensor（含 BlockPtr / SeqBlockPtr）一律 save_for_backward（5.1 节）
+        # ctx 只保存 host 元信息；backward 需要的 device tensor（含 BlockPtr / SeqBlockPtr）一律 save_for_backward
         ctx.layout_host = (layout.chunk_size, layout.block_ptr_host, layout.seq_block_ptr_host)
         ctx.backward_plan = prefix_backward_plan(nc, H, M, D)
         ctx.save_for_backward(s_val, k_raw, v, g_log, block_ptr, seq_block_ptr, prefix_k, prefix_v)
@@ -520,7 +485,7 @@ class ChunkwisePrefixStateFn(torch.autograd.Function):
 
 def check_inputs(s_val: torch.Tensor, k_raw: torch.Tensor, v: torch.Tensor, g_log: torch.Tensor,
                  layout: BlockLayout, *, needs_backward: bool) -> None:
-    """生产路径不回退：任何不支持的输入都报 prefix_kernel_unsupported（C 类；allow_prefix_reference_cpu 由调用方处理）。"""
+    """Validate prefix geometry, storage types and device layout before launching kernels."""
     c = layout.chunk_size
     if c not in CHUNKWISE_VALIDATED_C:
         raise fail("prefix_kernel_unsupported", f"chunkwise 的 C = {c} 不在 validated set {CHUNKWISE_VALIDATED_C}")
@@ -571,6 +536,6 @@ def chunkwise_prefix_states(
 
 __all__ = [
     "BWD_BLOCK_T", "CUMSUM_BS", "FWD_BK", "FWD_BV", "LAUNCH", "ChunkwisePrefixStateFn", "LaunchConfig",
-    "check_inputs", "chunkwise_prefix_states", "install_interpreter_range_shim", "interpreter_enabled",
+    "check_inputs", "chunkwise_prefix_states", "interpreter_enabled",
     "local_cumsum",
 ]

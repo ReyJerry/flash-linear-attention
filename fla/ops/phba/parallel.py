@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import os
-import time
 from bisect import bisect_right
 from dataclasses import dataclass
 
@@ -306,7 +305,6 @@ def _owners(layout, q0, q1, br):
     return block, start, end
 
 
-# Inserted into the isolated block_major.py; these kernels only move integer metadata.
 @triton.jit(do_not_specialize=['Q0', 'Q1', 'EXPERTS'])
 def _canonical_window_bounds(global_offset, global_rho, begin, count, tasks, Q0, Q1, EXPERTS,
                              H: tl.constexpr, BQ: tl.constexpr, BT: tl.constexpr):
@@ -458,74 +456,35 @@ def validate_inputs(qr, qw, kr, v, pk, pv, rtok, layout):
         raise RuntimeError('PHBA kernels require CUDA; CPU only allowed in explicit interpreter tests')
 
 
-def block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, *, config=BlockMajorConfig(), local_seed=None, profile=False, canonical_token=None):
+def block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, *, config=BlockMajorConfig(), canonical_token=None):
     validate_inputs(qr, qw, kr, v, pk, pv, rtok, layout)
     t, h, d = qr.shape
     kh = rtok.shape[-1]
     plan = workspace_plan(t, h, d, kh, layout.Nc, config)
-    retained_slot_bytes = 0
     if canonical_token is not None:
         slots = canonical_token.source_slots
         if (slots is None or slots.dtype != torch.uint8 or not slots.is_contiguous()
                 or slots.numel() != t * h * kh or slots.device != qr.device):
             raise ValueError('invalid canonical route-slot metadata')
-        retained_slot_bytes = slots.numel() * slots.element_size()
-        if plan['workspace_bytes'] + retained_slot_bytes > config.workspace_budget_bytes:
+        if plan['workspace_bytes'] + slots.numel() * slots.element_size() > config.workspace_budget_bytes:
             raise ValueError('canonical reuse exceeds forward workspace budget')
-    if profile and qr.device.type != 'cuda':
-        raise ValueError('CUDA events profiling requires CUDA')
     ws = WindowWorkspace(plan, d, qr.dtype, qr.device)
     if ws.bytes() != plan['workspace_bytes']:
         raise RuntimeError('workspace allocation does not match budget plan')
     out, lse = torch.empty_like(qr), torch.empty((h, t), dtype=torch.float32, device=qr.device)
-    events = []
-    started = time.monotonic()
-
-    def phase(name, fn):
-        if not profile:
-            return fn()
-        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        start.record()
-        value = fn()
-        end.record()
-        events.append((name, start, end))
-        return value
-
-    if local_seed is None:
-        oloc, lloc = phase('local_fa', lambda: local_attention(qr, kr, v, layout, scale=d ** -0.5,
-                                                               fa_segment_batch_max=config.fa_segment_batch_max, fa_rows_per_call_max=config.fa_rows_per_call_max))
-    else:
-        oloc, lloc = local_seed
-        if (oloc.shape != qr.shape or not oloc.is_contiguous() or oloc.dtype != qr.dtype or oloc.device != qr.device
-                or lloc.shape != (h, t) or not lloc.is_contiguous() or lloc.dtype != torch.float32 or lloc.device != qr.device):
-            raise ValueError('invalid local seed layout')
+    oloc, lloc = local_attention(
+        qr, kr, v, layout, scale=d ** -0.5,
+        fa_segment_batch_max=config.fa_segment_batch_max, fa_rows_per_call_max=config.fa_rows_per_call_max,
+    )
     for q0 in range(0, t, plan['window_tokens']):
         q1 = min(q0 + plan['window_tokens'], t)
-        owners = phase('metadata', lambda: build_window_metadata(
-            rtok, layout, q0, q1, ws, config, canonical_token=canonical_token))
+        owners = build_window_metadata(rtok, layout, q0, q1, ws, config, canonical_token=canonical_token)
         if kh:
             if config.q_mode == 'cached':
-                phase('gather', lambda: launch_gather(qr, qw, ws))
-            phase('attention', lambda: launch_history(qr, qw, kr, v, pk, pv, layout, ws, config))
-        phase('partial_merge', lambda: launch_owner(qw, pk, pv, oloc, lloc, layout, ws, config, q0, kh, owners, out, lse))
-    times = {}
-    if profile:
-        events[-1][2].synchronize()
-        for name, start, end in events:
-            times[name] = times.get(name, 0.0) + start.elapsed_time(end)
-    report = dict(plan, q_mode=config.q_mode, bq=config.bq, bc=config.bc, owner_br=config.owner_br,
-                  windows=triton.cdiv(t, plan['window_tokens']), stage_ms=times,
-                  measured_scope='local+metadata+gather+attention+merge' if local_seed is None else 'sparse excluding local',
-                  profile_wall_seconds=time.monotonic() - started, actual_workspace_bytes=ws.bytes(),
-                  retained_canonical_slot_bytes=retained_slot_bytes,
-                  accounted_workspace_bytes=ws.bytes() + retained_slot_bytes,
-                  profile_total_device_ms=events[0][1].elapsed_time(events[-1][2]) if profile else None,
-                  workspace_scope='additional bounded metadata/partial/Q-cache/owner buffers; excludes common local FA O/L and FA scratch, full inputs/outputs and backward metadata',
-                  common_local_seed_bytes=oloc.numel() * oloc.element_size() + lloc.numel() * lloc.element_size(),
-                  output_bytes=out.numel() * out.element_size() + lse.numel() * lse.element_size(),
-                  producer_kv_reuse='within dense query tile; no cross-CTA reuse claim',
-                  partial_storage='fp32 m/z/U per combined historical token+state edge')
-    return out, lse, report
+                launch_gather(qr, qw, ws)
+            launch_history(qr, qw, kr, v, pk, pv, layout, ws, config)
+        launch_owner(qw, pk, pv, oloc, lloc, layout, ws, config, q0, kh, owners, out, lse)
+    return out, lse
 
 
 class BlockMajorAttentionFn(torch.autograd.Function):
@@ -545,8 +504,8 @@ class BlockMajorAttentionFn(torch.autograd.Function):
         meta = build_direct_metadata(rtok, rstate, layout.Nc, backward_mode=config.backward_mode,
                                      retain_token_slots=retain_slots,
                                      derived_state_layout=layout if config.derive_state_metadata else None) if needs_backward else None
-        out, lse, _ = block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, config=config,
-                                          canonical_token=meta.tok if retain_slots else None)
+        out, lse = block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, config=config,
+                                       canonical_token=meta.tok if retain_slots else None)
         ctx.mark_non_differentiable(lse)
         if needs_backward:
             ctx.settings = (layout.chunk_size, config.bc, config.bq_backward, config.fa_deterministic,

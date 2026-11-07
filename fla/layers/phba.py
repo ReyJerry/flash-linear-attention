@@ -8,13 +8,33 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
-from fla.modules.phba import PHBALinear
 from fla.ops.phba import SequenceLengthPlan, chunk_phba
+from fla.ops.phba.backends.cublaslt import exact_backend
+from fla.ops.phba.linear import _Linear
+
+
+class PHBALinear(nn.Linear):
+    """PHBA projection with an optional byte-validated H20 weight-gradient path."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        eligible = (
+            not torch.compiler.is_compiling() and type(x) in (torch.Tensor, nn.Parameter)
+            and type(self.weight) in (torch.Tensor, nn.Parameter)
+            and self.bias is None and self.training and torch.is_grad_enabled() and x.is_cuda
+            and torch.is_autocast_enabled('cuda') and torch.get_autocast_dtype('cuda') == torch.bfloat16
+            and x.is_contiguous() and self.weight.is_contiguous()
+            and x.shape[-1] == 2048 and x.numel() == 8192 * 2048 and self.out_features in (2048, 4272)
+        )
+        backend = exact_backend(x.device) if eligible else None
+        if backend is None:
+            return F.linear(x, self.weight, self.bias)
+        return _Linear.apply(backend.autocast.cached_bf16(x), backend.autocast.cached_bf16(self.weight))
 
 
 class PHBA(nn.Module):

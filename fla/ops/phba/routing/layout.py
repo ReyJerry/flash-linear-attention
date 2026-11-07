@@ -36,7 +36,6 @@ class RoutingLayout:
     work_start: torch.Tensor = field(repr=False, compare=False)
     work_end: torch.Tensor = field(repr=False, compare=False)
     work_seq: torch.Tensor = field(repr=False, compare=False)
-    _replay_checkpoints: dict = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def device(self) -> torch.device:
@@ -69,7 +68,7 @@ def _construct(lp: SequenceLengthPlan, c: int, br: int) -> RoutingLayout:
     block_ptr_host, seq_block_ptr_host, nwork = _block_layout(lp.lengths, c, br)
     nc, nseq, T = len(block_ptr_host) - 1, lp.Nseq, lp.T
     dev = lp.device
-    # BlockPtr / SeqBlockPtr 与 prefix/chunkwise 共用 SequenceLengthPlan.block_layout(C) 的 device 副本（同一份 source of truth）
+    # BlockPtr / SeqBlockPtr 与 prefix states 共用 SequenceLengthPlan.block_layout(C) 的 device 副本（同一份 source of truth）
     blayout = lp.block_layout(c)
     block_ptr = blayout.block_ptr.to(torch.int64)
     seq_block_ptr = blayout.seq_block_ptr.to(torch.int64)
@@ -78,7 +77,8 @@ def _construct(lp: SequenceLengthPlan, c: int, br: int) -> RoutingLayout:
     block_len = block_ptr[1:] - block_ptr[:-1]                            # [Nc]，最后一个 block 可能不满
     current_block = torch.repeat_interleave(torch.arange(nc, device=dev), block_len, output_size=T)  # [T]
     prefix_valid = torch.arange(nc, device=dev) > seq_block_ptr[block_seq]                         # [Nc] bool
-    nq = torch.div(block_len + (br - 1), br, rounding_mode="floor")       # 每个 block 的 query tile 数
+    # 每个 block 的 query tile 数
+    nq = torch.div(block_len + (br - 1), br, rounding_mode="floor")
     work_block = torch.repeat_interleave(torch.arange(nc, device=dev), nq, output_size=nwork)       # [Nwork]
     work_ptr = torch.zeros(nc + 1, dtype=torch.int64, device=dev)
     work_ptr[1:] = torch.cumsum(nq, 0)
@@ -88,7 +88,6 @@ def _construct(lp: SequenceLengthPlan, c: int, br: int) -> RoutingLayout:
     work_seq = block_seq[work_block]
     return RoutingLayout(
         chunk_size=c, br=br, Nseq=nseq, Nc=nc, Nwork=nwork, T=T,
-        _replay_checkpoints=lp._replay_checkpoints,
         block_ptr_host=block_ptr_host, seq_block_ptr_host=seq_block_ptr_host,
         block_ptr=_i32(block_ptr), seq_block_ptr=_i32(seq_block_ptr), block_seq=_i32(block_seq),
         current_block=_i32(current_block), prefix_valid=prefix_valid.contiguous(),
@@ -97,7 +96,7 @@ def _construct(lp: SequenceLengthPlan, c: int, br: int) -> RoutingLayout:
 
 
 def verify_against_host(layout: RoutingLayout) -> None:
-    """调试模式（4.2 节）：GPU 构造的 layout 与 host 值逐元素一致，SeqBlockPtr 与 BlockSeq 互相一致。需要同步。"""
+    """调试模式：GPU 构造的 layout 与 host 值逐元素一致，SeqBlockPtr 与 BlockSeq 互相一致。需要同步。"""
     t = {n: x.tolist() for n, x in layout.tensors().items()}
     if tuple(t["block_ptr"]) != layout.block_ptr_host:
         raise fail("invalid_cu_seqlens", "GPU BlockPtr 与 BlockPtr_host 不一致")

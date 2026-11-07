@@ -14,8 +14,6 @@ import triton.language as tl
 
 from fla.ops.phba.errors import fail
 
-SORT_BYTES_PER_EDGE_BOUND = 64  # keys, values, indices and conservative native-sort temporary allowance
-
 
 @triton.jit(do_not_specialize=['T', 'K', 'RH', 'RT', 'CAPACITY'])
 def _route_keys_kernel(route, keys, T, K, RH, RT, CAPACITY, H: tl.constexpr, BT: tl.constexpr):

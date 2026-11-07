@@ -7,12 +7,37 @@
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 
-from fla.modules.activations import swiglu
 from fla.modules.activations.ops import swiglu_fwd, swiglu_fwdbwd
-from fla.modules.phba.linear import PHBALinear, exact_backend
+from fla.ops.phba.backends.cublaslt import exact_backend
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+
+def exact_weight_gradient(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16 or torch.is_grad_enabled():
+        return torch.mm(a, b)
+    backend = exact_backend(a.device)
+    return torch.mm(a, b) if backend is None else backend.weight_gradient(a=a, b=b)
+
+
+class _Linear(torch.autograd.Function):
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(ctx, x, weight):
+        ctx.save_for_backward(x, weight)
+        return F.linear(x, weight)
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    def backward(ctx, grad):
+        x, weight = ctx.saved_tensors
+        inputs = x.reshape(-1, x.shape[-1])
+        grad = grad.reshape(-1, weight.shape[0])
+        dx = torch.mm(grad, weight).reshape(x.shape) if ctx.needs_input_grad[0] else None
+        dw = exact_weight_gradient(a=grad.t(), b=inputs) if ctx.needs_input_grad[1] else None
+        return dx, dw
 
 
 class _SwiGLULinear(torch.autograd.Function):
@@ -46,31 +71,3 @@ class _SwiGLULinear(torch.autograd.Function):
         else:
             dw = torch.einsum('bo,bi->oi', grad, matrix)
         return dx, dy, dw, grad.sum(0) if ctx.has_bias else None
-
-
-class PHBAMLP(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        hidden_ratio: int | None = None,
-        intermediate_size: int | None = None,
-        hidden_act: str = 'swish',
-        fuse_swiglu: bool = True,
-    ):
-        super().__init__()
-        if hidden_act != 'swish':
-            raise ValueError('PHBA supports the swish-gated MLP')
-        hidden_ratio = 4 if hidden_ratio is None else hidden_ratio
-        if intermediate_size is None:
-            intermediate_size = int(hidden_size * hidden_ratio * 2 / 3)
-            intermediate_size = 256 * ((intermediate_size + 255) // 256)
-        self.fuse_swiglu = fuse_swiglu
-        self.gate_proj = PHBALinear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = PHBALinear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = PHBALinear(intermediate_size, hidden_size, bias=False)
-
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        gate, value = self.gate_proj(x), self.up_proj(x)
-        if self.fuse_swiglu:
-            return _SwiGLULinear.apply(gate, value, self.down_proj.weight, self.down_proj.bias)
-        return self.down_proj(swiglu(gate, value))

@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Opt-in query-owner Algorithm 7 dQ; no atomics and no edge-by-D workspace."""
+"""Deterministic query-owner dQ fallback without atomics or an edge-by-D workspace."""
 import torch
 import triton
 import triton.language as tl

@@ -9,7 +9,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.modules.phba.linear import PHBALinear, exact_backend
+from fla.layers.phba import PHBALinear
+from fla.ops.phba.backends.cublaslt import exact_backend
 from fla.utils import IS_NVIDIA, device
 
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='PHBA optional NVIDIA projection path')
@@ -54,7 +55,7 @@ def test_linear_unscreened_fallback():
 
 def test_swiglu_down_native_bytes():
     from fla.modules.activations import swiglu_linear
-    from fla.modules.phba.mlp import _SwiGLULinear
+    from fla.ops.phba.linear import _SwiGLULinear
 
     torch.manual_seed(42)
     x = torch.randn(1, 8192, 4272, device=device, dtype=torch.bfloat16, requires_grad=True)

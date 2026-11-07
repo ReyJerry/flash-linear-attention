@@ -19,33 +19,20 @@ from fla.ops.phba.errors import fail
 
 MIN_DOT = 16
 INT32_MAX = 2**31 - 1
-GRID_DIM0_MAX = 2**31 - 1
-GRID_DIM12_MAX = 65535
-FA2_MAX_HEAD_DIM = 256
-FA_SEGMENT_BATCH_LIMIT = 65535            # FA varlen 把 batch 放在 grid 的 y 维
-DIRECT_MAX_BLOCK_DH = 128
-MAX_KH = 15                               # KPAD_tok <= 16
+# FA varlen 把 batch 放在 grid 的 y 维
+FA_SEGMENT_BATCH_LIMIT = 65535
+# KPAD_tok <= 16
+MAX_KH = 15
 CHUNKWISE_VALIDATED_C = (32, 64, 128, 256, 512)
-CHUNKWISE_TRAIN_MAX_M = 128               # chunk_state backward 的 Triton 路径只支持 K <= 128、V <= 128
+# chunk_state backward 的 Triton 路径只支持 K <= 128、V <= 128
+CHUNKWISE_TRAIN_MAX_M = 128
 CHUNKWISE_TRAIN_MAX_DH = 128
 PREFIX_REVERSE_WORKSPACE_CAP = 256 * 1024**2
-QUERY_WORK_ITEM_BYTES = 16                # QueryWorkList 每项 4 个 int32（1M、C=128、Br=8 时约 2 MB）
-PLANNING_SLACK = 1.1                      # allocator 对齐与碎片余量（4.6 节）
 OWNER_TAPE_CAP_BYTES = 256 * 1024**2
 OWNER_TAPE_MAX_HEADS = 4
 OWNER_TAPE_PRODUCER_STAGES = ((16, 2), (32, 2), (64, 1))
 
 STORAGE_DTYPES = {"float16": 2, "bfloat16": 2}
-SPARSE_BACKENDS = ("auto", "direct", "packed")
-PREFIX_BACKENDS = ("chunkwise", "fused")
-BACKWARD_MODES = ('atomic', 'query_owner_deterministic')
-CHECKPOINT_MODES = ("none", "non_reentrant")
-PREFIX_BOUNDARY_MODES = ("storage", "replay")
-DPREFIX_PRECISIONS = ("fp32", "storage")
-METADATA_SCAN_IMPLS = ("torch_cumsum", "triton_hierarchical")
-DKDV_REDUCTIONS = ("single_writer",)
-CHUNKWISE_GRAD_MASK = (True, True, True)  # (NEED_K, NEED_V, NEED_G)，第一阶段固定
-CU_SEQLENS_LAYOUT = ("int32", "contiguous", "stride0=1", "aligned16")
 
 
 _CONSTRUCT_TOKEN = object()
@@ -53,10 +40,6 @@ _CONSTRUCT_TOKEN = object()
 
 def cdiv(a: int, b: int) -> int:
     return -(-a // b)
-
-
-def is_pow2(x: int) -> bool:
-    return isinstance(x, int) and x > 0 and (x & (x - 1)) == 0
 
 
 def next_pow2(x: int) -> int:
@@ -263,31 +246,10 @@ def owner_branch_tape_plan(t: int, h: int, nc: int, c: int, m: int, kh: int, ks:
     return min(choices, key=lambda row: row[0])[1] if choices else fallback
 
 
-def block_dh(dh: int) -> int:
-    return max(MIN_DOT, next_pow2(dh))
-
-
 def fa_head_dim_round(dh: int) -> int:
     """flash-attn 2.8.3 mha_varlen_bwd：round_multiple(Dh, Dh <= 128 ? 32 : 64)。"""
     m = 32 if dh <= 128 else 64
     return cdiv(dh, m) * m
-
-
-def fa_n_det(deterministic: bool, num_sm: int | None, batch_call: int, h_fa: int) -> int:
-    if not deterministic:
-        return 1
-    if not num_sm:
-        raise fail("invalid_config", "fa_deterministic=True 需要设备签名中的 num_sm 来估算 dq_accum 的 n_det")
-    return max(1, cdiv(num_sm, batch_call * h_fa))
-
-
-def fa_bwd_workspace_call(rows: int, batch_call: int, h_fa: int, n_det: int, dh_round: int) -> int:
-    """FA varlen backward 内部 fp32 workspace（4.6 节）。
-
-    dq_accum [n_det, R, H_FA, Dh_round] + softmax_d [H_FA, R]，R = rows + 128 * batch。
-    """
-    r = rows + 128 * batch_call
-    return 4 * r * h_fa * (1 + n_det * dh_round)
 
 
 def _require_int(name: str, value: Any, *, minimum: int = 1) -> int:
@@ -295,12 +257,6 @@ def _require_int(name: str, value: Any, *, minimum: int = 1) -> int:
         raise fail("invalid_config", f"{name} 必须是 int，收到 {type(value).__name__}")
     if value < minimum:
         raise fail("invalid_config", f"{name} 必须 >= {minimum}，收到 {value}")
-    return value
-
-
-def _require_choice(name: str, value: Any, choices: Sequence[Any]) -> Any:
-    if value not in choices:
-        raise fail("invalid_config", f"{name} 必须是 {tuple(choices)} 之一，收到 {value!r}")
     return value
 
 
@@ -327,13 +283,13 @@ def _validate_cu_seqlens_host(cu: Sequence[int]) -> tuple[int, ...]:
 
 
 class SequenceLengthPlan:
-    """长度的唯一 source of truth（4.2 节）。用 ``from_host`` / ``from_device`` 构造，构造后不可修改。
+    """长度的唯一 source of truth。用 ``from_host`` / ``from_device`` 构造，构造后不可修改。
 
     device 上的 ``cu_seqlens`` 是本对象 owned 的 int32 连续副本；调用方不能原地修改它。
     """
 
-    __slots__ = ("_cu_host", "_lengths", "_cu_device", "_operator_plans", "_block_layouts", "_routing_layouts",
-                 "_replay_checkpoints", "_sealed", "__weakref__")
+    __slots__ = ("_cu_host", "_lengths", "_cu_device", "_block_layouts", "_routing_layouts",
+                 "__weakref__")
 
     def __init__(self, *_args: Any, _token: object = None, **_kwargs: Any) -> None:
         if _token is not _CONSTRUCT_TOKEN:
@@ -345,11 +301,8 @@ class SequenceLengthPlan:
         object.__setattr__(obj, "_cu_host", cu_host)
         object.__setattr__(obj, "_lengths", tuple(cu_host[i + 1] - cu_host[i] for i in range(len(cu_host) - 1)))
         object.__setattr__(obj, "_cu_device", cu_device)
-        object.__setattr__(obj, "_operator_plans", {})
         object.__setattr__(obj, "_block_layouts", {})
         object.__setattr__(obj, "_routing_layouts", {})
-        object.__setattr__(obj, "_replay_checkpoints", {})
-        object.__setattr__(obj, "_sealed", True)
         return obj
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -358,7 +311,6 @@ class SequenceLengthPlan:
     def __delattr__(self, name: str) -> None:
         raise AttributeError("SequenceLengthPlan 创建后 immutable")
 
-    # -- 构造 -----------------------------------------------------------------------------------------------------
     @classmethod
     @torch.inference_mode(False)
     def from_host(cls, lengths: Iterable[int], device: Any) -> SequenceLengthPlan:
@@ -399,7 +351,6 @@ class SequenceLengthPlan:
                        f"{cu_host[first]} != {device_values[first]}", index=first)
         return cls._build(cu_host, cu_seqlens.detach().clone(memory_format=torch.contiguous_format))
 
-    # -- 只读属性 ---------------------------------------------------------------------------------------------------
     @property
     def cu_seqlens_host(self) -> tuple[int, ...]:
         return self._cu_host
@@ -431,9 +382,8 @@ class SequenceLengthPlan:
     def __repr__(self) -> str:
         return f"SequenceLengthPlan(Nseq={self.Nseq}, T={self.T}, max_seqlen={self.max_seqlen}, device={self.device})"
 
-    # -- block layout（host + device，按 C 缓存）----------------------------------------------------------------------
     def block_layout(self, chunk_size: int) -> BlockLayout:
-        """BlockPtr / SeqBlockPtr 的 host 值与 device int32 副本（4.2 节）。host 值由 cu_seqlens_host 计算；
+        """BlockPtr / SeqBlockPtr 的 host 值与 device int32 副本。host 值由 cu_seqlens_host 计算；
         device 副本由 plan 持有的 device cu_seqlens 在 GPU 上构造（device_block_ptrs），不做 H2D 拷贝，也没有任何同步。"""
         c = _require_int("chunk_size", chunk_size)
         layout = self._block_layouts.get(c)
@@ -441,7 +391,6 @@ class SequenceLengthPlan:
             block_ptr, seq_block_ptr, _ = _block_layout(self._lengths, c, 1)
             layout = BlockLayout(
                 chunk_size=c,
-                _replay_checkpoints=self._replay_checkpoints,
                 block_ptr_host=block_ptr,
                 seq_block_ptr_host=seq_block_ptr,
                 **dict(zip(("block_ptr", "seq_block_ptr"),
@@ -449,8 +398,6 @@ class SequenceLengthPlan:
             )
             self._block_layouts[c] = layout
         return layout
-
-    # -- PHBAOperatorPlan 缓存 --------------------------------------------------------------------------------------
 
 
 def _to_device_async(x: torch.Tensor, device: Any) -> torch.Tensor:
@@ -485,7 +432,6 @@ class BlockLayout:
     seq_block_ptr_host: tuple[int, ...]
     block_ptr: torch.Tensor = field(repr=False, compare=False)
     seq_block_ptr: torch.Tensor = field(repr=False, compare=False)
-    _replay_checkpoints: dict = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def Nc(self) -> int:  # noqa: N802
@@ -503,7 +449,7 @@ def _check_cu_seqlens_tensor(cu_seqlens: torch.Tensor) -> None:
 
 @dataclass(frozen=True)
 class LocalFABatch:
-    """LocalFABatchPlan_host 的一项：覆盖 block [b0, b1)、token [t0, t1)（4.6 节）。"""
+    """LocalFABatchPlan_host 的一项：覆盖 block [b0, b1)、token [t0, t1)。"""
 
     b0: int
     b1: int
@@ -521,7 +467,7 @@ class LocalFABatch:
 
 
 def _block_layout(lengths: Sequence[int], c: int, br: int) -> tuple[tuple[int, ...], tuple[int, ...], int]:
-    """BlockPtr_host [Nc + 1]、SeqBlockPtr_host [Nseq + 1] 与 Nwork（4.2 节公式）。"""
+    """BlockPtr_host [Nc + 1]、SeqBlockPtr_host [Nseq + 1] 与 Nwork。"""
     block_ptr = [0]
     seq_block_ptr = [0]
     nwork = 0

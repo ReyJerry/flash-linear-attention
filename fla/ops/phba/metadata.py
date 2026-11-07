@@ -59,7 +59,8 @@ class BranchMetadata:
     offset: torch.Tensor         # [Nc * H + 1] int32；offset[-1] = Nedge（device）
     rho: torch.Tensor            # [capacity] int32；只有前 Nedge 个有效
     capacity: int
-    source_slots: torch.Tensor | None = None  # Optional original route slot, uint8, forward only.
+    # retain original route slots for forward metadata reuse
+    source_slots: torch.Tensor | None = None
 
     @property
     def nedge(self) -> torch.Tensor:
@@ -99,13 +100,14 @@ def _branch(route: torch.Tensor, nc: int, kpad: int, *, scan_impl: str, backward
     n_e = nc * H
     count = torch.zeros(n_e, dtype=torch.int32, device=dev)
     cursor = torch.zeros(n_e, dtype=torch.int32, device=dev) if backward_mode == 'atomic' else None
-    offset = torch.zeros(n_e + 1, dtype=torch.int32, device=dev)          # Offset[0] = 0；不用标量写入（会同步）
+    # Offset[0] = 0；不用标量写入（会同步）
+    offset = torch.zeros(n_e + 1, dtype=torch.int32, device=dev)
     rho = torch.empty(cap, dtype=torch.int32, device=dev) if backward_mode == 'atomic' else None
     grid = (triton.cdiv(T, META_BT), H)
     args = (T, K, route.stride(0), route.stride(1))
     _count_kernel[grid](route, count, *args, H=H, BT=META_BT, KPAD=kpad, num_warps=META_NUM_WARPS)
     if scan_impl != "torch_cumsum":
-        raise fail("invalid_config", f"metadata_scan_impl = {scan_impl!r} 尚未实现（Phase 1 只有 torch_cumsum）")
+        raise fail("invalid_config", f"metadata_scan_impl = {scan_impl!r} is unsupported; use torch_cumsum")
     torch.cumsum(count, dim=0, dtype=torch.int32, out=offset[1:])
     source_slots = None
     if backward_mode == 'query_owner_deterministic':
@@ -141,7 +143,6 @@ def build_direct_metadata(rtok: torch.Tensor, rstate: torch.Tensor, nc: int, *,
     return DirectMetadata(tok=tok, state=state, kh=kh)
 
 
-# reference / 调试
 def metadata_reference(route: torch.Tensor, nc: int) -> tuple[torch.Tensor, torch.Tensor, list[list[int]]]:
     """逐 slot 读取 route 的参照：返回 (Count, Offset, 每个 e 的 row 列表（升序）)。"""
     H, T, K = route.shape

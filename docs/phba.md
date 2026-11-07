@@ -52,27 +52,21 @@ The model supports cache-free training, prefill and generation with `use_cache=F
 
 PHBA projections retain the native linear path unless the exact-screened H20 geometry and runtime match. The accelerated path is restricted to PyTorch 2.9.0, CUDA 12.8, the validated cuBLASLt library, BF16 autocast and its three weight-gradient geometries. The C++ helpers build from packaged source into the Torch extension cache; no prebuilt machine-specific binary is included. CUDA development headers and a C++ compiler are needed for this optional path. Other supported cases retain native PyTorch operations.
 
-The optional optimizer changes only native AdamW launch packetization:
-
-```python
-from fla.models.phba.optim import PHBAAdamW
-
-optimizer = PHBAAdamW(parameter_groups, lr=1e-4, betas=(0.9, 0.95), fused=True)
-```
-
-Preserve the training recipe's parameter groups, weight-decay exclusions and clipping call. On the validated H20/FP32 fused-optimizer path, each native launch receives at most 312 blocks while retaining 512 threads per block and 65536-element chunks. Each original parameter's step is incremented once. The optimizer does not replace a global Torch dispatcher; unsupported configurations use native AdamW behavior.
+Training uses the optimizer selected by the training framework. PHBA model construction does not modify optimizer selection or global Torch dispatchers.
 
 ## Validation and benchmarking
 
 ```bash
 FLA_CI_ENV=0 pytest tests/ops/test_phba.py tests/models/test_modeling_phba.py \
-  tests/models/test_phba_optimizer.py tests/modules/test_phba_linear.py
+  tests/layers/test_phba_linear.py
 
 python benchmarks/benchmark_phba.py --chunk-size 128 --topk 8 \
-  --warmup-steps 20 --steps 50 --optimizer fla.models.phba.optim:PHBAAdamW \
+  --warmup-steps 20 --steps 50 --optimizer torch.optim:AdamW \
   --output phba-throughput.json
 ```
 
 The dedicated benchmark keeps existing benchmark registries unchanged. Its default recipe is 1.264B parameters, B1×8192, FP32 parameters, BF16 autocast, no activation checkpointing and lr=0 training computation. It measures zero-grad, forward/loss, backward, clipping and optimizer updates together. Input generation and optional numerical audit hooks are outside the measured steps. The lr=0 recipe measures compute throughput and is not a convergence experiment.
 
 The references and numerical storage contract are described in [the operator README](../fla/ops/phba/README.md). Migration validation additionally compares the frozen mature implementation using the same initial weights, inputs and native normalization choices. See [migration validation](phba_validation.md) for the completed numerical gates, paired dense/packed throughput, memory measurements and limitations.
+
+Profiling is separate from the production operator: run `python benchmarks/profile_phba.py` with the same benchmark arguments to export a Chrome trace beside the JSON result. Its instrumented timings must not be used as throughput measurements. Offline cuBLASLt candidate-inspection code is under `benchmarks/phba_tools`; production loads only the validated descriptors.

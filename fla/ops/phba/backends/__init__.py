@@ -4,8 +4,3 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
-
-from fla.modules.phba.linear import PHBALinear
-from fla.modules.phba.mlp import PHBAMLP
-
-__all__ = ['PHBAMLP', 'PHBALinear']

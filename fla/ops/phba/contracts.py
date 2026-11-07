@@ -17,7 +17,7 @@ ALIGNMENT_BYTES = 16
 
 
 def prepare_grad_output(grad_out: torch.Tensor, out: torch.Tensor) -> tuple[torch.Tensor, int]:
-    """backward 入口的 dO（2.1 节）。返回 (dO, grad_output_copy_bytes)。
+    """backward 入口的 dO。返回 (dO, grad_output_copy_bytes)。
 
     dtype 与 O 相同（autograd 已转换，这里只断言）；最后一维不连续或 data_ptr % 16 != 0 时强制新分配 aligned contiguous
     copy。不能只调用 .contiguous()：未对齐但 stride 合法的 view 会被原样返回。loss = O.sum() 时 dO 是 stride 全 0 的广播 tensor。

@@ -138,7 +138,7 @@ def route_topk(q_rope: torch.Tensor, centroids: torch.Tensor, layout: RoutingLay
 
 # references
 def _history_mask(layout: RoutingLayout, device) -> torch.Tensor:
-    """[T, Nc] bool：BlockSeq[b] == seq(t) 且 b < CurrentBlock[t]（3.2 节）。"""
+    """[T, Nc] bool：BlockSeq[b] == seq(t) 且 b < CurrentBlock[t]。"""
     cb = layout.current_block.to(device).long()
     bs = layout.block_seq.to(device).long()
     b = torch.arange(layout.Nc, device=device)
@@ -254,7 +254,7 @@ def routing_fidelity(rtok: torch.Tensor, oracle_scores: torch.Tensor) -> dict:
 
 
 def check_route_invariants(rtok: torch.Tensor, rstate: torch.Tensor, layout: RoutingLayout) -> None:
-    """调试模式（4.12 节）：distinct、[0, Nc)、同一 sequence、< CurrentBlock；Rstate slot 0 / PrefixValid。需要同步。"""
+    """调试模式：distinct、[0, Nc)、同一 sequence、< CurrentBlock；Rstate slot 0 / PrefixValid。需要同步。"""
     H, T, kh = rtok.shape
     dev = rtok.device
     cb = layout.current_block.to(dev).long()

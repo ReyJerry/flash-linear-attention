@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.modules.activations.ops import swiglu_fwd, swiglu_fwdbwd
-from fla.ops.phba.backends.cublaslt import exact_backend
+from fla.ops.phba.backends.cublaslt import _gemm_inputs_aligned, exact_backend
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -64,7 +64,8 @@ class _SwiGLULinear(torch.autograd.Function):
                     and type(grad) is torch.Tensor and type(matrix) is torch.Tensor
                     and grad.is_cuda and grad.dtype == matrix.dtype == torch.bfloat16
                     and tuple(grad.shape) == (8192, 2048) and tuple(matrix.shape) == (8192, 4272)
-                    and grad.is_contiguous() and matrix.is_contiguous() and not torch.is_grad_enabled())
+                    and grad.is_contiguous() and matrix.is_contiguous() and not torch.is_grad_enabled()
+                    and _gemm_inputs_aligned(grad, matrix))
         backend = exact_backend(grad.device) if eligible else None
         if backend is not None:
             dw = backend.weight_gradient(a=grad.t(), b=matrix)

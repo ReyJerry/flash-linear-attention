@@ -167,7 +167,8 @@ def route_masks(rtok: torch.Tensor, rstate: torch.Tensor, layout: HostLayout, h:
     local = (tb[:, None] == tb[None, :]) & (idx[None, :] <= idx[:, None])
 
     def block_mask(routes: torch.Tensor) -> torch.Tensor:
-        m = torch.zeros((T, layout.Nc + 1), dtype=torch.bool, device=dev)       # 最后一列收集 -1
+        # the final column collects invalid route sentinels
+        m = torch.zeros((T, layout.Nc + 1), dtype=torch.bool, device=dev)
         ids = routes[h].long().clamp(min=-1)
         ids = torch.where(ids < 0, torch.full_like(ids, layout.Nc), ids)
         m.scatter_(1, ids, True)

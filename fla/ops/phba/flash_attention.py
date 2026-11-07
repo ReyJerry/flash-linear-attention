@@ -71,7 +71,8 @@ def _param_names(fn: Callable[..., Any]) -> frozenset:
     schema = getattr(fn, "_schema", None)
     if schema is not None and hasattr(schema, "arguments"):
         return frozenset(a.name for a in schema.arguments)
-    default = getattr(fn, "default", None)                       # torch.ops.<ns>.<op> 的 OpOverloadPacket
+    # torch.ops.<ns>.<op> exposes its schema on the default overload
+    default = getattr(fn, "default", None)
     schema = getattr(default, "_schema", None)
     if schema is not None and hasattr(schema, "arguments"):
         return frozenset(a.name for a in schema.arguments)
@@ -216,7 +217,8 @@ def runtime_smoke_probe(device: torch.device, dtype: torch.dtype, head_dim: int,
     """
     cap = check_device(device)
     scale = 1.0 / math.sqrt(head_dim)
-    lengths = (5, 17)                                   # 两条 sequence，一条不满 16，覆盖 varlen 与尾部
+    # unequal short sequences cover packed tails
+    lengths = (5, 17)
     cu = torch.tensor((0, 5, 22), dtype=torch.int32, device=device)
     T, H = sum(lengths), num_heads
     gen = torch.Generator(device=device).manual_seed(1234)
@@ -340,7 +342,8 @@ def local_attention(q_rope, k_rope, v, layout: RoutingLayout, *, scale: float,
     oloc = torch.empty_like(q_rope)
     lloc = torch.empty((H, T), dtype=torch.float32, device=q_rope.device)
     for b in batches:
-        cu_b = layout.block_ptr[b.b0:b.b1 + 1] - b.t0                    # device 运算，rebase 到 0
+        # rebase boundaries on device without a host synchronization
+        cu_b = layout.block_ptr[b.b0:b.b1 + 1] - b.t0
         o_b, l_b = varlen_forward(q_rope[b.t0:b.t1], k_rope[b.t0:b.t1], v[b.t0:b.t1], cu_b, cu_b,
                                   b.max_seqlen, b.max_seqlen, softmax_scale=scale, causal=True)
         oloc[b.t0:b.t1] = o_b

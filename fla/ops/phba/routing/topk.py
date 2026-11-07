@@ -75,12 +75,14 @@ def _topk_kernel(
             a_old = tl.argmax(old_s, axis=1, tie_break_left=True)
             m_new = tl.max(score, axis=1)
             a_new = tl.argmax(score, axis=1, tie_break_left=True)
-            take_new = m_new > m_old                                          # 同分时保留已有候选（id 更小）
+            # ties retain the earlier candidate with the smaller block id
+            take_new = m_new > m_old
             sel_s = tl.where(take_new, m_new, m_old)
             id_old = tl.sum(tl.where(kcol[None, :] == a_old[:, None], old_i, 0), axis=1)
             id_new = blk0 + a_new
             sel_i = tl.where(take_new, id_new, id_old)
-            sel_i = tl.where(sel_s > float("-inf"), sel_i, -1)              # -inf 候选的 id 一律为 -1
+            # invalid scores retain the route sentinel
+            sel_i = tl.where(sel_s > float("-inf"), sel_i, -1)
             new_s = tl.where(kcol[None, :] == r, sel_s[:, None], new_s)
             new_i = tl.where(kcol[None, :] == r, sel_i[:, None], new_i)
             old_s = tl.where((m_new <= m_old)[:, None] & (kcol[None, :] == a_old[:, None]), float("-inf"), old_s)

@@ -29,6 +29,11 @@ _INITIALIZED = False
 _LOCK = threading.Lock()
 
 
+def _gemm_inputs_aligned(a: torch.Tensor, b: torch.Tensor) -> bool:
+    # contiguous views can still violate the screened algorithms' operand alignment
+    return a.data_ptr() % 16 == 0 and b.data_ptr() % 16 == 0
+
+
 @cache
 def _supported_device(index: int) -> bool:
     return torch.cuda.get_device_name(index) == 'NVIDIA H20'
@@ -90,6 +95,8 @@ class _ExactBackend:
         self.sessions.clear()
 
     def weight_gradient(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        if not _gemm_inputs_aligned(a, b):
+            return torch.mm(a, b)
         signature = (tuple(a.shape), tuple(b.shape), tuple(a.stride()), tuple(b.stride()))
         algorithm = next(
             (entry for entry in self.configuration['algorithms']

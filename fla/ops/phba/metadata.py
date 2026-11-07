@@ -83,7 +83,16 @@ class DirectMetadata:
         return n
 
 
-def _branch(route: torch.Tensor, nc: int, kpad: int, *, scan_impl: str, backward_mode: str = 'atomic', retain_slots: bool = False, sorted_counts: bool = False) -> BranchMetadata:
+def _branch(
+    route: torch.Tensor,
+    nc: int,
+    kpad: int,
+    *,
+    scan_impl: str,
+    backward_mode: str = 'atomic',
+    retain_slots: bool = False,
+    sorted_counts: bool = False,
+) -> BranchMetadata:
     H, T, K = route.shape
     if route.dtype != torch.int32 or route.stride(-1) != 1:
         raise fail("invalid_shape", f"route 必须是最后一维连续的 int32，收到 {route.dtype} stride {route.stride()}")

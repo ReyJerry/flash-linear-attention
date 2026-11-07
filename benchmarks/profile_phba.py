@@ -34,7 +34,9 @@ def main():
     with ExitStack() as stack:
         for module, name in stages:
             stack.enter_context(patch.object(module, name, instrument(getattr(module, name), 'phba::' + name)))
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as trace:
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        ) as trace:
             run(args)
     path = args.output.with_suffix('.trace.json')
     trace.export_chrome_trace(str(path))

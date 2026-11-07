@@ -50,9 +50,23 @@ The model supports cache-free training, prefill and generation with `use_cache=F
 
 ## Optional H20 acceleration
 
-PHBA projections retain the native linear path unless the exact-screened H20 geometry and runtime match. The accelerated path is restricted to PyTorch 2.9.0, CUDA 12.8, the validated cuBLASLt library, BF16 autocast and its three weight-gradient geometries. The C++ helpers build from packaged source into the Torch extension cache; no prebuilt machine-specific binary is included. CUDA development headers and a C++ compiler are needed for this optional path. Other supported cases retain native PyTorch operations.
+PHBA projections retain the native linear path unless the exact-screened H20 geometry and runtime match. The accelerated path is restricted to PyTorch 2.9.0, CUDA 12.8, the validated cuBLASLt library, BF16 autocast and its three weight-gradient geometries. Actual GEMM operands must have 16-byte-aligned addresses; a contiguous view alone is insufficient. Unsupported alignment uses native weight-gradient operations without adding an alignment copy. The fused SwiGLU path checks its recomputed activation and incoming gradient and retains the native einsum fallback. The C++ helpers build from packaged source into the Torch extension cache; no prebuilt machine-specific binary is included. CUDA development headers and a C++ compiler are needed for this optional path. Other supported cases retain native PyTorch operations.
 
 Training uses the optimizer selected by the training framework. PHBA model construction does not modify optimizer selection or global Torch dispatchers.
+
+## Execution paths and fallbacks
+
+The optional H20 GEMM backend only accelerates projection weight gradients. It does not replace the PHBA attention algorithm.
+
+| Component            | Default execution                                            | Alternative or fallback                                                                 |
+| -------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Attention            | Triton block-major attention and local FlashAttention        | The public entry keeps deterministic backward; no dense-attention fallback              |
+| Projection gradients | Screened H20 GEMM when runtime, geometry and alignment match | Native PyTorch linear/mm or fused SwiGLU's einsum when they do not match                |
+| Sparse backward      | Deterministic grouped tape                                   | Fixed-order branch accumulation and query-owner dQ when the tape budget is insufficient |
+| Prefix backward      | Segmented parallel backward                                  | Sequential reverse traversal when its workspace budget is insufficient                  |
+| Canonical metadata   | Int32 sort keys when the key range fits                      | Int64 keys for larger ranges                                                            |
+
+Internal block-major configuration also exposes atomic backward, cached queries and FP32 partial accumulation. These are explicit internal alternatives, not automatic fallbacks selected by `chunk_phba`. The FP64 naive formula and storage-aware references are used for validation and are not selected automatically in training. Missing or incompatible FlashAttention fails its preflight; PHBA does not silently switch to a CPU or dense implementation.
 
 ## Validation and benchmarking
 

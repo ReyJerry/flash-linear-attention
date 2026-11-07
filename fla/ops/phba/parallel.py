@@ -446,7 +446,10 @@ def validate_inputs(qr, qw, kr, v, pk, pv, rtok, layout):
         raise ValueError('prefix K/V layout must match')
     if any(x.device != qr.device or x.dtype != qr.dtype for x in (pk, pv)):
         raise ValueError('prefix dtype/device mismatch')
-    if rtok.ndim != 3 or rtok.shape[:2] != (h, t) or rtok.dtype != torch.int32 or rtok.device != qr.device or rtok.shape[-1] > 15:
+    if (
+        rtok.ndim != 3 or rtok.shape[:2] != (h, t) or rtok.dtype != torch.int32
+        or rtok.device != qr.device or rtok.shape[-1] > 15
+    ):
         raise ValueError('invalid frozen route contract')
     if rtok.shape[-1] and rtok.stride(-1) != 1:
         raise ValueError('route slots must be contiguous')
@@ -501,9 +504,12 @@ class BlockMajorAttentionFn(torch.autograd.Function):
             t, h, d = qr.shape
             estimate = workspace_plan(t, h, d, rtok.shape[-1], layout.Nc, config)
             retain_slots = estimate['workspace_bytes'] + rtok.numel() <= config.workspace_budget_bytes
-        meta = build_direct_metadata(rtok, rstate, layout.Nc, backward_mode=config.backward_mode,
-                                     retain_token_slots=retain_slots,
-                                     derived_state_layout=layout if config.derive_state_metadata else None) if needs_backward else None
+        meta = build_direct_metadata(
+            rtok, rstate, layout.Nc,
+            backward_mode=config.backward_mode,
+            retain_token_slots=retain_slots,
+            derived_state_layout=layout if config.derive_state_metadata else None,
+        ) if needs_backward else None
         out, lse = block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, config=config,
                                        canonical_token=meta.tok if retain_slots else None)
         ctx.mark_non_differentiable(lse)
@@ -511,9 +517,12 @@ class BlockMajorAttentionFn(torch.autograd.Function):
             ctx.settings = (layout.chunk_size, config.bc, config.bq_backward, config.fa_deterministic,
                             config.backward_mode)
             from fla.ops.phba.plans import owner_branch_tape_plan
-            ctx.owner_tape_plan = (owner_branch_tape_plan(qr.shape[0], qr.shape[1], layout.Nc, layout.chunk_size,
-                                                          pk.shape[1], rtok.shape[-1], rstate.shape[-1], config.bc, qr.element_size())
-                                   if config.backward_mode == 'query_owner_deterministic' else None)
+            ctx.owner_tape_plan = (
+                owner_branch_tape_plan(
+                    qr.shape[0], qr.shape[1], layout.Nc, layout.chunk_size,
+                    pk.shape[1], rtok.shape[-1], rstate.shape[-1], config.bc, qr.element_size(),
+                ) if config.backward_mode == 'query_owner_deterministic' else None
+            )
             ctx.batches = _local_fa_batches(layout.block_ptr_host, layout.chunk_size,
                                             config.fa_segment_batch_max, config.fa_rows_per_call_max)
             ctx.has_token = meta.tok is not None

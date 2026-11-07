@@ -5,12 +5,24 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import math
+from copy import deepcopy
+
 import pytest
 import torch
+import torch.nn.functional as F
+from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla.models.phba import PHBAConfig, PHBAForCausalLM
+from fla.ops.phba.naive import highest_precision
 from fla.utils import IS_NVIDIA, assert_close, device, find_spec_cached
+
+
+class _FloatCrossEntropy(nn.CrossEntropyLoss):
+    def forward(self, logits, target):
+        # fused losses accumulate in FP32; preserve that precision in the oracle
+        return super().forward(logits.float(), target)
 
 
 def make_config(**kwargs):
@@ -60,6 +72,12 @@ def test_modeling(qk_norm, use_output_gate, dtype):
 def test_cache_is_explicitly_unsupported():
     with pytest.raises(ValueError, match='use_cache=False'):
         make_config(use_cache=True)
+    model = PHBAForCausalLM(make_config(num_hidden_layers=0, fuse_norm=False))
+    tokens = torch.ones(1, 4, dtype=torch.long)
+    with pytest.raises(ValueError, match='use_cache=False'):
+        model(input_ids=tokens, use_cache=True)
+    with pytest.raises(ValueError, match='use_cache=False'):
+        model(input_ids=tokens, past_key_values=object())
 
 
 @pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
@@ -78,31 +96,50 @@ def test_checkpoint_gradients():
 
 
 @pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
-def test_right_padding():
+@pytest.mark.parametrize(
+    ('side', 'dtype'),
+    [('right', torch.bfloat16), ('left', torch.bfloat16), ('left', torch.float16)],
+    ids=['right-bf16', 'left-bf16', 'left-fp16'],
+)
+def test_padding(side, dtype):
     torch.manual_seed(42)
     model = PHBAForCausalLM(make_config()).to(device).eval()
     tokens = torch.randint(1, 128, (2, 67), device=device)
     mask = torch.ones_like(tokens)
-    mask[1, 49:] = 0
-    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+    if side == 'right':
+        mask[1, 49:] = 0
+    else:
+        mask[1, :18] = 0
+    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=dtype):
         padded = model(input_ids=tokens, attention_mask=mask).logits
         for index, length in enumerate((67, 49)):
-            expected = model(input_ids=tokens[index:index + 1, :length]).logits
-            assert_close('padded_logits', expected.float(), padded[index:index + 1, :length].float(), .006)
+            valid = mask[index].bool()
+            expected = model(input_ids=tokens[index:index + 1, valid]).logits
+            assert expected.shape[1] == length
+            assert_close('padded_logits', expected.float(), padded[index:index + 1, valid].float(), .006)
 
 
 @pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
-def test_cache_free_generation():
+@pytest.mark.parametrize('padded', [False, True], ids=['short-prompt', 'left-padded-batch-chunk-boundary'])
+def test_cache_free_generation(padded):
     torch.manual_seed(42)
     model = PHBAForCausalLM(make_config()).to(device).eval()
-    prompt = torch.tensor([[1, 4, 7]], device=device)
+    prompt = torch.randint(1, 128, (2, 63), device=device) if padded else torch.tensor([[1, 4, 7]], device=device)
+    mask = torch.ones_like(prompt) if padded else None
+    if padded:
+        mask[0, :28] = 0
+        prompt[0, :28] = 0
+    steps = 3 if padded else 2
     with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
         expected = prompt
-        for _ in range(2):
-            token = model(input_ids=expected).logits[:, -1].argmax(-1, keepdim=True)
+        expected_mask = mask
+        for _ in range(steps):
+            token = model(input_ids=expected, attention_mask=expected_mask).logits[:, -1].argmax(-1, keepdim=True)
             expected = torch.cat((expected, token), dim=-1)
+            if expected_mask is not None:
+                expected_mask = torch.cat((expected_mask, torch.ones_like(token)), dim=-1)
         actual = model.generate(
-            input_ids=prompt, max_new_tokens=2, do_sample=False, use_cache=False,
+            input_ids=prompt, attention_mask=mask, max_new_tokens=steps, do_sample=False, use_cache=False,
             pad_token_id=0, eos_token_id=None,
         )
     assert torch.equal(actual, expected)
@@ -166,3 +203,278 @@ def test_updated_cumulative_lengths_do_not_reuse_rotary_indices():
         actual = model(input_ids=tokens, cu_seqlens=cu).logits
         expected = model(input_ids=tokens, cu_seqlens=cu.clone()).logits
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
+@pytest.mark.parametrize(
+    ('lengths', 'side', 'dtype'),
+    [((67, 67), 'right', torch.bfloat16), ((65, 33), 'right', torch.bfloat16),
+     ((65, 1, 33), 'left', torch.float16)],
+    ids=['dense-bf16', 'ragged-bf16', 'left-padded-one-token-fp16'],
+)
+def test_dense_packed_equivalence(lengths, side, dtype):
+    torch.manual_seed(42)
+    dense = PHBAForCausalLM(make_config()).to(device).train()
+    packed = deepcopy(dense)
+    tokens = torch.randint(1, 128, (len(lengths), max(lengths)), device=device)
+    positions = torch.arange(tokens.shape[1], device=device)
+    sizes = torch.tensor(lengths, device=device)
+    mask = positions[None] < sizes[:, None] if side == 'right' else positions[None] >= tokens.shape[1] - sizes[:, None]
+    labels = tokens.masked_fill(~mask, -100)
+    first = torch.zeros_like(sizes) if side == 'right' else tokens.shape[1] - sizes
+    labels[torch.arange(len(lengths), device=device), first] = -100
+    flat_tokens = tokens[mask].unsqueeze(0)
+    flat_labels = labels[mask].unsqueeze(0)
+    cu = torch.cat((sizes.new_zeros(1), sizes.cumsum(0))).to(torch.int32)
+    with highest_precision(), torch.autocast('cuda', dtype=dtype):
+        actual = packed(input_ids=flat_tokens, labels=flat_labels, cu_seqlens=cu, output_hidden_states=True)
+        expected = dense(
+            input_ids=tokens,
+            labels=labels,
+            attention_mask=None if len(set(lengths)) == 1 else mask,
+            output_hidden_states=True,
+        )
+    assert len(actual.hidden_states) == len(expected.hidden_states) == dense.config.num_hidden_layers + 1
+    for reference, result in zip(expected.hidden_states, actual.hidden_states, strict=True):
+        assert_close('packed_hidden', reference[mask].float(), result.squeeze(0).float(), 1e-3)
+    assert_close('packed_logits', expected.logits[mask].float(), actual.logits.squeeze(0).float(), 1e-3)
+    assert_close('packed_loss', expected.loss, actual.loss, 1e-3)
+    expected.loss.backward()
+    actual.loss.backward()
+    for (name, reference), (other_name, result) in zip(dense.named_parameters(), packed.named_parameters(), strict=True):
+        assert name == other_name and reference.grad is not None and result.grad is not None
+        assert torch.isfinite(result.grad).all() and torch.isfinite(reference.grad).all()
+        assert_close(name, reference.grad, result.grad, .006)
+
+
+@pytest.mark.parametrize(
+    ('reduction', 'num_items', 'use_l2warp'),
+    [(None, None, False), ('mean', None, True), ('sum', None, False),
+     ('mean', 11, False), ('sum', torch.tensor(11), True)],
+    ids=['default-mean', 'smoothed-l2warp', 'custom-sum', 'normalized-custom-mean', 'tensor-normalized-l2warp'],
+)
+def test_loss_contract(reduction, num_items, use_l2warp):
+    torch.manual_seed(42)
+    model = PHBAForCausalLM(make_config(num_hidden_layers=0, fuse_norm=False, use_l2warp=use_l2warp))
+    if reduction is not None:
+        model.criterion = nn.CrossEntropyLoss(ignore_index=-7, label_smoothing=.1, reduction=reduction)
+    ignore_index = -100 if reduction is None else -7
+    tokens = torch.randint(0, 128, (2, 7))
+    labels = tokens.clone()
+    labels[0, 3] = ignore_index
+    original_labels = labels.clone()
+    result = model(input_ids=tokens, labels=labels, num_items_in_batch=num_items)
+    reference = F.cross_entropy(
+        result.logits[:, :-1].reshape(-1, 128),
+        labels[:, 1:].reshape(-1),
+        ignore_index=ignore_index,
+        label_smoothing=0. if reduction is None else .1,
+        reduction='sum' if num_items is not None else reduction or 'mean',
+    )
+    if use_l2warp:
+        maxima = result.logits.max(-1).values
+        penalty = maxima.square().sum() * (1e-4 / (2 * maxima.numel()))
+        reference = reference + (penalty - penalty.detach())
+    if num_items is not None:
+        reference = reference / num_items
+    torch.testing.assert_close(result.loss, reference)
+    parameters = tuple(model.parameters())
+    actual_grads = torch.autograd.grad(result.loss, parameters, retain_graph=True)
+    reference_grads = torch.autograd.grad(reference, parameters)
+    for actual, expected in zip(actual_grads, reference_grads, strict=True):
+        torch.testing.assert_close(actual, expected)
+    assert torch.equal(labels, original_labels)
+    if model.criterion is not None:
+        assert model.criterion.reduction == reduction
+
+
+@pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
+@pytest.mark.parametrize(
+    ('fuse_norm', 'fuse_swiglu', 'loss_kind', 'use_l2warp', 'num_items', 'packed', 'dtype', 'tied'),
+    [
+        (False, False, 'native', True, None, False, torch.bfloat16, False),
+        (True, False, 'ce', False, 111, False, torch.float16, False),
+        (False, True, 'linear', False, None, True, torch.float16, True),
+        (True, True, 'linear', True, 111, False, torch.float16, False),
+        (True, True, 'ce', True, torch.tensor(111), True, torch.bfloat16, False),
+    ],
+    ids=['native-l2warp', 'norm-ce', 'swiglu-linear-packed-tied', 'all-fused-linear-l2warp', 'all-fused-ce-packed-l2warp'],
+)
+def test_loss_fusions(fuse_norm, fuse_swiglu, loss_kind, use_l2warp, num_items, packed, dtype, tied):
+    torch.manual_seed(42)
+    reference = PHBAForCausalLM(make_config(
+        fuse_norm=False, fuse_swiglu=False, use_l2warp=use_l2warp, tie_word_embeddings=tied,
+    )).to(device).train()
+    candidate = PHBAForCausalLM(make_config(
+        fuse_norm=fuse_norm,
+        fuse_swiglu=fuse_swiglu,
+        fuse_cross_entropy=loss_kind == 'ce',
+        fuse_linear_cross_entropy=loss_kind == 'linear',
+        use_l2warp=use_l2warp,
+        tie_word_embeddings=tied,
+    )).to(device).train()
+    candidate.load_state_dict(reference.state_dict())
+    if loss_kind != 'native':
+        reference.criterion = _FloatCrossEntropy()
+    tokens = torch.randint(0, 128, (1 if packed else 2, 67), device=device)
+    labels = tokens.clone()
+    labels[:, 7] = -100
+    kwargs = {}
+    if packed:
+        kwargs['cu_seqlens'] = torch.tensor([0, 33, 67], dtype=torch.int32, device=device)
+        labels[:, 33] = -100
+    original_labels = labels.clone()
+    with highest_precision(), torch.autocast('cuda', dtype=dtype):
+        expected = reference(input_ids=tokens, labels=labels, num_items_in_batch=num_items, **kwargs)
+        actual = candidate(input_ids=tokens, labels=labels, num_items_in_batch=num_items, **kwargs)
+    assert torch.equal(labels, original_labels)
+    assert (actual.logits is None) == (loss_kind == 'linear')
+    assert_close('fused_loss', expected.loss, actual.loss, 1e-3)
+    if actual.logits is not None:
+        assert_close('fused_logits', expected.logits.float(), actual.logits.float(), .006)
+    expected.loss.backward()
+    actual.loss.backward()
+    for (name, original), (other_name, fused) in zip(reference.named_parameters(), candidate.named_parameters(), strict=True):
+        assert name == other_name and original.grad is not None and fused.grad is not None
+        assert torch.isfinite(original.grad).all() and torch.isfinite(fused.grad).all()
+        assert_close(name, original.grad, fused.grad, .006)
+
+
+@pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
+@pytest.mark.parametrize(
+    ('return_dict', 'inputs_embeds', 'training', 'selection'),
+    [(True, False, True, None), (False, True, False, 2), (True, True, False, [0, 32, 66])],
+    ids=['training-ids-dict', 'eval-embeds-tuple-tail', 'eval-embeds-dict-indices'],
+)
+def test_forward_decoder_contract(return_dict, inputs_embeds, training, selection):
+    torch.manual_seed(42)
+    model = PHBAForCausalLM(make_config()).to(device).train(training)
+    tokens = torch.randint(0, 128, (2, 67), device=device)
+    labels = tokens.clone()
+    labels[0, 3] = -100
+    selection = torch.tensor(selection, device=device) if isinstance(selection, list) else selection
+    with highest_precision(), torch.autocast('cuda', dtype=torch.float16):
+        full = model(input_ids=tokens, labels=labels, output_hidden_states=True)
+        embeddings = model.get_input_embeddings()(tokens) if inputs_embeds else None
+        ids = None if inputs_embeds else tokens
+        decoder = model.model(ids, None, embeddings, use_cache=False, output_hidden_states=True, return_dict=return_dict)
+        states = decoder.last_hidden_state if return_dict else decoder[0]
+        hidden = decoder.hidden_states if return_dict else decoder[1]
+        logits = model.lm_head(states)
+        shifted_labels = F.pad(labels[:, 1:], (0, 1), value=-100)
+        expected_loss = F.cross_entropy(logits.reshape(-1, 128), shifted_labels.reshape(-1))
+        positional = model(ids, None, embeddings, None, labels, False, False, True, return_dict)
+        complete = model(input_ids=tokens)
+        selected = model(
+            input_ids=tokens, use_cache=False, logits_to_keep=selection, return_dict=return_dict,
+        )
+        with_labels = model(input_ids=tokens, labels=labels, logits_to_keep=selection)
+        legacy = model(input_ids=tokens, num_logits_to_keep=2)
+    actual_loss, actual_logits = (positional.loss, positional.logits) if return_dict else positional[:2]
+    torch.testing.assert_close(actual_loss, full.loss)
+    torch.testing.assert_close(actual_logits, full.logits)
+    torch.testing.assert_close(logits, full.logits)
+    torch.testing.assert_close(expected_loss, full.loss)
+    assert len(hidden) == len(full.hidden_states) == model.config.num_hidden_layers + 1
+    for result, expected in zip(hidden, full.hidden_states, strict=True):
+        torch.testing.assert_close(result, expected)
+    if return_dict:
+        assert decoder.past_key_values is None and positional.past_key_values is None
+    else:
+        assert len(decoder) == 2 and len(positional) == 3
+    torch.testing.assert_close(complete.logits, full.logits)
+    if return_dict:
+        assert selected.loss is None and selected.hidden_states is None and selected.past_key_values is None
+    else:
+        assert len(selected) == 1
+    chosen = selected.logits if return_dict else selected[0]
+    if isinstance(selection, torch.Tensor):
+        expected = full.logits[:, selection]
+    else:
+        expected = full.logits[:, -selection:] if selection else full.logits
+    assert_close('selected_logits', expected.float(), chosen.float(), 1e-3)
+    assert_close('legacy_logits', full.logits[:, -2:].float(), legacy.logits.float(), 1e-3)
+    torch.testing.assert_close(with_labels.logits, full.logits)
+    parameters = tuple(model.parameters())
+    gradients = torch.autograd.grad(actual_loss, parameters, retain_graph=True)
+    expected_gradients = torch.autograd.grad(expected_loss, parameters)
+    for actual, expected in zip(gradients, expected_gradients, strict=True):
+        torch.testing.assert_close(actual, expected)
+    with pytest.raises(ValueError, match='both input_ids and inputs_embeds'):
+        model.model(input_ids=tokens, inputs_embeds=model.get_input_embeddings()(tokens))
+    with pytest.raises(ValueError, match='either input_ids or inputs_embeds'):
+        model.model()
+
+
+def _check_initialization(fuse_norm, affine, tied, on_meta):
+    torch.manual_seed(42)
+    config = make_config(
+        fuse_norm=fuse_norm, elementwise_affine=affine, qkv_bias=True, qk_norm=True,
+        use_output_gate=True, tie_word_embeddings=tied, pad_token_id=0,
+    )
+    with torch.device('meta' if on_meta else 'cpu'):
+        model = PHBAForCausalLM(config)
+    if on_meta:
+        assert all(parameter.is_meta for parameter in model.parameters())
+        model.apply(model._init_weights)
+        assert all(parameter.is_meta for parameter in model.parameters())
+        model.to_empty(device='cpu')
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.fill_(float('nan'))
+            for buffer in model.buffers():
+                if buffer.is_floating_point():
+                    buffer.fill_(float('nan'))
+        model.apply(model._init_weights)
+    head_dim = config.hidden_size // config.num_heads
+    frequencies = 1. / (config.rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+    for layer in model.model.layers:
+        torch.testing.assert_close(layer.attn.rotary.inv_freq, frequencies, rtol=0, atol=0)
+    identities = {name: id(parameter) for name, parameter in model.named_parameters()}
+    assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+    assert model.get_input_embeddings().weight[0].count_nonzero() == config.hidden_size
+    assert (model.get_input_embeddings().weight is model.get_output_embeddings().weight) == tied
+    for module in model.modules():
+        if isinstance(module, nn.Linear):
+            assert module.weight.count_nonzero() > 0
+            if module.bias is not None:
+                assert module.bias.count_nonzero() == 0
+        elif hasattr(module, 'eps') and getattr(module, 'weight', None) is not None:
+            torch.testing.assert_close(module.weight, torch.ones_like(module.weight), rtol=0, atol=0)
+    for module, weight in [(model.model.layers[0].attn, model.model.layers[0].attn.o_proj.weight),
+                           (model.model.layers[0].mlp, model.model.layers[0].mlp.down_proj.weight)]:
+        expected = torch.empty_like(weight)
+        torch.manual_seed(42)
+        nn.init.kaiming_uniform_(expected, a=math.sqrt(5))
+        expected /= math.sqrt(2 * config.num_hidden_layers)
+        torch.manual_seed(42)
+        model._init_weights(module, prenorm_residual_strategy='rescale')
+        torch.testing.assert_close(weight, expected, rtol=0, atol=0)
+        torch.manual_seed(42)
+        model._init_weights(module, prenorm_residual_strategy='rescale')
+        torch.testing.assert_close(weight, expected, rtol=0, atol=0)
+        model._init_weights(module, prenorm_residual_strategy='zero')
+        assert weight.count_nonzero() == 0
+        with pytest.raises(ValueError, match='Invalid prenorm_residual_strategy'):
+            model._init_weights(module, prenorm_residual_strategy='invalid')
+    assert identities == {name: id(parameter) for name, parameter in model.named_parameters()}
+
+
+@pytest.mark.parametrize(
+    ('fuse_norm', 'affine', 'tied', 'on_meta'),
+    [(False, True, False, False), (True, False, True, False), (False, True, False, True)],
+    ids=['native-biased', 'fused-affine-free-tied', 'meta-materialization'],
+)
+def test_initialization(fuse_norm, affine, tied, on_meta, run_python):
+    if on_meta:
+        # isolate meta factories from cached operator-test allocation wrappers
+        run_python(f"""
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location('phba_model_tests', {__file__!r})
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module._check_initialization({fuse_norm!r}, {affine!r}, {tied!r}, True)
+        """)
+    else:
+        _check_initialization(fuse_norm, affine, tied, False)

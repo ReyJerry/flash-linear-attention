@@ -1,6 +1,6 @@
 # PHBA validation
 
-Validation compares the current implementation with PHBA commit `96e17c10b970249cafcbb9a15ff42b9907a52ec4`. Both roles use NVIDIA H20, PyTorch 2.9.0+cu128, Triton 3.5.0, Transformers 5.6.2 and FlashAttention 2.8.3.post1. This record covers numerical preservation, public API boundaries, release packaging and training-compute throughput.
+The numerical and throughput records compare PHBA revision `3f39ae4aa64411221ea935b267630f212cd2edc1` with `96e17c10b970249cafcbb9a15ff42b9907a52ec4`. The subsequent smoke-CI and line-wrapping update leaves the runtime computation ASTs unchanged. Both roles use NVIDIA H20, PyTorch 2.9.0+cu128, Triton 3.5.0, Transformers 5.6.2 and FlashAttention 2.8.3.post1. This record covers numerical preservation, public API boundaries, release packaging and training-compute throughput.
 
 ## Correctness and API coverage
 
@@ -12,13 +12,19 @@ The shared configuration, Transformers API, benchmark and split-wheel contract g
 
 The default 1,264,423,936-parameter model matches all 267 initial parameter tensors, inputs, loss, gradient norm and raw/clipped gradient bytes. The installed split wheels pass the same full-model gate, with all three exact GEMM sessions active. Loss is `10.784871101379395`; gradient norm is `2.495190382003784`. Every complete-step pair also matches all optimizer-state hashes after 70 steps.
 
-The 35 Triton kernel computation ASTs and selected GEMM descriptors remain unchanged. Shared Python edits are limited to central model exports, the benchmark registry, the split-package builder and its contract test; 823 other pre-existing non-PHBA Python files are byte-identical. The PHBA runtime plus central-export file manifest has SHA256 `e2a8dedffefffbab62a468ac3f9403600f90cbdfa1157c874f091c4c9bbaddfe`, computed from `json.dumps(path_to_sha256, sort_keys=True).encode()` using repository-relative paths. Header, pre-commit and whitespace checks pass.
+The 35 Triton kernel computation ASTs and selected GEMM descriptors remain unchanged. Shared Python edits are limited to central model exports, the benchmark registry, the split-package builder and its contract test; 823 other pre-existing non-PHBA Python files are byte-identical. The PHBA runtime plus central-export file manifest for that numerical/throughput revision has SHA256 `e2a8dedffefffbab62a468ac3f9403600f90cbdfa1157c874f091c4c9bbaddfe`, computed from `json.dumps(path_to_sha256, sort_keys=True).encode()` using repository-relative paths. Header, pre-commit and whitespace checks pass.
 
 ## Official split-package release
 
 Validation uses `scripts/build_packages.py`, then builds and installs both `fla-core` and `flash-linear-attention` wheels outside the checkout. The two C++ helpers and algorithm JSON are present, byte-identical to source, in the core wheel only. Automatic model registration works after importing FLA. The installed-package suite passes 48 tests, including import binding; the complete model's 267 gradients remain byte-identical. No prebuilt shared libraries or optimizer implementation are added.
 
 The standard operator registry runs both dense and packed `chunk_phba` forward/backward cases and preserves distinct result keys across JSON serialization. CI configuration installs and checks the FlashAttention interface when PHBA tests are selected on NVIDIA runners. Upstream-hosted workflows have not been executed as part of this local H20 validation.
+
+## Smoke selection and execution
+
+The H100 smoke workflow marks four existing PHBA output/backward cases covering FP16/BF16, dense/packed inputs, tails, one-token sequences and non-power-of-two widths. It installs `flash-attn>=2.8.3.post1,<2.9` through the selected Python interpreter and checks the attention schema and CUDA device before testing. The PHBA branch uses `FLA_CI_ENV=0` and requires a nonempty JUnit report without skipped, failed or errored cases.
+
+The exact dependency and test shell bodies pass on H20 with the software versions recorded above: **4 passed, 18 deselected, 0 skipped**, with one TF32 API deprecation warning. Each selected case executes `chunk_phba` and compares its output and all six floating input gradients against the reference at unchanged tolerances. Separate report checks confirm that empty, skipped, failed, errored and mixed passed/skipped runs are rejected. Dependency discovery includes `tests/ops/test_phba.py`. This verifies the PHBA smoke commands on H20; the H100/PyTorch 2.12 runner itself has not been executed.
 
 ## Paired complete-step throughput
 

@@ -127,7 +127,10 @@ class PHBA(nn.Module):
                 raise ValueError('PHBA padding masks and packed cu_seqlens are mutually exclusive')
         else:
             plan = _resolve_length_plan(batch, tokens, hidden_states.device, cu_seqlens, plan)
-            if cu_seqlens is not None and not plan._matches_source(cu_seqlens) or cu_seqlens is None and batch == 1 and len(plan.lengths) > 1:
+            if (
+                cu_seqlens is not None and not plan._matches_source(cu_seqlens)
+                or cu_seqlens is None and batch == 1 and len(plan.lengths) > 1
+            ):
                 cu_seqlens = plan.cu_seqlens
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)

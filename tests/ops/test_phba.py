@@ -23,10 +23,14 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize(
     ('lengths', 'H', 'D', 'M', 'chunk_size', 'topk', 'dtype'),
     [
-        pytest.param((67,), 2, 32, 16, 32, 2, torch.float16, id='short-tail-fp16'),
-        pytest.param((129,), 2, 64, 32, 64, 4, torch.bfloat16, id='chunk-boundary-bf16'),
-        pytest.param((65, 1, 33), 2, 72, 80, 32, 2, torch.float16, id='varlen-one-token-nonpower-width'),
-        pytest.param((257, 129, 1), 2, 128, 128, 128, 8, torch.bfloat16, id='varlen-eight-routes'),
+        pytest.param((67,), 2, 32, 16, 32, 2, torch.float16, id='short-tail-fp16', marks=pytest.mark.smoke),
+        pytest.param((129,), 2, 64, 32, 64, 4, torch.bfloat16, id='chunk-boundary-bf16', marks=pytest.mark.smoke),
+        pytest.param(
+            (65, 1, 33), 2, 72, 80, 32, 2, torch.float16,
+            id='varlen-one-token-nonpower-width',
+            marks=pytest.mark.smoke,
+        ),
+        pytest.param((257, 129, 1), 2, 128, 128, 128, 8, torch.bfloat16, id='varlen-eight-routes', marks=pytest.mark.smoke),
         pytest.param((33,), 1, 16, 16, 32, 1, torch.float16, id='no-token-history'),
         pytest.param((65, 65), 1, 32, 17, 64, 3, torch.bfloat16, id='nonpower-slots'),
         pytest.param((513,), 2, 128, 128, 256, 4, torch.bfloat16, id='chunk256'),

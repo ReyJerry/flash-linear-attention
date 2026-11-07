@@ -154,7 +154,10 @@ class PHBAModel(PHBAPreTrainedModel, FLAModel):
                 inputs.shape[0], inputs.shape[1], inputs.device, cu_seqlens, kwargs.get('phba_length_plan'),
             )
             kwargs['phba_length_plan'] = plan
-            if cu_seqlens is not None and not plan._matches_source(cu_seqlens) or cu_seqlens is None and inputs.shape[0] == 1 and len(plan.lengths) > 1:
+            if (
+                cu_seqlens is not None and not plan._matches_source(cu_seqlens)
+                or cu_seqlens is None and inputs.shape[0] == 1 and len(plan.lengths) > 1
+            ):
                 kwargs['cu_seqlens'] = plan.cu_seqlens
         return super().forward(
             input_ids=input_ids,

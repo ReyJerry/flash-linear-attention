@@ -297,7 +297,12 @@ class SequenceLengthPlan:
             raise TypeError("请使用 SequenceLengthPlan.from_host / from_device（debug 模式可用 from_pair_debug）")
 
     @classmethod
-    def _build(cls, cu_host: tuple[int, ...], cu_device: torch.Tensor, source: torch.Tensor | None = None) -> SequenceLengthPlan:
+    def _build(
+        cls,
+        cu_host: tuple[int, ...],
+        cu_device: torch.Tensor,
+        source: torch.Tensor | None = None,
+    ) -> SequenceLengthPlan:
         obj = cls(_token=_CONSTRUCT_TOKEN)
         object.__setattr__(obj, "_cu_host", cu_host)
         object.__setattr__(obj, "_lengths", tuple(cu_host[i + 1] - cu_host[i] for i in range(len(cu_host) - 1)))

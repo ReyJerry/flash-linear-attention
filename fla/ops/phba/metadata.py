@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-'Fixed-capacity block-major route metadata for deterministic training.'
+'Canonical token and derived prefix-state metadata for deterministic PHBA.'
 
 from __future__ import annotations
 
@@ -15,10 +15,98 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.phba.errors import fail
 from fla.ops.phba.plans import INT32_MAX, kpad_state, kpad_tok
+from fla.ops.phba.utils import fail
+
+
+@triton.jit(do_not_specialize=['T', 'K', 'RH', 'RT', 'CAPACITY'])
+def _route_keys_kernel(route, keys, T, K, RH, RT, CAPACITY, H: tl.constexpr, BT: tl.constexpr):
+    SENTINEL: tl.constexpr = 2147483647 if keys.dtype.element_ty == tl.int32 else 9223372036854775807
+    i = tl.program_id(0).to(tl.int64) * BT + tl.arange(0, BT)
+    slot = i % K
+    token = (i // K) % T
+    head = i // (tl.cast(T, tl.int64) * K)
+    block = tl.load(route + head * RH + token * RT + slot, i < CAPACITY, other=-1).to(tl.int64)
+    row_stride = tl.cast(T, tl.int64) * H
+    expert = tl.maximum(block, 0) * H + head
+    key = expert * row_stride + token * H + head
+    sentinel = tl.full((BT,), SENTINEL, tl.int64)
+    tl.store(keys + i, tl.where(block >= 0, key, sentinel), i < CAPACITY)
+
+
+@triton.jit(do_not_specialize=['CAPACITY', 'ROW_STRIDE'])
+def _unpack_rho_kernel(keys, rho, CAPACITY, ROW_STRIDE, BT: tl.constexpr,
+                       permutation=None, slots=None, K: tl.constexpr = 1, STORE_SLOTS: tl.constexpr = False):
+    SENTINEL: tl.constexpr = 2147483647 if keys.dtype.element_ty == tl.int32 else 9223372036854775807
+    i = tl.program_id(0).to(tl.int64) * BT + tl.arange(0, BT)
+    key = tl.load(keys + i, i < CAPACITY, other=SENTINEL)
+    row = tl.where(key != SENTINEL, key % tl.cast(ROW_STRIDE, tl.int64), -1)
+    tl.store(rho + i, row.to(tl.int32), i < CAPACITY)
+    if STORE_SLOTS:
+        source = tl.load(permutation + i, i < CAPACITY, other=0)
+        tl.store(slots + i, (source % K).to(tl.uint8), i < CAPACITY)
+
+
+@triton.jit
+def _sorted_bounds_kernel(keys, count, offset, CAP: tl.constexpr, ROW: tl.constexpr,
+                          NE: tl.constexpr, B: tl.constexpr, STEPS: tl.constexpr):
+    SENTINEL: tl.constexpr = 2147483647 if keys.dtype.element_ty == tl.int32 else 9223372036854775807
+    e = tl.program_id(0).to(tl.int64) * B + tl.arange(0, B).to(tl.int64)
+    lo = tl.full((B,), 0, tl.int64)
+    hi = tl.full((B,), CAP, tl.int64)
+    lo2 = tl.full((B,), 0, tl.int64)
+    hi2 = tl.full((B,), CAP, tl.int64)
+    target = e * ROW
+    target2 = (e + 1) * ROW
+    for _ in range(STEPS):
+        mid = lo + (hi - lo) // 2
+        mid2 = lo2 + (hi2 - lo2) // 2
+        v = tl.load(keys + mid, (e <= NE) & (mid < CAP), other=SENTINEL)
+        v2 = tl.load(keys + mid2, (e < NE) & (mid2 < CAP), other=SENTINEL)
+        left = v < target
+        left2 = v2 < target2
+        next_lo = tl.where((lo < hi) & left, mid + 1, lo)
+        hi = tl.where((lo < hi) & ~left, mid, hi)
+        next_lo2 = tl.where((lo2 < hi2) & left2, mid2 + 1, lo2)
+        hi2 = tl.where((lo2 < hi2) & ~left2, mid2, hi2)
+        lo = next_lo
+        lo2 = next_lo2
+    tl.store(offset + e, lo.to(tl.int32), e <= NE)
+    tl.store(count + e, (lo2 - lo).to(tl.int32), e < NE)
+
+
+def canonical_rho(route: torch.Tensor, nc: int, *, return_slots: bool = False, return_counts: bool = False):
+    """Sort full capacity, including invalid sentinels; never read a device scalar on the host."""
+    h, t, k = route.shape
+    if k < 1 or t < 1 or h < 1:
+        raise fail('invalid_shape', 'canonical metadata requires a nonempty branch')
+    if (nc * h) * (t * h) >= 2**63 - 1:
+        raise fail('int32_overflow', 'canonical expert/query sort key exceeds int64')
+    capacity = t * h * k
+    key_dtype = torch.int32 if (nc * h) * (t * h) < 2**31 - 1 else torch.int64
+    keys = torch.empty(capacity, dtype=key_dtype, device=route.device)
+    _route_keys_kernel[(triton.cdiv(capacity, 256),)](
+        route, keys, t, k, route.stride(0), route.stride(1), capacity, H=h, BT=256,
+        num_warps=4, num_stages=1)
+    sorted_keys, permutation = torch.sort(keys)
+    rho = torch.empty(capacity, dtype=torch.int32, device=route.device)
+    slots = torch.empty(capacity, dtype=torch.uint8, device=route.device) if return_slots else None
+    _unpack_rho_kernel[(triton.cdiv(capacity, 256),)](
+        sorted_keys, rho, capacity, t * h, BT=256, permutation=permutation if return_slots else None,
+        slots=slots, K=k, STORE_SLOTS=return_slots, num_warps=4, num_stages=1)
+    if return_counts:
+        count = torch.empty(nc * h, dtype=torch.int32, device=route.device)
+        offset = torch.empty(nc * h + 1, dtype=torch.int32, device=route.device)
+        _sorted_bounds_kernel[(triton.cdiv(nc * h + 1, 128),)](
+            sorted_keys, count, offset, CAP=capacity, ROW=t * h, NE=nc * h, B=128,
+            STEPS=(capacity + 1).bit_length(), num_warps=4, num_stages=1)
+        return rho, slots, count, offset
+    return (rho, slots) if return_slots else rho
+
 
 META_BT = 128
+
+
 META_NUM_WARPS = 4
 
 
@@ -84,7 +172,6 @@ def _branch(
     if sorted_counts:
         if scan_impl != 'torch_cumsum':
             raise fail('invalid_config', f'unsupported metadata scan: {scan_impl}')
-        from fla.ops.phba.canonical import canonical_rho
         rho, slots, count, offset = canonical_rho(route, nc, return_slots=retain_slots, return_counts=True)
         return BranchMetadata(count=count, offset=offset, rho=rho, capacity=cap, source_slots=slots)
     dev = route.device
@@ -98,7 +185,6 @@ def _branch(
     if scan_impl != "torch_cumsum":
         raise fail("invalid_config", f"metadata_scan_impl = {scan_impl!r} is unsupported; use torch_cumsum")
     torch.cumsum(count, dim=0, dtype=torch.int32, out=offset[1:])
-    from fla.ops.phba.canonical import canonical_rho
 
     source_slots = None
     result = canonical_rho(route, nc, return_slots=retain_slots)
@@ -119,36 +205,60 @@ def build_direct_metadata(rtok: torch.Tensor, rstate: torch.Tensor, nc: int, *,
     tok = _branch(rtok, nc, kpad_tok(kh), scan_impl=metadata_scan_impl,
                   retain_slots=retain_token_slots, sorted_counts=derived_state_layout is not None) if kh > 0 else None
     if derived_state_layout is not None and tok is not None:
-        from fla.ops.phba.derived_state import derive_state
         state = derive_state(tok, derived_state_layout, H, T * H * (kh + 1))
     else:
         state = _branch(rstate, nc, kpad_state(kh + 1), scan_impl=metadata_scan_impl)
     return DirectMetadata(tok=tok, state=state, kh=kh)
 
 
-def metadata_reference(route: torch.Tensor, nc: int) -> tuple[torch.Tensor, torch.Tensor, list[list[int]]]:
-    """逐 slot 读取 route 的参照：返回 (Count, Offset, 每个 e 的 row 列表（升序）)。"""
-    H, T, K = route.shape
-    count = torch.zeros(nc * H, dtype=torch.int64)
-    rows: list[list[int]] = [[] for _ in range(nc * H)]
-    r = route.cpu()
-    for h in range(H):
-        for t in range(T):
-            for k in range(K):
-                b = int(r[h, t, k])
-                if b >= 0:
-                    count[b * H + h] += 1
-                    rows[b * H + h].append(t * H + h)
-    offset = torch.zeros(nc * H + 1, dtype=torch.int64)
-    offset[1:] = torch.cumsum(count, 0)
-    return count.to(torch.int32), offset.to(torch.int32), [sorted(x) for x in rows]
+@triton.jit
+def state_counts(tc, bp, pv, sc, N: tl.constexpr, H: tl.constexpr, B: tl.constexpr):
+    e = tl.program_id(0).to(tl.int64)*B+tl.arange(0, B).to(tl.int64)
+    block = e//H
+    valid = e < N
+    n = tl.load(tc+e, valid, other=0)
+    length = tl.load(bp+block+1, valid, other=0)-tl.load(bp+block, valid, other=0)
+    active = tl.load(pv+block, valid, other=0)
+    tl.store(sc+e, tl.where(active, n+length, 0), valid)
 
 
-def sort_rho_segments(meta: BranchMetadata) -> list[list[int]]:
-    """把每个 (block, head) 段内的 row 排序后返回（需要同步；correctness 与确定性调试模式用）。"""
-    off = meta.offset.tolist()
-    rho = meta.rho[: off[-1]].tolist()
-    return [sorted(rho[off[e]:off[e + 1]]) for e in range(len(off) - 1)]
+@triton.jit
+def state_rows(to, tr, bp, pv, so, sr, H: tl.constexpr, B: tl.constexpr):
+    e = tl.program_id(0).to(tl.int64)
+    block = e//H
+    head = e % H
+    if tl.load(pv+block) == 0:
+        return
+    start = tl.load(bp+block).to(tl.int64)
+    end = tl.load(bp+block+1).to(tl.int64)
+    first = tl.load(to+e).to(tl.int64)
+    last = tl.load(to+e+1).to(tl.int64)
+    dst = tl.load(so+e).to(tl.int64)
+    cur = end-start
+    total = cur+last-first
+    lane = tl.arange(0, B).to(tl.int64)
+    for base in range(0, total, B):
+        ix = base+lane
+        hist = tl.load(tr+first+ix-cur, (ix >= cur) & (ix < total), other=0)
+        row = tl.where(ix < cur, (start+ix)*H+head, hist)
+        tl.store(sr+dst+ix, row.to(tl.int32), ix < total)
 
 
-__all__ = ["BranchMetadata", "DirectMetadata", "build_direct_metadata", "metadata_reference", "sort_rho_segments"]
+def derive_state(tok, layout, h, capacity):
+    if capacity > 2147483647 or tok.count.numel()+1 > 2147483647:
+        raise ValueError('state metadata exceeds int32 capacity')
+    count = torch.empty_like(tok.count)
+    offset = torch.zeros_like(tok.offset)
+    state_counts[(triton.cdiv(count.numel(), 128),)](tok.count, layout.block_ptr,
+                                                     layout.prefix_valid, count, N=count.numel(), H=h, B=128)
+    torch.cumsum(count, 0, dtype=torch.int32, out=offset[1:])
+    rho = torch.full((capacity,), -1, device=count.device, dtype=torch.int32)
+    state_rows[(count.numel(),)](tok.offset, tok.rho, layout.block_ptr, layout.prefix_valid, offset, rho, H=h, B=128)
+    return BranchMetadata(count, offset, rho, capacity)
+
+
+__all__ = [
+    'BranchMetadata',
+    'DirectMetadata',
+    'build_direct_metadata',
+]

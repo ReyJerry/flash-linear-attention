@@ -5,16 +5,23 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""FP64 mathematical and storage-aware PyTorch references for PHBA."""
+'FP64 mathematical, storage-aware and metadata references for PHBA.'
 
 from __future__ import annotations
 
 import contextlib
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
+
+from fla.ops.phba.utils import fail
+
+if TYPE_CHECKING:
+    from fla.ops.phba.metadata import BranchMetadata
+    from fla.ops.phba.routing import RoutingLayout
 
 
 @dataclass(frozen=True)
@@ -329,54 +336,6 @@ def rstate_from_rtok_host(rtok: torch.Tensor, layout: HostLayout) -> torch.Tenso
     return torch.cat([cur, hist], dim=-1)
 
 
-def alg6_reference(q_rope, q_raw, k_rope, v, prefix_k, prefix_v, oloc, lloc, rtok, layout: HostLayout, scale: float):
-    """joint-attention merge 的参照：以给定的 (Oloc storage, Lloc fp32 [H, T]) 为种子，在 current prefix、历史 token、
-    历史 aligned prefix 上做一次 joint softmax（与 kernel 的逐 tile online-softmax 代数等价）。
-    P 在进入 dot 前转为 storage dtype；返回 (O storage [T,H,D], L compute [H,T])。"""
-    storage, cd = q_rope.dtype, compute_dtype(q_rope.dtype)
-    T, H, D = q_rope.shape
-    M = prefix_k.shape[1]
-    rstate = rstate_from_rtok_host(rtok, layout)
-    out = torch.empty((T, H, D), dtype=storage, device=q_rope.device)
-    lse = torch.empty((H, T), dtype=cd, device=q_rope.device)
-    for h in range(H):
-        _, token, state = route_masks(rtok, rstate, layout, h, M)
-        q, k, vv, qr = (x[:, h].to(cd) for x in (q_rope, k_rope, v, q_raw))
-        pk = prefix_k[:, :, h].reshape(-1, D).to(cd)
-        pv = prefix_v[:, :, h].reshape(-1, D).to(cd)
-        s_tok = _masked((q @ k.T) * scale, token)
-        s_st = _masked((qr @ pk.T) * scale, state)
-        l0 = lloc[h].to(cd)
-        m = torch.maximum(l0, torch.maximum(_rowmax(s_tok), _rowmax(s_st)))
-        p_tok = torch.exp(s_tok - m[:, None])
-        p_st = torch.exp(s_st - m[:, None])
-        a0 = torch.exp(l0 - m)
-        z = a0 + p_tok.sum(-1) + p_st.sum(-1)
-        u = oloc[:, h].to(cd) * a0[:, None] + _st(p_tok, storage) @ vv + _st(p_st, storage) @ pv
-        out[:, h] = (u / z[:, None]).to(storage)
-        lse[h] = m + torch.log(z)
-    return out, lse
-
-
-def local_reference(q_rope, k_rope, v, layout: HostLayout, scale: float):
-    """local 分支（当前 block 内因果）的公式参照：返回 (Oloc storage [T,H,D], Lloc compute [H,T])。"""
-    storage, cd = q_rope.dtype, compute_dtype(q_rope.dtype)
-    T, H, D = q_rope.shape
-    tb = layout.token_block(q_rope.device)
-    idx = torch.arange(T, device=q_rope.device)
-    local = (tb[:, None] == tb[None, :]) & (idx[None, :] <= idx[:, None])
-    oloc = torch.empty((T, H, D), dtype=storage, device=q_rope.device)
-    lloc = torch.empty((H, T), dtype=cd, device=q_rope.device)
-    for h in range(H):
-        s = _masked((q_rope[:, h].to(cd) @ k_rope[:, h].to(cd).T) * scale, local)
-        m = _rowmax(s)
-        p = torch.exp(s - m[:, None])
-        l_ = p.sum(-1)
-        oloc[:, h] = ((_st(p, storage) @ v[:, h].to(cd)) / l_[:, None]).to(storage)
-        lloc[h] = m + torch.log(l_)
-    return oloc, lloc
-
-
 def gate_from_storage(a_storage: torch.Tensor, tau: float, storage: torch.dtype):
     """与 fla/layers/phba.py 相同：g_log = logsigmoid(fp32(a)) / tau；s = storage(-expm1(g_log))（autograd）。"""
     cd = compute_dtype(storage)
@@ -483,16 +442,150 @@ def naive_phba(q, k, v, q_rope, k_rope, gate, lengths, token_routes, state_route
     return out.reshape(shape)
 
 
+def metadata_reference(route: torch.Tensor, nc: int) -> tuple[torch.Tensor, torch.Tensor, list[list[int]]]:
+    """逐 slot 读取 route 的参照：返回 (Count, Offset, 每个 e 的 row 列表（升序）)。"""
+    H, T, K = route.shape
+    count = torch.zeros(nc * H, dtype=torch.int64)
+    rows: list[list[int]] = [[] for _ in range(nc * H)]
+    r = route.cpu()
+    for h in range(H):
+        for t in range(T):
+            for k in range(K):
+                b = int(r[h, t, k])
+                if b >= 0:
+                    count[b * H + h] += 1
+                    rows[b * H + h].append(t * H + h)
+    offset = torch.zeros(nc * H + 1, dtype=torch.int64)
+    offset[1:] = torch.cumsum(count, 0)
+    return count.to(torch.int32), offset.to(torch.int32), [sorted(x) for x in rows]
+
+
+def sort_rho_segments(meta: BranchMetadata) -> list[list[int]]:
+    """把每个 (block, head) 段内的 row 排序后返回（需要同步；correctness 与确定性调试模式用）。"""
+    off = meta.offset.tolist()
+    rho = meta.rho[: off[-1]].tolist()
+    return [sorted(rho[off[e]:off[e + 1]]) for e in range(len(off) - 1)]
+
+
+def verify_against_host(layout: RoutingLayout) -> None:
+    """调试模式：GPU 构造的 layout 与 host 值逐元素一致，SeqBlockPtr 与 BlockSeq 互相一致。需要同步。"""
+    t = {n: x.tolist() for n, x in layout.tensors().items()}
+    if tuple(t["block_ptr"]) != layout.block_ptr_host:
+        raise fail("invalid_cu_seqlens", "GPU BlockPtr 与 BlockPtr_host 不一致")
+    if tuple(t["seq_block_ptr"]) != layout.seq_block_ptr_host:
+        raise fail("invalid_cu_seqlens", "GPU SeqBlockPtr 与 host 不一致")
+    sbp = t["seq_block_ptr"]
+    for b, s in enumerate(t["block_seq"]):
+        if not sbp[s] <= b < sbp[s + 1]:
+            raise fail("invalid_cu_seqlens", f"BlockSeq[{b}] = {s} 与 SeqBlockPtr 不一致")
+    if len(t["work_block"]) != layout.Nwork or len(t["current_block"]) != layout.T:
+        raise fail("invalid_cu_seqlens", "QueryWorkList / CurrentBlock 长度与 host 计算的 Nwork / T 不一致")
+
+
+def centroid_reference(k_rope: torch.Tensor, block_ptr_host) -> torch.Tensor:
+    """fp32 求和后除以有效 token 数（与 kernel 的累加顺序不同，按 fp32 容差比较）。"""
+    T, H, D = k_rope.shape
+    nc = len(block_ptr_host) - 1
+    out = torch.zeros((nc, H, D), dtype=torch.float32, device=k_rope.device)
+    for b in range(nc):
+        a, e = block_ptr_host[b], block_ptr_host[b + 1]
+        if e > a:
+            out[b] = k_rope[a:e].float().sum(0) / (e - a)
+    return out
+
+
+def _history_mask(layout: RoutingLayout, device) -> torch.Tensor:
+    """[T, Nc] bool：BlockSeq[b] == seq(t) 且 b < CurrentBlock[t]。"""
+    cb = layout.current_block.to(device).long()
+    bs = layout.block_seq.to(device).long()
+    b = torch.arange(layout.Nc, device=device)
+    return (bs[None, :] == bs[cb][:, None]) & (b[None, :] < cb[:, None])
+
+
+def routing_scores(q_rope: torch.Tensor, centroids: torch.Tensor, layout: RoutingLayout, *, production: bool):
+    """[H, T, Nc] 分数，无效候选为 -inf。
+
+    production=True ：Centroid 先转为 Qrope 的 dtype（与 kernel 相同的 cast），乘积与求和在 fp64 中计算后舍入为 fp32；
+                      bf16 / fp16 的乘积在 fp32 / fp64 中都是精确的，所以只剩“求和顺序”一项与 kernel 不同
+    production=False：fp32 oracle，Qrope.float() @ Centroid.float().T（Centroid 不 cast），TF32 关闭
+    """
+    dev = q_rope.device
+    mask = _history_mask(layout, dev)
+    if production:
+        q = q_rope.detach().to(torch.float64)
+        c = centroids.to(q_rope.dtype).to(torch.float64)
+        s = torch.einsum("thd,bhd->htb", q, c).to(torch.float32)
+    else:
+
+        with highest_precision():
+            s = torch.einsum("thd,bhd->htb", q_rope.detach().float(), centroids.float())
+    return s.masked_fill(~mask[None], float("-inf"))
+
+
+def topk_from_scores(scores: torch.Tensor, kh: int) -> torch.Tensor:
+    """稳定 Top-K：分数降序，同分时 block id 较小者优先；-inf 记为 -1。scores [H, T, Nc] → [H, T, Kh] int32。"""
+    H, T, nc = scores.shape
+    if kh == 0 or nc == 0:
+        return torch.full((H, T, kh), -1, dtype=torch.int32, device=scores.device)
+    vals, idx = torch.sort(scores, dim=-1, descending=True, stable=True)
+    k = min(kh, nc)
+    ids = torch.where(vals[..., :k] > float("-inf"), idx[..., :k], torch.full_like(idx[..., :k], -1))
+    out = torch.full((H, T, kh), -1, dtype=torch.int32, device=scores.device)
+    out[..., :k] = ids.to(torch.int32)
+    return out
+
+
+def rstate_from_rtok(rtok: torch.Tensor, layout: RoutingLayout) -> torch.Tensor:
+    H, T, kh = rtok.shape
+    pv = layout.prefix_valid.to(rtok.device)
+    cb = layout.current_block.to(rtok.device).long()
+    cur = torch.where(pv[cb], cb, torch.full_like(cb, -1)).to(torch.int32).view(1, T, 1).expand(H, T, 1)
+    hist = torch.where((rtok >= 0) & pv[rtok.long().clamp(min=0)], rtok, torch.full_like(rtok, -1))
+    return torch.cat([cur, hist], dim=-1).contiguous()
+
+
+def route_reference(q_rope, centroids, layout: RoutingLayout, kh: int):
+    """production-matched routing reference：返回 (Rtok, Rstate, scores)。"""
+    scores = routing_scores(q_rope, centroids, layout, production=True)
+    rtok = topk_from_scores(scores, kh)
+    return rtok, rstate_from_rtok(rtok, layout), scores
+
+
+def check_route_invariants(rtok: torch.Tensor, rstate: torch.Tensor, layout: RoutingLayout) -> None:
+    """调试模式：distinct、[0, Nc)、同一 sequence、< CurrentBlock；Rstate slot 0 / PrefixValid。需要同步。"""
+    H, T, kh = rtok.shape
+    dev = rtok.device
+    cb = layout.current_block.to(dev).long()
+    bs = layout.block_seq.to(dev).long()
+    r = rtok.long()
+    valid = r >= 0
+    if bool((r[valid] >= layout.Nc).any()) or bool((r < -1).any()):
+        raise fail("invalid_shape", "Rtok 有越界的 block id")
+    safe = r.clamp(min=0)
+    if bool((valid & (bs[safe] != bs[cb][None, :, None])).any()):
+        raise fail("invalid_shape", "Rtok 含其他 sequence 的 block")
+    if bool((valid & (safe >= cb[None, :, None])).any()):
+        raise fail("invalid_shape", "Rtok 含非严格历史的 block")
+    if kh > 1:
+        s = torch.sort(torch.where(valid, r, torch.arange(-kh, 0, device=dev).expand_as(r)), -1).values
+        if bool((s[..., 1:] == s[..., :-1]).any()):
+            raise fail("invalid_shape", "Rtok 同一行有重复 block id")
+    expect = rstate_from_rtok(rtok, layout)
+    if not torch.equal(rstate, expect):
+        raise fail("invalid_shape", "Rstate 与 [current; Rtok] + PrefixValid 不一致")
+
+
 __all__ = [
     'HostLayout',
     'RefChunkwisePrefixFn',
     'RefJointAttentionFn',
-    'alg6_reference',
+    'centroid_reference',
+    'check_route_invariants',
     'compute_dtype',
     'gate_from_storage',
     'highest_precision',
     'local_cumsum',
-    'local_reference',
+    'metadata_reference',
     'naive_phba',
     'prefix_backward_branch',
     'prefix_forward',
@@ -500,5 +593,11 @@ __all__ = [
     'reference_a_chunkwise',
     'reference_b',
     'route_masks',
+    'route_reference',
+    'routing_scores',
+    'rstate_from_rtok',
     'rstate_from_rtok_host',
+    'sort_rho_segments',
+    'topk_from_scores',
+    'verify_against_host',
 ]

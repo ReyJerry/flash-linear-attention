@@ -15,7 +15,6 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.phba.errors import fail
 from fla.ops.phba.plans import (
     CHUNKWISE_TRAIN_MAX_DH,
     CHUNKWISE_TRAIN_MAX_M,
@@ -24,6 +23,7 @@ from fla.ops.phba.plans import (
     PrefixBackwardPlan,
     prefix_backward_plan,
 )
+from fla.ops.phba.utils import fail
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 # fixed launch geometry preserves the validated accumulation order

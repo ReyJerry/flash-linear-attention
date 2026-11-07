@@ -12,6 +12,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.phba.chunk_bwd import OWNER_NUM_STAGES, OWNER_NUM_WARPS
 from fla.ops.phba.plans import (
     OwnerBranchTapePlan,
     OwnerTapePlan,
@@ -19,7 +20,6 @@ from fla.ops.phba.plans import (
     owner_tape_producer_stages,
     owner_tape_uses_tile_major,
 )
-from fla.ops.phba.query_owner import OWNER_NUM_STAGES, OWNER_NUM_WARPS
 
 
 @triton.jit(do_not_specialize=['NC', 'HEAD_START'])

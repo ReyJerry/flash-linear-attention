@@ -18,12 +18,11 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from fla.ops.phba.contracts import isolated_autograd
-from fla.ops.phba.errors import fail
 from fla.ops.phba.plans import FA_SEGMENT_BATCH_LIMIT, _local_fa_batches, fa_head_dim_round
+from fla.ops.phba.utils import fail, isolated_autograd
 
 if TYPE_CHECKING:
-    from fla.ops.phba.routing.layout import RoutingLayout
+    from fla.ops.phba.routing import RoutingLayout
 
 FA_MIN_COMPUTE_CAPABILITY = (8, 0)
 
@@ -331,7 +330,6 @@ __all__ = [
 def local_attention(q_rope, k_rope, v, layout: RoutingLayout, *, scale: float,
                     fa_segment_batch_max: int = FA_SEGMENT_BATCH_LIMIT, fa_rows_per_call_max: int = 1 << 20):
     """local 分支：当前 block 内的因果 attention，FA 低层 varlen forward；返回 (Oloc storage [T,H,Dh], Lloc fp32 [H,T])。"""
-    from fla.ops.phba.flash_attention import varlen_forward
 
     c = layout.chunk_size
     batches = _local_fa_batches(layout.block_ptr_host, c, fa_segment_batch_max, fa_rows_per_call_max)

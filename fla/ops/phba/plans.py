@@ -16,7 +16,7 @@ from weakref import ref
 
 import torch
 
-from fla.ops.phba.errors import fail
+from fla.ops.phba.utils import fail
 
 MIN_DOT = 16
 INT32_MAX = 2**31 - 1
@@ -32,8 +32,6 @@ PREFIX_REVERSE_WORKSPACE_CAP = 256 * 1024**2
 OWNER_TAPE_CAP_BYTES = 256 * 1024**2
 OWNER_TAPE_MAX_HEADS = 4
 OWNER_TAPE_PRODUCER_STAGES = ((16, 2), (32, 2), (64, 1))
-
-STORAGE_DTYPES = {"float16": 2, "bfloat16": 2}
 
 
 _CONSTRUCT_TOKEN = object()

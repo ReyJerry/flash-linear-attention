@@ -23,3 +23,18 @@ The operator returns `(output, final_state)`. When requested, final state is a p
 Inputs use `[B, T, H, D]` and gate logits use `[B, T, H, M]`. Packed inputs have `B == 1` and cumulative int32 lengths. A `SequenceLengthPlan` owns immutable geometry tensors and can be shared between layers; it never caches query, key, value or gradient data.
 
 Pointer arithmetic uses int64. Canonical sorting uses int32 keys only when the expert/query key range is safe, with int64 fallback otherwise. Invalid routes and metadata tails are preserved. Forward processing uses bounded query windows; deterministic backward uses bounded grouped workspaces and retains its fixed-order fallback.
+
+## Implementation layout
+
+The public entry is `chunk.py`, with sequence geometry and workspace limits in `plans.py`. `parallel.py` owns joint attention forward and autograd dispatch; `prefix.py` owns the recurrent prefix computation. Internal responsibilities are grouped as follows:
+
+| Module           | Responsibility                                                               |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `routing.py`     | Block layout, centroids and discrete top-k routes                             |
+| `metadata.py`    | Canonical token metadata and derived prefix-state metadata                    |
+| `chunk_bwd.py`   | Attention backward dispatch, branch kernels and deterministic query ownership |
+| `tape.py`        | Grouped deterministic producer/owner workspaces and kernels                   |
+| `utils.py`       | Input contracts, structured errors and isolated preflight autograd            |
+| `naive.py`       | FP64 and storage-aware references, including routing and metadata oracles     |
+
+`flash_attention.py` adapts the local-attention interface. `linear.py` and `backends/` provide optional projection acceleration, with native fallbacks and packaged source resources. Profiling and algorithm-screening tools live under `benchmarks/`, outside the production operator. Internal module paths are implementation details; use the exports from `fla.ops.phba` for the public operator and sequence plan.

@@ -16,9 +16,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.phba.errors import fail
 from fla.ops.phba.flash_attention import local_attention
 from fla.ops.phba.plans import CHUNKWISE_VALIDATED_C, INT32_MAX, _local_fa_batches, kpad_tok
+from fla.ops.phba.utils import fail
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -482,7 +482,7 @@ class BlockMajorAttentionFn(torch.autograd.Function):
     @autocast_custom_bwd
     @torch.autograd.function.once_differentiable
     def backward(ctx, dout, dlse):
-        from fla.ops.phba.backward import attention_backward
+        from fla.ops.phba.chunk_bwd import attention_backward
 
         return attention_backward(ctx, dout, dlse)[:len(ctx.needs_input_grad)]
 

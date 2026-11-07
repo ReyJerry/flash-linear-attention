@@ -127,10 +127,16 @@ def test_naive_formula_gradients():
 
 @pytest.mark.parametrize('topk', [1, 4], ids=['no-history', 'history-and-tail'])
 def test_routing_and_metadata(topk):
-    from fla.ops.phba.metadata import build_direct_metadata, metadata_reference, sort_rho_segments
-    from fla.ops.phba.routing.centroid import centroid_reference, compute_block_centroids
-    from fla.ops.phba.routing.layout import verify_against_host
-    from fla.ops.phba.routing.topk import check_route_invariants, route_reference
+    from fla.ops.phba.metadata import build_direct_metadata
+    from fla.ops.phba.naive import (
+        centroid_reference,
+        check_route_invariants,
+        metadata_reference,
+        route_reference,
+        sort_rho_segments,
+        verify_against_host,
+    )
+    from fla.ops.phba.routing import compute_block_centroids
 
     plan = SequenceLengthPlan.from_host((97, 65), device)
     # integer block scores avoid near-tie ambiguity between reference and kernel reductions

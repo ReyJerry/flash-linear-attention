@@ -145,7 +145,6 @@ def _branch(
     nc: int,
     kpad: int,
     *,
-    scan_impl: str,
     retain_slots: bool = False,
     sorted_counts: bool = False,
 ) -> BranchMetadata:
@@ -157,8 +156,6 @@ def _branch(
     if cap > INT32_MAX or nc * H + 1 > INT32_MAX:
         raise fail("int32_overflow", f"Rho capacity T*H*K={cap} or expert count Nc*H exceeds int32")
     if sorted_counts:
-        if scan_impl != 'torch_cumsum':
-            raise fail('invalid_config', f'unsupported metadata scan: {scan_impl}')
         rho, slots, count, offset = canonical_rho(route, nc, return_slots=retain_slots, return_counts=True)
         return BranchMetadata(count=count, offset=offset, rho=rho, capacity=cap, source_slots=slots)
     dev = route.device
@@ -169,8 +166,6 @@ def _branch(
     grid = (triton.cdiv(T, META_BT), H)
     args = (T, K, route.stride(0), route.stride(1))
     _count_kernel[grid](route, count, *args, H=H, BT=META_BT, KPAD=kpad, num_warps=META_NUM_WARPS)
-    if scan_impl != "torch_cumsum":
-        raise fail("invalid_config", f"metadata_scan_impl = {scan_impl!r} is unsupported; use torch_cumsum")
     torch.cumsum(count, dim=0, dtype=torch.int32, out=offset[1:])
 
     source_slots = None
@@ -183,18 +178,17 @@ def _branch(
 
 
 def build_direct_metadata(rtok: torch.Tensor, rstate: torch.Tensor, nc: int, *,
-                          metadata_scan_impl: str = "torch_cumsum",
-                          retain_token_slots: bool = False, derived_state_layout=None) -> DirectMetadata:
+                          retain_token_slots: bool = False, derived_state_layout) -> DirectMetadata:
     """Build canonical metadata for token routes [H, T, Kh] and state routes [H, T, Kh + 1]."""
     H, T, kh = rtok.shape
     if rstate.shape != (H, T, kh + 1):
         raise fail("invalid_shape", f"Rstate must have shape [H, T, Kh + 1]={(H, T, kh + 1)}, got {tuple(rstate.shape)}")
-    tok = _branch(rtok, nc, kpad_tok(kh), scan_impl=metadata_scan_impl,
-                  retain_slots=retain_token_slots, sorted_counts=derived_state_layout is not None) if kh > 0 else None
-    if derived_state_layout is not None and tok is not None:
+    tok = _branch(rtok, nc, kpad_tok(kh),
+                  retain_slots=retain_token_slots, sorted_counts=True) if kh > 0 else None
+    if tok is not None:
         state = derive_state(tok, derived_state_layout, H, T * H * (kh + 1))
     else:
-        state = _branch(rstate, nc, kpad_state(kh + 1), scan_impl=metadata_scan_impl)
+        state = _branch(rstate, nc, kpad_state(kh + 1))
     return DirectMetadata(tok=tok, state=state)
 
 

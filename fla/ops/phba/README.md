@@ -22,7 +22,7 @@ The operator returns `(output, final_state)`. When requested, final state is a p
 
 Inputs use `[B, T, H, D]` and gate logits use `[B, T, H, M]`. Packed inputs have `B == 1` and cumulative int32 lengths. A `SequenceLengthPlan` owns immutable geometry tensors and can be shared between layers; it never caches query, key, value or gradient data.
 
-Pointer arithmetic uses int64. Canonical sorting uses int32 keys only when the expert/query key range is safe, with int64 fallback otherwise. Invalid routes and metadata tails are preserved. Forward processing uses bounded query windows; deterministic backward uses the geometry plan saved by forward, with bounded grouped workspaces and a fixed-order fallback.
+Pointer arithmetic uses int64. Canonical sorting uses int32 keys only when the expert/query key range is safe, with int64 fallback otherwise. Invalid routes and metadata tails are preserved. Forward processing uses bounded query windows; deterministic backward uses the geometry plan saved by forward, with bounded grouped workspaces and a fixed-order fallback. Token metadata always supplies derived state metadata when historical routes exist; the no-history case retains direct state counting.
 
 ## Implementation layout
 
@@ -31,7 +31,7 @@ The public entry is `chunk.py`, with sequence geometry and workspace limits in `
 | Module         | Responsibility                                                             |
 | -------------- | -------------------------------------------------------------------------- |
 | `routing.py`   | Block layout, centroids and discrete top-k routes                          |
-| `metadata.py`  | Canonical token metadata and derived prefix-state metadata                 |
+| `metadata.py`  | Canonical token metadata, derived state metadata and no-history counting   |
 | `chunk_bwd.py` | Attention backward, grouped tape kernels and deterministic query ownership |
 | `utils.py`     | Input contracts, structured errors and gradient alignment                  |
 | `naive.py`     | FP64 and storage-aware references, including routing and metadata oracles  |

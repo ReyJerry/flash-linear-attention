@@ -321,7 +321,7 @@ def attention_backward(ctx, dout, _dlse):
     state = BranchMetadata(sc, so, sr, sr.numel())
     tok = BranchMetadata(*token, token[-1].numel()) if ctx.has_token else None
     metadata = DirectMetadata(tok, state)
-    dout, _copy_bytes = prepare_grad_output(dout, out)
+    dout = prepare_grad_output(dout, out)
     dout = dout.contiguous()
     delta = compute_delta(dout, out)
     local = local_backward(dout, qr, kr, v, out, lse, bp, ctx.batches, deterministic=True)
@@ -417,7 +417,7 @@ def _sparse_bwd_tape_kernel(
     H: tl.constexpr, D: tl.constexpr, M: tl.constexpr,
     BC: tl.constexpr, BQ: tl.constexpr, BD: tl.constexpr, BRANCH: tl.constexpr,
     GROUP_SIZE: tl.constexpr, TAPE_STRIDE: tl.constexpr, INDEX32: tl.constexpr,
-    WRITE_DK: tl.constexpr = True, TILE_MAJOR: tl.constexpr = True,
+    TILE_MAJOR: tl.constexpr = True,
     TASK_ORDER=None, ORDERED: tl.constexpr = False,
 ):
     if ORDERED:
@@ -459,8 +459,7 @@ def _sparse_bwd_tape_kernel(
     mm = valid_mem[:, None] & (d[None, :] < D)
     k = tl.load(kmem + kaddr, mm, other=0)
     v = tl.load(vmem + vaddr, mm, other=0)
-    if WRITE_DK:
-        dk_acc = tl.zeros((BC, BD), tl.float32)
+    dk_acc = tl.zeros((BC, BD), tl.float32)
     dv_acc = tl.zeros((BC, BD), tl.float32)
     group_begin = tl.load(group_offset + group_expert).to(tl.int64)
     begin = tl.load(offset + e)
@@ -493,11 +492,9 @@ def _sparse_bwd_tape_kernel(
         else:
             tape_address = edge[:, None] * TAPE_STRIDE + mem[None, :]
         tl.store(tape + tape_address, ds_st, valid_q[:, None] & valid_mem[None, :])
-        if WRITE_DK:
-            dk_acc += tl.dot(tl.trans(ds_st), qt, out_dtype=tl.float32) * scale
+        dk_acc += tl.dot(tl.trans(ds_st), qt, out_dtype=tl.float32) * scale
         dv_acc += tl.dot(tl.trans(prob.to(dot.dtype)), dot, out_dtype=tl.float32)
-    if WRITE_DK:
-        tl.store(dk + grad_addr, dk_acc, mm)
+    tl.store(dk + grad_addr, dk_acc, mm)
     tl.store(dv + grad_addr, dv_acc, mm)
 
 
@@ -620,8 +617,7 @@ def build_group_metadata(route, meta, workspace, plan: OwnerTapePlan, *, head_st
 
 
 def run_tape_group(q, k, v, dout, lse, delta, route, meta, block_ptr, prefix_valid, dq, dk, dv,
-                   workspace, plan: OwnerTapePlan, *, head_start, branch, chunk_size, num_slots, bc, bq,
-                   index32: bool | None = None):
+                   workspace, plan: OwnerTapePlan, *, head_start, branch, chunk_size, num_slots, bc, bq):
     """Compute one deterministic producer/consumer head group using its saved forward plan."""
     producer_stages = owner_tape_producer_stages(plan, bc)
     tile_major = owner_tape_uses_tile_major(plan, branch)
@@ -630,11 +626,7 @@ def run_tape_group(q, k, v, dout, lse, delta, route, meta, block_ptr, prefix_val
     tape_stride = plan.token_extent if branch == 0 else plan.state_extent
     if meta.capacity != t * h * route.shape[-1]:
         raise ValueError('canonical capacity differs from forward-bound route geometry')
-    safe32 = owner_tape_index32_safe(meta.capacity, tape_stride, bq)
-    if index32 is None:
-        index32 = safe32
-    elif index32 and not safe32:
-        raise ValueError('32-bit producer indices require a padding-safe capacity')
+    index32 = owner_tape_index32_safe(meta.capacity, tape_stride, bq)
     build_group_metadata(route, meta, workspace, plan, head_start=head_start)
     prefix_strides = k.stride()[:3] if branch else (0, 0, 0)
     gradient_strides = dk.stride()[:3] if branch else (0, 0, 0)
@@ -656,7 +648,7 @@ def run_tape_group(q, k, v, dout, lse, delta, route, meta, block_ptr, prefix_val
         H=h, D=d, M=num_slots, BC=bc, BQ=bq, BD=max(16, triton.next_power_of_2(d)), BRANCH=branch,
         GROUP_SIZE=plan.group_size, TAPE_STRIDE=tape_stride, INDEX32=index32,
         TAPE_EDGES=t * plan.group_size * route.shape[-1],
-        WRITE_DK=True, TILE_MAJOR=tile_major, TASK_ORDER=task_order, ORDERED=ordered,
+        TILE_MAJOR=tile_major, TASK_ORDER=task_order, ORDERED=ordered,
         num_warps=4, num_stages=producer_stages,
     )
     _owner_from_tape_kernel[(triton.cdiv(t, 16), plan.group_size)](

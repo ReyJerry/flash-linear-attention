@@ -212,19 +212,31 @@ def test_low_memory_fallback_gradients(monkeypatch):
     def unexpected(*args, **kwargs):
         pytest.fail('Backward must use the tape plan saved by forward')
 
-    def evaluate():
+    def evaluate(grad=do):
         leaves = [x.clone().requires_grad_() for x in inputs]
         output, _ = chunk_phba(*leaves, chunk_size=32, topk=4)
         with monkeypatch.context() as context:
             context.setattr(plans, 'owner_branch_tape_plan', unexpected)
-            return output.detach(), torch.autograd.grad(output, leaves, do)
+            return output.detach(), torch.autograd.grad(output, leaves, grad)
 
+    from fla.ops.phba.utils import prepare_grad_output
+
+    unaligned = torch.empty(do.numel() + 1, dtype=do.dtype, device=do.device)[1:].view_as(do)
+    unaligned.copy_(do)
+    assert unaligned.is_contiguous() and unaligned.data_ptr() % 16 != 0
+    assert prepare_grad_output(do, inputs[0]) is do
+    aligned = prepare_grad_output(unaligned, inputs[0])
+    assert aligned.data_ptr() % 16 == 0 and torch.equal(aligned, do)
     expected, expected_grads = evaluate()
+    offset_output, offset_grads = evaluate(unaligned)
+    assert torch.equal(offset_output, expected)
+    for result, reference in zip(offset_grads, expected_grads):
+        assert torch.equal(result.view(torch.uint8), reference.view(torch.uint8))
     monkeypatch.setattr(plans, 'OWNER_TAPE_CAP_BYTES', 0)
     monkeypatch.setattr(plans, 'PREFIX_REVERSE_WORKSPACE_CAP', 0)
     assert not plans.prefix_backward_plan(5, 2, 32, 32).parallel
     assert not plans.owner_branch_tape_plan(129, 2, 5, 32, 32, 3, 4, 32, 2).enabled
-    actual, grads = evaluate()
+    actual, grads = evaluate(unaligned)
     repeated, repeated_grads = evaluate()
     assert torch.equal(actual, repeated)
     assert_close('fallback_output', expected.float(), actual.float(), .03)

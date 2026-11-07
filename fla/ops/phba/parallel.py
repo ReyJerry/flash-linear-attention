@@ -8,7 +8,6 @@
 """Deterministic block-major PHBA attention and bounded forward workspace."""
 from __future__ import annotations
 
-import os
 from bisect import bisect_right
 from dataclasses import dataclass
 
@@ -24,7 +23,6 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 @dataclass(frozen=True)
 class BlockMajorConfig:
-    derive_state_metadata: bool = True
     window_tokens: int = 2048
     bq: int = 64
     bc: int = 32
@@ -383,7 +381,7 @@ def validate_inputs(qr, qw, kr, v, pk, pv, rtok, layout):
     if qr.ndim != 3 or qr.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError('PHBA inputs require storage fp16/bf16 [T,H,D]')
     t, h, d = qr.shape
-    supported_chunk = 16 <= layout.chunk_size <= 128 or layout.chunk_size in CHUNKWISE_VALIDATED_C
+    supported_chunk = layout.chunk_size in CHUNKWISE_VALIDATED_C
     if t != layout.T or d < 16 or d > 128 or d % 8 or not supported_chunk:
         raise ValueError('unsupported PHBA geometry')
     if any(x.shape != qr.shape or x.dtype != qr.dtype or x.device != qr.device or not x.is_contiguous()
@@ -404,8 +402,8 @@ def validate_inputs(qr, qw, kr, v, pk, pv, rtok, layout):
         raise ValueError('route slots must be contiguous')
     if layout.device != qr.device:
         raise ValueError('layout device mismatch')
-    if qr.device.type != 'cuda' and os.environ.get('TRITON_INTERPRET') != '1':
-        raise RuntimeError('PHBA kernels require CUDA; CPU only allowed in explicit interpreter tests')
+    if qr.device.type != 'cuda':
+        raise RuntimeError('PHBA kernels require CUDA')
 
 
 def block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, *, config=BlockMajorConfig(), canonical_token=None):
@@ -441,11 +439,9 @@ class BlockMajorAttentionFn(torch.autograd.Function):
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, qr, qw, kr, v, pk, pv, rtok, rstate, layout, config, needs_backward=None):
+    def forward(ctx, qr, qw, kr, v, pk, pv, rtok, rstate, layout, config, needs_backward):
         from fla.ops.phba.metadata import build_direct_metadata
 
-        if needs_backward is None:
-            needs_backward = any(ctx.needs_input_grad[:6])
         retain_slots = False
         if needs_backward and rtok.shape[-1] > 0:
             t, h, d = qr.shape
@@ -454,7 +450,7 @@ class BlockMajorAttentionFn(torch.autograd.Function):
         meta = build_direct_metadata(
             rtok, rstate, layout.Nc,
             retain_token_slots=retain_slots,
-            derived_state_layout=layout if config.derive_state_metadata else None,
+            derived_state_layout=layout,
         ) if needs_backward else None
         out, lse = block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, config=config,
                                        canonical_token=meta.tok if retain_slots else None)
@@ -484,7 +480,7 @@ class BlockMajorAttentionFn(torch.autograd.Function):
     def backward(ctx, dout, dlse):
         from fla.ops.phba.chunk_bwd import attention_backward
 
-        return attention_backward(ctx, dout, dlse)[:len(ctx.needs_input_grad)]
+        return attention_backward(ctx, dout, dlse)
 
 
 def block_major_attention(qr, qw, kr, v, pk, pv, rtok, rstate, layout, *, config=BlockMajorConfig()):

@@ -8,7 +8,6 @@
 """Chunkwise gated prefix states with deterministic segmented backward."""
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 import torch
@@ -53,10 +52,6 @@ LAUNCH = {
 }
 
 STORAGE_DTYPES = (torch.float16, torch.bfloat16)
-
-
-def interpreter_enabled() -> bool:
-    return os.environ.get("TRITON_INTERPRET", "0") == "1"
 
 
 @triton.jit
@@ -487,7 +482,7 @@ def check_inputs(s_val: torch.Tensor, k_raw: torch.Tensor, v: torch.Tensor, g_lo
     if c not in CHUNKWISE_VALIDATED_C:
         raise fail("prefix_kernel_unsupported", f"Chunk size C={c} is outside the validated set {CHUNKWISE_VALIDATED_C}")
     for name, x in (("s_val", s_val), ("k_raw", k_raw), ("v", v), ("g_log", g_log)):
-        if x.device.type != "cuda" and not interpreter_enabled():
+        if x.device.type != "cuda":
             raise fail("prefix_kernel_unsupported", f"{name} is on {x.device}; prefix kernels require CUDA")
         if x.dim() != 3:
             raise fail("prefix_kernel_unsupported", f"{name} must have shape [T, H, *], got {tuple(x.shape)}")
@@ -534,7 +529,7 @@ def chunkwise_prefix_states(
 
 __all__ = [
     "BWD_BLOCK_T", "CUMSUM_BS", "FWD_BK", "FWD_BV", "LAUNCH", "ChunkwisePrefixStateFn", "LaunchConfig",
-    "check_inputs", "chunkwise_prefix_states", "interpreter_enabled",
+    "check_inputs", "chunkwise_prefix_states",
     "local_cumsum",
 ]
 

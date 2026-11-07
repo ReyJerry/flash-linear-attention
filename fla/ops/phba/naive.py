@@ -456,23 +456,17 @@ def _history_mask(layout: RoutingLayout, device) -> torch.Tensor:
     return (bs[None, :] == bs[cb][:, None]) & (b[None, :] < cb[:, None])
 
 
-def routing_scores(q_rope: torch.Tensor, centroids: torch.Tensor, layout: RoutingLayout, *, production: bool):
+def routing_scores(q_rope: torch.Tensor, centroids: torch.Tensor, layout: RoutingLayout):
     """Return scores [H, T, Nc], masking invalid candidates with negative infinity.
 
-    Production mode rounds centroids to query dtype before an FP64 dot and FP32 output conversion.
+    Round centroids to query dtype before an FP64 dot and FP32 output conversion.
     FP16/BF16 products are exact in FP32/FP64; reduction order can still differ from the kernel.
-    The alternate oracle uses unrounded FP32 centroids with TF32 disabled.
     """
     dev = q_rope.device
     mask = _history_mask(layout, dev)
-    if production:
-        q = q_rope.detach().to(torch.float64)
-        c = centroids.to(q_rope.dtype).to(torch.float64)
-        s = torch.einsum("thd,bhd->htb", q, c).to(torch.float32)
-    else:
-
-        with highest_precision():
-            s = torch.einsum("thd,bhd->htb", q_rope.detach().float(), centroids.float())
+    q = q_rope.detach().to(torch.float64)
+    c = centroids.to(q_rope.dtype).to(torch.float64)
+    s = torch.einsum("thd,bhd->htb", q, c).to(torch.float32)
     return s.masked_fill(~mask[None], float("-inf"))
 
 
@@ -500,7 +494,7 @@ def rstate_from_rtok(rtok: torch.Tensor, layout: RoutingLayout) -> torch.Tensor:
 
 def route_reference(q_rope, centroids, layout: RoutingLayout, kh: int):
     """Return token routes, state routes and scores using production-matched operand rounding."""
-    scores = routing_scores(q_rope, centroids, layout, production=True)
+    scores = routing_scores(q_rope, centroids, layout)
     rtok = topk_from_scores(scores, kh)
     return rtok, rstate_from_rtok(rtok, layout), scores
 

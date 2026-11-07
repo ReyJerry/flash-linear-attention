@@ -55,24 +55,17 @@ def fail(reason: str, message: str = "", **details: Any) -> PHBAError:
 ALIGNMENT_BYTES = 16
 
 
-def prepare_grad_output(grad_out: torch.Tensor, out: torch.Tensor) -> tuple[torch.Tensor, int]:
-    """Validate gradient dtype and return the aligned gradient with its copy size in bytes.
+def prepare_grad_output(grad_out: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """Validate the output gradient and copy unaligned views into fresh storage.
 
-    A contiguous view can still be unaligned; such views require a fresh allocation.
+    A contiguous view can still be unaligned; contiguity alone does not satisfy the alignment contract.
     """
     if grad_out.dtype != out.dtype:
         raise fail("dtype_mismatch", f"dO dtype {grad_out.dtype} does not match output dtype {out.dtype}")
-    return prepare_grad_output_meta(grad_out, out.dtype, tuple(out.shape))
-
-
-def prepare_grad_output_meta(grad_out: torch.Tensor, dtype: torch.dtype, shape: tuple[int, ...]) -> tuple[torch.Tensor, int]:
-    """Align the output gradient using saved dtype/shape metadata without retaining the output tensor."""
-    if grad_out.dtype != dtype:
-        raise fail("dtype_mismatch", f"dO dtype {grad_out.dtype} does not match output dtype {dtype}")
-    if tuple(grad_out.shape) != tuple(shape):
-        raise fail("invalid_shape", f"dO shape {tuple(grad_out.shape)} does not match output shape {tuple(shape)}")
+    if tuple(grad_out.shape) != tuple(out.shape):
+        raise fail("invalid_shape", f"dO shape {tuple(grad_out.shape)} does not match output shape {tuple(out.shape)}")
     if grad_out.stride(-1) == 1 and grad_out.data_ptr() % ALIGNMENT_BYTES == 0:
-        return grad_out, 0
+        return grad_out
     fresh = torch.empty(grad_out.shape, dtype=grad_out.dtype, device=grad_out.device)
     fresh.copy_(grad_out)
-    return fresh, fresh.numel() * fresh.element_size()
+    return fresh

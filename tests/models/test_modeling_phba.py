@@ -288,6 +288,77 @@ def test_loss_contract(reduction, num_items, use_l2warp):
         assert model.criterion.reduction == reduction
 
 
+@pytest.mark.parametrize(
+    ('loss_kind', 'num_items'),
+    [
+        pytest.param('native', 7, id='native-integer-count'),
+        pytest.param('native', torch.tensor(11), id='native-tensor-count'),
+        pytest.param('ce', 7, id='fused-ce-integer-count',
+                     marks=pytest.mark.skipif(not IS_NVIDIA, reason='Fused CE requires NVIDIA')),
+        pytest.param('linear', torch.tensor(11), id='fused-linear-tensor-count',
+                     marks=pytest.mark.skipif(not IS_NVIDIA, reason='Fused linear CE requires NVIDIA')),
+    ],
+)
+def test_l2warp_gradient_scaling(loss_kind, num_items):
+    torch.manual_seed(42)
+    target_device = 'cpu' if loss_kind == 'native' else device
+    model = PHBAForCausalLM(make_config(
+        hidden_size=16,
+        num_heads=1,
+        num_hidden_layers=0,
+        intermediate_size=32,
+        vocab_size=16,
+        fuse_norm=False,
+        fuse_cross_entropy=loss_kind == 'ce',
+        fuse_linear_cross_entropy=loss_kind == 'linear',
+        use_l2warp=True,
+    )).to(target_device)
+    with torch.no_grad():
+        model.lm_head.weight.copy_(torch.eye(16, device=target_device))
+    inputs = torch.arange(1, 97, device=target_device, dtype=torch.float32).reshape(2, 3, 16) / 32
+    inputs[0, 0].zero_()
+    labels = torch.full((2, 3), -100, device=target_device, dtype=torch.long)
+    labels[0, 1] = 0
+    ignored = torch.ones((2, 3), device=target_device, dtype=torch.bool)
+    ignored[0, 0] = False
+
+    def evaluate(items):
+        model.zero_grad(set_to_none=True)
+        output = model(
+            inputs_embeds=inputs, labels=labels, num_items_in_batch=items, output_hidden_states=True,
+        )
+        hidden = output.hidden_states[-1]
+        hidden.retain_grad()
+        saved_hidden = hidden.detach().clone()
+        assert torch.count_nonzero(saved_hidden[0, 0]) == 0
+        assert (output.logits is None) == (loss_kind == 'linear')
+        output.loss.backward()
+        return output.loss.detach(), saved_hidden, hidden.grad.detach().clone(), model.lm_head.weight.grad.detach().clone()
+
+    # the only CE target uses a zero hidden row; ignored rows and the head weight isolate the L2 contribution.
+    with highest_precision():
+        base_loss, hidden, base_dh, base_dw = evaluate(None)
+        loss, scaled_hidden, dh, dw = evaluate(num_items)
+        torch.testing.assert_close(scaled_hidden, hidden, rtol=0, atol=0)
+        oracle_hidden = hidden.double().requires_grad_()
+        oracle_weight = model.lm_head.weight.detach().double().requires_grad_()
+        maxima = F.linear(oracle_hidden, oracle_weight).max(-1).values
+        penalty = maxima.square().sum() * (1e-4 / (2 * maxima.numel()))
+        expected_dh, expected_dw = torch.autograd.grad(penalty, (oracle_hidden, oracle_weight))
+    count = int(num_items)
+    assert torch.count_nonzero(expected_dh[ignored]) > 0 and torch.count_nonzero(expected_dw) > 0
+    assert torch.count_nonzero(dh[ignored]) > 0 and torch.count_nonzero(dw) > 0
+    assert torch.isfinite(dh).all() and torch.isfinite(dw).all()
+    # relative-only checks prevent a small normalized penalty from disappearing under an absolute tolerance.
+    torch.testing.assert_close(base_dh[ignored].double(), expected_dh[ignored], rtol=1.3e-6, atol=0)
+    torch.testing.assert_close(base_dw.double(), expected_dw, rtol=1.3e-6, atol=0)
+    torch.testing.assert_close(dh[ignored].double(), expected_dh[ignored] / count, rtol=1.3e-6, atol=0)
+    torch.testing.assert_close(dw.double(), expected_dw / count, rtol=1.3e-6, atol=0)
+    torch.testing.assert_close(dh[ignored].double() * count, base_dh[ignored].double(), rtol=1.3e-6, atol=0)
+    torch.testing.assert_close(dw.double() * count, base_dw.double(), rtol=1.3e-6, atol=0)
+    torch.testing.assert_close(loss.double() * count, base_loss.double(), rtol=1.3e-6, atol=0)
+
+
 @pytest.mark.skipif(not IS_NVIDIA or find_spec_cached('flash_attn') is None, reason='PHBA CUDA integration')
 @pytest.mark.parametrize(
     ('fuse_norm', 'fuse_swiglu', 'loss_kind', 'use_l2warp', 'num_items', 'packed', 'dtype', 'tied'),

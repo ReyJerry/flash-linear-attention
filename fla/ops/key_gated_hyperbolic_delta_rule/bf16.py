@@ -49,7 +49,7 @@ def shapes(c, k):
     common = [(c, k)] * 9 + [(c, c)] * 7 + [(k, c)] * 2 + [(c,)] * 5
     group = [(c, c)] * 5 + [(c,)] * 3
     shared = [(c, c), (c, c), (c, k), (c, c), (c,), (c, k), (c, c), (k, c),
-              (c,), (c,), (c,), (c, k), (c,), (c, k), (c, k)]
+              (c,), (c,), (c,), (k,), (c,), (k,), (c, k)]
     return common, group, shared
 
 
@@ -87,13 +87,19 @@ class _ChunkBF16(torch.autograd.Function):
         nc = len(starts)
         cs, gr, _ = shapes(c, kt)
         p, gp = buffers(nc*h, cs, q.device), buffers(nc*h*ng, gr, q.device)
-        carry = buffers(nc*h, [(c, kt), (c, c)], q.device)
+        carry = buffers(nc*h if opts['carry'] else 0, [(c, kt), (c, c)], q.device)
         saved_s, saved_y = buffers(nc*h*ng, [(kt, gt), (c, gt)], q.device)
+        saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp = buffers(
+            nc*h*ng, [(c, gt), (c,), (c,), (c, gt), (c,), (c,)], q.device)
         output = torch.empty_like(v, dtype=q.dtype)
         final = torch.empty_like(state, dtype=torch.float32)
         if nc:
-            launch(kernels.common_fwd_kernel, (nc*h,), (q, k, beta, ell, *
+            launch(kernels.common_base_fwd_kernel, (nc*h,), (q, k, beta, ell, *
                    meta[:2], p, h, kd, c, kt, opts['scale']), telemetry, num_warps=4)
+            launch(kernels.common_interval_fwd_kernel, (nc*h*c,),
+                   (ell, *meta[:2], p, h, kd, c, kt), telemetry, num_warps=4)
+            launch(kernels.common_system_fwd_kernel, (nc*h,),
+                   (*meta[:2], p, h, c, kt), telemetry, num_warps=4)
             if opts['carry']:
                 launch(kernels.carry_fwd_kernel, (nc*h,), (meta[1], meta[0],
                        meta[4], p, carry, h, c, kt), telemetry, num_warps=4)
@@ -101,19 +107,24 @@ class _ChunkBF16(torch.autograd.Function):
                    meta[:2], p, gp, h, vd, gs, ng, c, gt), telemetry, num_warps=4)
             launch(kernels.group_af_fwd_kernel, (nc*h*ng, c), (p, gp, ng, c), telemetry, num_warps=4)
         launch(kernels.state_fwd_kernel, ((len(seq_chunks)-1)*h*ng,),
-               (v, state, output, final, *meta[:3], p, gp, saved_s, saved_y, carry,
+               (v, state, output, final, *meta[:3], p, gp, saved_s, saved_y, saved_u, saved_r, saved_t, saved_w, saved_zp, carry,
                 h, kd, vd, gs, ng, c, kt, gt, True, opts['carry'], False), telemetry, BF16_FS6=False, num_warps=4)
+        if nc:
+            launch(kernels.output_fwd_kernel, (nc*h*ng,),
+                   (v, output, *meta[:2], p, gp, saved_s, saved_u, saved_r, saved_t, saved_ro,
+                    h, vd, gs, ng, c, kt, gt), telemetry, num_warps=4)
         if not torch.isfinite(output).all() or not torch.isfinite(final).all():
             raise RuntimeError('nonfinite candidate forward; FP64 fallback forbidden')
-        ctx.save_for_backward(*sources, *meta, *p, *gp, saved_s, saved_y, *carry)
+        ctx.save_for_backward(*sources, *meta, *p, *gp, saved_s, saved_y, *carry,
+                              saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp)
         ctx.opts, ctx.telemetry, ctx.nc = opts, telemetry, nc
         ctx.set_materialize_grads(False)
         if telemetry is not None:
             telemetry.update(backend='triton_chunk', precision_route='bf16', precision_eligible=True,
-                             arithmetic='bf16_three_product', working_dtype='float32', host_fallback=False,
+                             arithmetic='bf16_output_source_single_c16', working_dtype='float32', host_fallback=False,
                              readout_precision='fp32', state_control_precision='fp32',
                              contraction_precision='bf16_operands_fp32_accumulation', fallback_subblocks=0,
-                             saved_buffer_bytes=sum(x.numel()*x.element_size() for x in (*p, *gp, saved_s, saved_y, *carry)))
+                             saved_buffer_bytes=sum(x.numel()*x.element_size() for x in (*p, *gp, saved_s, saved_y, *carry, saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp)))
         return output, final
 
     @staticmethod
@@ -126,6 +137,8 @@ class _ChunkBF16(torch.autograd.Function):
         sources, meta, p, gp = saved[:7], saved[7:12], saved[12:35], saved[35:43]
         saved_s, saved_y = saved[43:45]
         carry = saved[45:47]
+        saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp = saved[47:53]
+        local = (saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp)
         q, k, v, beta, ell, state, curve = sources
         _, _, h, kd = q.shape
         vd, gs, c = v.shape[-1], opts['g'], opts['c']
@@ -137,13 +150,28 @@ class _ChunkBF16(torch.autograd.Function):
         grads = [torch.empty_like(x, dtype=torch.float32) for x in sources]
         dc = torch.empty((ctx.nc*h*ng,), device=q.device, dtype=torch.float32)
         _, _, ss = shapes(c, kt)
-        shared = buffers(ctx.nc*h*ng, ss, q.device)
-        launch(kernels.state_bwd_kernel, (state.shape[0]*h*ng,),
-               (v, curve, do, ds, grads[2], grads[5], dc, *meta[:3], p, gp, saved_s, saved_y, shared, carry,
-                h, kd, vd, gs, ng, c, kt, gt, opts['carry'], False), ctx.telemetry, num_warps=4)
+        shared = buffers(ctx.nc*h*ng, ss[:-1], q.device) + buffers(ctx.nc*h*ng if opts['carry'] else 0, ss[-1:], q.device)
+        gauge = buffers(ctx.nc*h, [(c,), (c,)], q.device)
+        output_adj = buffers(ctx.nc*h*ng, [(kt, gt), (c, gt), (c,), (c,)], q.device)
+        edge_y = buffers(ctx.nc*h*ng if opts['carry'] else 0, [(c, gt)], q.device)[0]
         if ctx.nc:
-            launch(kernels.common_bwd_kernel, (ctx.nc*h,),
-                   (ell, grads[0], grads[1], grads[3], grads[4], *meta[:2], meta[3], p, shared,
+            launch(kernels.output_bwd_kernel, (ctx.nc*h*ng,),
+                   (v, do, grads[2], *meta[:2], p, gp, saved_s, saved_u, saved_r, saved_t, saved_ro, shared, output_adj,
+                    h, kd, vd, gs, ng, c, kt, gt), ctx.telemetry, num_warps=4)
+        launch(kernels.state_bwd_kernel, (state.shape[0]*h*ng,),
+               (v, curve, ds, grads[2], grads[5], *meta[:3], p, gp, saved_s, local, shared, output_adj, carry, edge_y,
+                h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry, num_warps=4)
+        if ctx.nc:
+            launch(kernels.parameter_bwd_kernel, (ctx.nc*h*ng,),
+                   (v, curve, do, grads[2], dc, *meta[:2], meta[3], meta[4], p, gp, saved_s, saved_y, local,
+                    shared, output_adj, edge_y, h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry, num_warps=4)
+        if ctx.nc:
+            launch(kernels.gauge_bwd_kernel, (ctx.nc*h,), (p, shared, gauge, ng, c), ctx.telemetry, num_warps=4)
+            launch(kernels.common_matrix_bwd_kernel, (ctx.nc*h,),
+                   (grads[0], grads[1], grads[3], grads[4], *meta[:2], meta[3], p, shared,
+                    h, kd, ng, c, kt, opts['carry']), ctx.telemetry, num_warps=4)
+            launch(kernels.common_interval_bwd_kernel, (ctx.nc*h,),
+                   (ell, grads[0], grads[1], grads[3], grads[4], *meta[:2], p, shared, gauge,
                     h, kd, ng, c, kt, opts['scale']), ctx.telemetry, num_warps=4)
         grads[6] = dc.sum()
         if any(not torch.isfinite(x).all() for x in grads):

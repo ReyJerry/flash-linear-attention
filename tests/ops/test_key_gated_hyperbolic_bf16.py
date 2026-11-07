@@ -73,7 +73,10 @@ def test_bf16_chunk_sources(dtype, packed, chunk, carry, cotangent):
             cot[1].zero_()
         if cotangent == 'state':
             cot[0].zero_()
-        observed = torch.autograd.grad(actual, sources, cot)
+        observed = torch.autograd.grad(actual, sources, cot, retain_graph=True)
+        repeated = torch.autograd.grad(actual, sources, cot)
+    for first, second in zip(observed, repeated):
+        torch.testing.assert_close(first, second, atol=0, rtol=0)
     truth = torch.autograd.grad(expected, reference, [x.double() for x in cot])
     for a, b in zip(actual, expected):
         compare_bf16(a, b)
@@ -83,6 +86,31 @@ def test_bf16_chunk_sources(dtype, packed, chunk, carry, cotangent):
     assert info['precision_route'] == info['backward_precision_route'] == 'bf16'
     assert info['fallback_subblocks'] == info['backward_fallback_subblocks'] == 0
     assert info['backward_precision'] == 'device_float32' and not info['host_fallback']
+
+
+@pytest.mark.parametrize('carry', ['no_carry', 'y_carry'])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_bf16_longer_chunk_source_gradient_precision(carry):
+    # this prospective seed exposes the C32 key-gradient error from single-product output VJPs
+    sources, cu = make_case(67, 128, 128, 32, torch.float32, seed=1009)
+    reference = tuple(x.detach().double().requires_grad_() for x in sources)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], curvature=reference[6], initial_state=reference[5], output_final_state=True,
+        cu_seqlens=cu, group_size=32,
+    )
+    with NoFP64():
+        actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+            *sources[:5], curvature=sources[6], initial_state=sources[5], output_final_state=True,
+            cu_seqlens=cu, group_size=32, chunk_size=32, carry_mode=carry, precision_policy='bf16',
+        )
+        torch.manual_seed(901009)
+        cotangents = tuple(torch.randn_like(x) for x in actual)
+        gradients = torch.autograd.grad(actual, sources, cotangents)
+    truth = torch.autograd.grad(expected, reference, tuple(x.double() for x in cotangents))
+    for a, b in zip(actual, expected):
+        compare_bf16(a, b)
+    for a, b in zip(gradients, truth):
+        compare_bf16(a, b, backward=True)
 
 
 @pytest.mark.parametrize('length', [0, 1, 17])

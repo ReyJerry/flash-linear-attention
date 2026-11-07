@@ -162,9 +162,15 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
         lambda row: row['telemetry'].update(host_fallback=True),
         lambda row: row['telemetry'].update(backward_precision_route='strict'),
         lambda row: row['launches'].pop(),
+        lambda row: row['launches'].pop(6),
+        lambda row: row['launches'].reverse(),
+        lambda row: next(x for x in row['launches'] if x['kernel'] == 'state_fwd_kernel')[
+            'arguments']['SavedU'].update(dtype='torch.float64'),
         lambda row: row['launches'][0]['arguments'].update(C=32),
-        lambda row: row['launches'][3]['arguments']['SavedS'].update(dtype='torch.float64'),
-        lambda row: row['launches'][3]['arguments']['Starts'].update(shape=[999]),
+        lambda row: next(x for x in row['launches'] if x['kernel'] == 'state_fwd_kernel')[
+            'arguments']['SavedS'].update(dtype='torch.float64'),
+        lambda row: next(x for x in row['launches'] if x['kernel'] == 'state_fwd_kernel')[
+            'arguments']['Starts'].update(shape=[999]),
         lambda row: row['launches'][0].update(source_binding_sha256='0'*64),
         lambda row: row['launches'][0]['compiled_precision_inventory'].update(ptx_sha256='0'*64),
         lambda row: row.update(layer='unobserved_layer'),

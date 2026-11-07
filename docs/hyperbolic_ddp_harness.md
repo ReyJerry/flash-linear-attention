@@ -10,7 +10,7 @@ GDN, KDA, Comba, HDN TC/staged and the existing protected baselines use their na
 
 ## Public BF16 qualification
 
-`--khdn-precision-policy bf16` selects the public three-product BF16 implementation with FP32 control/state and no candidate FP64 fallback. Its current harness witness is C16/K=V128/g32/no_carry, BF16 autocast, ShortConv and plain CE. The CLI currently permits only `--check-only` or `--dry-run`; full-model timing remains gated until the integrated path is qualified. This is separate from the frozen private full-model timings in the [BF16 release record](experiments/khdn_bf16_2026_11_06/README.md).
+`--khdn-precision-policy bf16` selects the public per-GEMM BF16 implementation with FP32 control/state and no candidate FP64 fallback. Its current harness witness is C16/K=V128/g32/no_carry, BF16 autocast, ShortConv and plain CE. The CLI currently permits only `--check-only` or `--dry-run`; full-model timing remains gated until the integrated path is qualified. Dedicated frozen drivers now provide public full-model timing and W1/W8 validation in the [November 7 release record](experiments/khdn_bf16_2026_11_07/README.md); this does not enable the unrestricted CLI timing gate.
 
 On the qualified H20/compiler runtime, an actual single-rank NCCL qualification uses:
 

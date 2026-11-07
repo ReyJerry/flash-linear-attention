@@ -415,6 +415,16 @@ def measure(methods, inputs_by_group, modes, warmup, repeats, tokens):
 KHDN_PREFIX = 'fla.ops.key_gated_hyperbolic_delta_rule'
 KHDN_STAGES = ('common_fwd_kernel', 'group_fwd_kernel', 'group_af_fwd_kernel', 'state_fwd_kernel',
                'state_bwd_kernel', 'common_bwd_kernel')
+KHDN_BF16_FORWARD_STAGES = ('common_base_fwd_kernel', 'common_interval_fwd_kernel', 'common_system_fwd_kernel',
+                            'group_fwd_kernel', 'group_af_fwd_kernel', 'state_fwd_kernel', 'output_fwd_kernel')
+KHDN_BF16_BACKWARD_STAGES = ('output_bwd_kernel', 'state_bwd_kernel', 'parameter_bwd_kernel',
+                             'gauge_bwd_kernel', 'common_matrix_bwd_kernel', 'common_interval_bwd_kernel')
+
+
+def _khdn_stages(precision_policy, backward=True):
+    if precision_policy == 'bf16':
+        return KHDN_BF16_FORWARD_STAGES + (KHDN_BF16_BACKWARD_STAGES if backward else ())
+    return KHDN_STAGES if backward else KHDN_STAGES[:4]
 
 
 def _replace_aliases(replacements, saved):
@@ -580,7 +590,7 @@ def _khdn_bf16_source_binding(module, kernels):
                       for name, value in (('bf16', module), ('bf16_kernels', kernels))},
             'jit_functions': {name: _khdn_kernel_source_hash(value) for name, value in vars(kernels).items()
                               if hasattr(value, 'fn')},
-            'selected_arithmetic': 'bf16_three_product', 'backward_primal': 'FP32 SavedS/SavedY'}
+            'selected_arithmetic': 'bf16_output_source_single_c16', 'backward_primal': 'FP32 SavedS/SavedY'}
 
 
 def _attest_bf16_sources(row, interrupted):
@@ -602,7 +612,7 @@ def _attest_bf16_sources(row, interrupted):
                         ('SeqChunks', len(row['sequence_bounds']))):
         if flags.get(name, {}).get('shape') != [count] or flags.get(name, {}).get('dtype') != 'torch.int64':
             raise AssertionError('KHDN bf16 chunk/sequence metadata shape or dtype differs')
-    for name in ('P', 'Gp', 'SavedS', 'SavedY', 'Carry'):
+    for name in ('P', 'Gp', 'SavedS', 'SavedY', 'Carry', 'SavedU', 'SavedR', 'SavedT', 'SavedW', 'SavedZP'):
         buffers = flags.get(name)
         buffers = buffers if isinstance(buffers, list) else [buffers]
         if not buffers or any(not isinstance(value, dict) or value.get('dtype') != 'torch.float32' for value in buffers):
@@ -810,7 +820,7 @@ class KHDNTrace:
             self.source_binding = _khdn_fs6_source_binding(module, kernels)
         elif native_bf16:
             self.source_binding = _khdn_bf16_source_binding(arithmetic_module, kernels)
-        for name in (*KHDN_STAGES, 'carry_fwd_kernel'):
+        for name in (*_khdn_stages(self.precision_policy), 'carry_fwd_kernel'):
             kernel = getattr(kernels, name)
             replacements[id(kernel)] = self.kernel_observer(kernel, self)
         _replace_aliases(replacements, self.saved)
@@ -906,7 +916,7 @@ def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_cal
     fs6 = precision_policy == 'bf16_fs6'
     bf16 = precision_policy == 'bf16'
     arithmetic = 'bf16_fs6_projection' if fs6 else 'strict_readout_tf32x3_state_products' if mixed else 'device_float64'
-    arithmetic = 'bf16_three_product' if bf16 else arithmetic
+    arithmetic = 'bf16_output_source_single_c16' if bf16 else arithmetic
     backward_arithmetic = 'device_float32' if bf16 else 'device_float64' if fs6 else arithmetic
     route = 'bf16' if bf16 else 'experimental_bf16_fs6' if fs6 else 'experimental_mixed_readout' if mixed else 'strict'
     if (fs6 or bf16) and ((chunk_size, group_size, carry_mode) != (16, 32, 'no_carry') or not source_binding):
@@ -975,7 +985,7 @@ def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_cal
                     or telemetry.get('contraction_precision') != 'bf16_operands_fp32_accumulation'):
                 raise AssertionError('KHDN bf16 source arithmetic/control route differs')
         launches = row['launches']
-        required = KHDN_STAGES if row['backward_calls'] else KHDN_STAGES[:4]
+        required = _khdn_stages(precision_policy, backward=bool(row['backward_calls']))
         if row.get('forward_interrupted'):
             if row['forward_interrupted'] != '_StopRecomputationError':
                 raise AssertionError('KHDN unexpected interrupted forward')
@@ -1064,7 +1074,7 @@ class _ObservedKHDNUpdateKernel:
             values.apply_defaults()
             values = values.arguments
             name, phase = self.kernel.fn.__name__, current[1]
-            if name not in KHDN_STAGES or phase != ('backward' if name.endswith('bwd_kernel') else 'forward'):
+            if name not in _khdn_stages(self.trace.precision_policy) or phase != ('backward' if name.endswith('bwd_kernel') else 'forward'):
                 raise AssertionError('KHDN update native stage/phase differs')
             fs6_forward = self.trace.precision_policy == 'bf16_fs6' and name == 'state_fwd_kernel'
             if (values.get('C') != 16 or values.get('MIXED', False) is not False
@@ -1191,10 +1201,10 @@ class KHDNUpdateTrace(KHDNTrace):
                             or telemetry.get('backward_precision') != backward_precision
                             or telemetry.get('backward') != 'manual_triton_chunk_source_vjp'):
                         raise AssertionError('KHDN update missing native strict backward evidence')
-                    stages = KHDN_STAGES
+                    stages = _khdn_stages(self.precision_policy)
                 elif row['backward_calls'] == 0 and ('recompute_fn' in row['checkpoint_frames'] or interrupted):
                     recompute[index, layer] += 1
-                    stages = KHDN_STAGES[:4]
+                    stages = _khdn_stages(self.precision_policy, backward=False)
                 else:
                     raise AssertionError('KHDN update missing/duplicated backward or unowned recompute')
                 if [launch['kernel'] for launch in row['launches']] != list(stages):

@@ -21,8 +21,8 @@ from fla.utils import IS_NVIDIA, device  # noqa: E402
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='This first production gate targets NVIDIA GPUs.')
 
 
-def make_case(length, key_dim, value_dim, group_size, dtype, packed=False):
-    torch.manual_seed(42)
+def make_case(length, key_dim, value_dim, group_size, dtype, packed=False, *, seed=42):
+    torch.manual_seed(seed)
     batch, heads, sequences = (1, 2, 4) if packed else (2, 2, 2)
     q = torch.randn(batch, length, heads, key_dim, device=device)
     k = torch.randn_like(q)

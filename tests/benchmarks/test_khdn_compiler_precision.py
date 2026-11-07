@@ -98,7 +98,7 @@ def policy_launch(mixed=True):
             'kernel_source_sha256': 'a' * 64, 'compiled_precision_inventory': inventory}
 
 
-def bf16_launch(name='state_fwd_kernel', count=15, dtype='bf16', scalar='f32', extra_ir='', extra_ptx=''):
+def bf16_launch(name='state_fwd_kernel', count=9, dtype='bf16', scalar='f32', extra_ir='', extra_ptx=''):
     ir = f'%x = arith.mulf %a, %b : tensor<16x16x{scalar}>\n'
     ir += '\n'.join(f'%o{i} = tt.dot %a, %b, %c, inputPrecision = tf32 : '
                     f'tensor<16x128x{dtype}> * tensor<128x32x{dtype}> -> tensor<16x32xf32>' for i in range(count))
@@ -111,11 +111,17 @@ def bf16_launch(name='state_fwd_kernel', count=15, dtype='bf16', scalar='f32', e
                 kernel_source_sha256='b'*64, compiled_precision_inventory=inventory)
 
 
-@pytest.mark.parametrize('name,count', [('common_fwd_kernel', 9), ('group_fwd_kernel', 3), ('group_af_fwd_kernel', 0),
-                                        ('state_fwd_kernel', 15), ('state_bwd_kernel', 45), ('common_bwd_kernel', 24)])
+@pytest.mark.parametrize('name,count', [
+    ('common_base_fwd_kernel', 0), ('common_interval_fwd_kernel', 0), ('common_system_fwd_kernel', 9),
+    ('group_fwd_kernel', 3), ('group_af_fwd_kernel', 0), ('state_fwd_kernel', 9), ('output_fwd_kernel', 6),
+    ('output_bwd_kernel', 8), ('state_bwd_kernel', 12), ('parameter_bwd_kernel', 12),
+    ('gauge_bwd_kernel', 0), ('common_matrix_bwd_kernel', 24), ('common_interval_bwd_kernel', 0),
+])
 def test_bf16_compiled_policy_accepts_its_bounded_native_families(name, count):
     from benchmarks.khdn_compiler_precision import attest_compiled_policy
     row = bf16_launch(name, count)
+    if name == 'state_bwd_kernel':
+        row['arguments'].pop('MIXED')
     attest_compiled_policy(row, 'bf16')
     assert not row['compiled_precision_inventory']['numerical_policy_qualified']
 

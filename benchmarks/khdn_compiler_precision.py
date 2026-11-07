@@ -97,9 +97,10 @@ def attest_compiled_policy(launch, precision_policy):
     state_family = launch['kernel'] in ('state_fwd_kernel', 'state_bwd_kernel')
     mixed = precision_policy == 'mixed_readout' and state_family
     flags = launch['arguments']
-    if state_family and flags.get('MIXED') is not mixed:
+    has_mixed_selector = state_family and not (precision_policy == 'bf16' and launch['kernel'] == 'state_bwd_kernel')
+    if has_mixed_selector and flags.get('MIXED') is not mixed:
         raise AssertionError('KHDN compiled MIXED flag differs from requested policy')
-    if not state_family and flags.get('MIXED', False) is not False:
+    if not has_mixed_selector and flags.get('MIXED', False) is not False:
         raise AssertionError('KHDN non-state family unexpectedly selects MIXED')
     fs6_forward = precision_policy == 'bf16_fs6' and launch['kernel'] == 'state_fwd_kernel'
     if flags.get('BF16_FS6', False) is not fs6_forward or (fs6_forward and 'BF16_FS6' not in flags):
@@ -150,14 +151,18 @@ def attest_compiled_policy(launch, precision_policy):
 
 
 def _attest_bf16_arithmetic(launch, inventory):
-    """Attest the measured C16/K=V128/g32 no-carry three-product specialization."""
-    counts = dict(common_fwd_kernel=9, group_fwd_kernel=3, group_af_fwd_kernel=0,
-                  state_fwd_kernel=15, state_bwd_kernel=45, common_bwd_kernel=24)
+    """Attest the measured C16/K=V128/g32 no-carry per-GEMM specialization."""
+    counts = dict(common_base_fwd_kernel=0, common_interval_fwd_kernel=0, common_system_fwd_kernel=9,
+                  group_fwd_kernel=3, group_af_fwd_kernel=0, state_fwd_kernel=9, output_fwd_kernel=6,
+                  output_bwd_kernel=8, state_bwd_kernel=12, parameter_bwd_kernel=12,
+                  gauge_bwd_kernel=0, common_matrix_bwd_kernel=24, common_interval_bwd_kernel=0)
     name, flags = launch['kernel'], launch['arguments']
     if name not in counts or flags.get('C') != 16:
         raise AssertionError('KHDN bf16 compiler gate currently covers C16 no-carry only')
     if name in ('state_fwd_kernel', 'state_bwd_kernel'):
-        expected = dict(K=128, G=32, KD=128, VD=128, GS=32, CARRY=False, MIXED=False)
+        expected = dict(K=128, G=32, KD=128, VD=128, GS=32, CARRY=False)
+        if flags.get('MIXED', False) is not False or flags.get('BF16_FS6', False) is not False:
+            raise AssertionError('KHDN bf16 cannot select a mixed or historical FS6 callee')
         if any(flags.get(key) != value for key, value in expected.items()):
             raise AssertionError('KHDN bf16 compiled geometry or carry policy differs')
     raw = inventory['raw_assembly']
@@ -170,7 +175,7 @@ def _attest_bf16_arithmetic(launch, inventory):
         dot['operand_dtypes'] != ['bf16', 'bf16'] or dot['result_dtype'] != 'f32'
         or dot['max_num_imprecise_acc'] not in (None, 0) for dot in dots
     ):
-        raise AssertionError('KHDN bf16 three-product compiled dot count or operand/accumulator type differs')
+        raise AssertionError('KHDN bf16 per-GEMM compiled dot count or operand/accumulator type differs')
     if bool(dots) != bool(mma) or any(not re.search(r'\.f32\.bf16\.bf16(?:\.f32)?$', opcode) for opcode in mma):
         raise AssertionError('KHDN bf16 requires matching BF16/FP32 Tensor Core instructions')
     if any(not opcode.endswith('.f32') for opcode in inventory['ptx_floating_opcodes']):

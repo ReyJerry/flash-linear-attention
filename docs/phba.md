@@ -6,7 +6,7 @@ PHBA combines causal block routing, local token attention, and gated prefix stat
 
 ## Installation and model registration
 
-Install FLA with its CUDA and PHBA dependencies. FlashAttention2.8.3 is required for the joint local-attention backward interface.
+Install FLA with its CUDA and PHBA dependencies. FlashAttention 2.8.3 is required for the joint local-attention backward interface.
 
 ```bash
 pip install -e '.[cuda,phba]'
@@ -56,11 +56,11 @@ The model supports cache-free training, prefill and generation with `use_cache=F
 
 PHBA projections retain the native linear path unless the exact-screened H20 geometry and runtime match. The accelerated path is restricted to PyTorch 2.9.0, CUDA 12.8, the validated cuBLASLt library, BF16 autocast and its three weight-gradient geometries. Actual GEMM operands must have 16-byte-aligned addresses; a contiguous view alone is insufficient. Unsupported alignment uses native weight-gradient operations without adding an alignment copy. The fused SwiGLU path checks its recomputed activation and incoming gradient and retains the native einsum fallback. The C++ helpers build from packaged source into the Torch extension cache; no prebuilt machine-specific binary is included. CUDA development headers and a C++ compiler are needed for this optional path. Other supported cases retain native PyTorch operations.
 
-Training uses the optimizer selected by the training framework. PHBA model construction does not modify optimizer selection or global Torch dispatchers.
+Training uses the optimizer selected by the training framework.
 
 ## Execution paths and fallbacks
 
-The optional H20 GEMM backend only accelerates projection weight gradients. It does not replace the PHBA attention algorithm.
+The H20 GEMM backend accelerates projection weight gradients; attention runs through the Triton and FlashAttention paths below.
 
 | Component            | Default execution                                            | Alternative or fallback                                                                 |
 | -------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
@@ -70,11 +70,11 @@ The optional H20 GEMM backend only accelerates projection weight gradients. It d
 | Prefix backward      | Segmented parallel backward                                  | Sequential reverse traversal when its workspace budget is insufficient                  |
 | Canonical metadata   | Int32 sort keys when the key range fits                      | Int64 keys for larger ranges                                                            |
 
-The public and internal attention paths use deterministic backward, direct query loads and storage-rounded dot operands with FP32 accumulation. The FP64 mathematical reference (`naive_phba`) and storage-aware reference (`reference_a_chunkwise`) both live in `fla/ops/phba/naive.py` and are used for validation and are not selected automatically in training. FlashAttention preflight validates dependencies, devices and the parameter schema without allocating test tensors or running autograd; numerical forward/backward ABI checks are part of the operator tests. Missing or incompatible FlashAttention fails these production checks; PHBA does not silently switch to a CPU or dense implementation.
+The public and internal attention paths use deterministic backward, direct query loads and storage-rounded dot operands with FP32 accumulation. The FP64 mathematical reference (`naive_phba`) and storage-aware reference (`reference_a_chunkwise`) live in `fla/ops/phba/naive.py` for correctness testing. FlashAttention preflight validates dependencies, devices and the parameter schema; numerical forward/backward ABI checks are part of the operator tests. Missing or incompatible FlashAttention raises an error.
 
 The retained fallbacks preserve the supported shape range under fixed workspace limits. For example, prefix reverse-state storage is `4 * Nc * H * M * D` bytes: at H=16, M=D=128 and chunk=128 it grows from 64 MiB for 8K tokens to 512 MiB for 64K tokens, exceeding the 256 MiB parallel-backward budget. Sequential reverse traversal avoids that additional buffer while preserving deterministic execution.
 
-FP32 accumulation is part of the active numerical contract, including dot-product accumulators, normalization statistics and recurrent state. It is distinct from an optional FP32-operand multiplication mode. Lowering accumulator precision changes rounding and gradients. The independent naive/storage-aware references remain under the operator package for correctness tests; they do not execute in the default operator's per-step path.
+Dot-product accumulators, normalization statistics and recurrent state use FP32. Dot operands follow the FP16/BF16 storage conversions described in the operator README.
 
 ## Validation and benchmarking
 
@@ -87,8 +87,8 @@ python benchmarks/benchmark_phba.py --chunk-size 128 --topk 8 \
   --output phba-throughput.json
 ```
 
-The standard operator registry includes `chunk_phba` with dense and packed shapes: run `python -m benchmarks.ops.run --op chunk_phba --no-base`. The dedicated training benchmark measures complete model steps. Its default recipe is 1.264B parameters, B1×8192, FP32 parameters, BF16 autocast, no activation checkpointing and lr=0 training computation. It measures zero-grad, forward/loss, backward, clipping and optimizer updates together. Input generation and optional numerical audit hooks are outside the measured steps. The lr=0 recipe measures compute throughput and is not a convergence experiment.
+The standard operator registry includes `chunk_phba` with dense and packed shapes: run `python -m benchmarks.ops.run --op chunk_phba --no-base`. The dedicated training benchmark measures complete model steps. Its default recipe is 1.264B parameters, B1×8192, FP32 parameters, BF16 autocast, no activation checkpointing and lr=0 training computation. It measures zero-grad, forward/loss, backward, clipping and optimizer updates together. Input generation and optional numerical audit hooks are outside the measured steps. The lr=0 recipe measures training-compute throughput.
 
-The references, numerical storage contract and implementation layout are described in [the operator README](../fla/ops/phba/README.md). Migration validation additionally compares the frozen mature implementation using the same initial weights, inputs and native normalization choices. See [migration validation](phba_validation.md) for the completed numerical gates, paired dense/packed throughput, memory measurements and limitations.
+The references, numerical storage contract and implementation layout are described in [the operator README](../fla/ops/phba/README.md). See the [validation results](phba_validation.md) for reference comparisons, parameter-gradient checks, dense/packed throughput and peak memory.
 
 Profiling is separate from the production operator: run `python benchmarks/profile_phba.py` with the same benchmark arguments to export a Chrome trace beside the JSON result. Its instrumented timings must not be used as throughput measurements. Offline cuBLASLt candidate-inspection code is under `benchmarks/phba_tools`; production loads only the validated descriptors.

@@ -1,90 +1,101 @@
 # PHBA validation
 
-This record validates the int64 address-offset and metadata-return cleanup within the 17-file PHBA operator on NVIDIA H20, PyTorch 2.9.0+cu128, Triton 3.5.0, Transformers 5.6.2 and FlashAttention 2.8.3.post1. The source/runtime manifest has SHA256 `ad8aa642ccda2097172c506d56d356e079a5cec280f01f26fd33f8a97eff0b91`, computed from `json.dumps(path_to_sha256, sort_keys=True).encode()` using repository-relative paths. The manifest covers the tracked non-Markdown `fla` files and complete-step benchmark script; all match the final source and installed-wheel checks. Complete-step measurements use the preceding snapshot (`c48f2fec053cc03d983b2389dfa0d7f964b4c0a39021e8aab03bee1255cb8395`); the only runtime-file difference is splitting two keyword arguments onto separate lines in one prefix kernel call. ASTs are identical, and the final source and installed suites are rerun after that formatting edit. Documentation is excluded. The baseline is `9e0a46499798e080969ecc2f6fe39d5d1aa1f131`.
+PHBA is tested on NVIDIA H20 with PyTorch 2.9.0+cu128, Triton 3.5.0, Transformers 5.6.2 and FlashAttention 2.8.3.post1. The test and installation results below correspond to revision `9a2a5b54a7799c7c6a7647b42bf9e6c04e797af1`.
 
-The GPU-validated source and installed-wheel revision is `9a2a5b54a7799c7c6a7647b42bf9e6c04e797af1`. The subsequent formatting cleanup only collapses a short `any()` call in `plans.py`. The Python AST is identical to that validated revision. Format checks are rerun; GPU experiments are not rerun, and the numerical, throughput and memory results below retain their original provenance.
+## Tests
 
-## Correctness and API coverage
+| Suite                    | Result     | Coverage                                                                |
+| ------------------------ | ---------- | ----------------------------------------------------------------------- |
+| Source                   | 111 passed | 28 operator, 25 projection, 41 model and 17 benchmark cases             |
+| Installed split wheels   | 95 passed  | Operator, projection, model, import binding and registration            |
+| Shared model integration | 7 passed   | PHBA configuration and Transformers integration                         |
+| CPU subset               | 18 passed  | Model configuration, loss contracts and initialization                  |
+| H20 smoke                | 8 passed   | Four PHBA forward/backward cases and four FlashAttention contract cases |
+| Host package contracts   | 4 passed   | Package ownership, installation order and namespace imports             |
 
-The strict source gate passes **111 tests, no skips**: 28 operator, 25 projection, 41 model and 17 benchmark cases. `FLA_CI_ENV=0 PHBA_REQUIRE_EXACT_GEMM=1` makes numerical failures and an unavailable pinned H20 backend fail the gate. Seven additional PHBA configuration/Transformers cases pass with no skips (550 others deselected), as do 18 CPU-compatible cases with CUDA hidden (23 accelerator cases deselected). Warnings concern the TF32 API, advertised fused-linear-CE precision, CPU platform detection and standalone smoke-marker registration; no numerical failure is downgraded to a warning.
+The source, installed and H20 smoke suites have zero skips. Source tests use `FLA_CI_ENV=0 PHBA_REQUIRE_EXACT_GEMM=1`, which enforces numerical assertions and execution of the pinned H20 backend. The smoke selection has 20 deselected cases. The host suite selects the four standalone packaging tests; runtime imports are covered by the installed H20 suite. H100/PyTorch 2.12 CI is pending.
 
-Projection coverage checks all three screened GEMM geometries against native outputs and gradient bytes. It includes FP32 autocast inputs, BF16 views aligned to 16 bytes, unaligned activations and incoming gradients, and separate unaligned A/B GEMM operands. Tests assert actual cuBLASLt execution for eligible calls and zero calls for the alignment fallback. Fused SwiGLU materializes a fresh aligned activation; unaligned pre-activation inputs therefore remain eligible when the actual GEMM operands are aligned. Its unaligned-gradient path retains the original einsum operation.
+```bash
+FLA_CI_ENV=0 PHBA_REQUIRE_EXACT_GEMM=1 python -m pytest -q \
+  tests/ops/test_phba.py tests/models/test_modeling_phba.py \
+  tests/layers/test_phba_linear.py tests/benchmarks
+```
 
-The fresh before/after audit covers nine combinations of FP16/BF16 dense/packed/no-history inputs and training, inference or forced low-workspace execution. Outputs, final states and all supported gradients are byte-identical. Instrumentation confirms execution of integer metadata kernels, sparse dK/dV, query-owner dQ and sequential prefix backward. Six reference-mode comparisons cover the FP64 formula and wrapper, plus FP16/BF16 storage-aware references with PyTorch or FlashAttention local branches; returned tensors and all six input gradients match byte-for-byte.
+## Numerical checks
 
-All 33 Triton kernel bodies match the baseline after normalizing integer address casts, equivalent address grouping and bounded local-index masks. The history kernel automatically keeps local workspace positions in int32 only when capacity plus the query tile fits; addresses widen to int64, and larger capacities use the 64-bit branch. The forced-wide test compares output and all six input gradients byte-for-byte. Floating-point primitive expressions and tensor allocation schemas are unchanged. Metadata storage stays int32, while global coordinates are widened before stride multiplication; the guarded producer INDEX32 policy remains. Compiled register counts are recorded rather than required to be identical; ORDERED execution and zero spills remain mandatory, as do all numerical and invocation-count checks. Both reference families, workspace planning and H20 Python calculations retain identical ASTs; H20 C++/JSON resources are byte-identical. Other models and shared modules are untouched; PHBA layer/configuration edits only change English text and formatting. Fourteen geometry/budget comparisons preserve forward-bound plans and launch settings, and supported public signatures match. Existing numerical assertions and tolerances remain unchanged.
+Paired checks against `9e0a46499798e080969ecc2f6fe39d5d1aa1f131` cover nine standard operator cases and nine public-path cases. Outputs, final states and supported gradients match byte-for-byte. Coverage includes FP16/BF16, dense and packed inputs, inference, no-history metadata, int64 sorting, unaligned gradients and both history-index widths. Fourteen geometry/budget cases check the saved plans and launch settings.
 
-A second paired audit executes nine public-operator cases with the original 256MiB budgets: training, inference, no historical routes, native gate scaling, state edge-major layout, int64 sorting, natural tape and prefix-workspace fallbacks, and FlashAttention segmentation. Outputs, and all six input gradients for training cases, match byte-for-byte between baseline and candidate. In particular, the 32K tape fallback, 4097 one-token prefix fallback and 65535+1 FlashAttention batches still execute. A separate unaligned-gradient probe confirms an actual alignment copy and identical gradients.
+The public-path cases exercise the 256MiB workspace policy, including the 32K tape fallback, the 4097 one-token prefix fallback and FlashAttention segmentation across 65535+1 batches. The metadata tests cover counts with and without source slots, rejection of slots without counts, and a head stride exceeding signed int32. The large-stride case executes on H20 and requires an 8GiB route allocation plus workspace.
 
-A new large-stride metadata case crosses a signed-int32 element offset on the final head and compares counts, offsets and rows against an independent CPU reference. It actually executes on the H20 runs, with no skip; it can skip on devices without enough free memory for the 8GiB route allocation and workspace. The existing metadata test additionally covers counts with and without source slots, no-history counting, and explicit rejection of slots without counts. Alignment copies and low-workspace gradient comparisons remain covered.
+Both references live in `fla/ops/phba/naive.py`: `naive_phba` implements the differentiable FP64 formula, and `reference_a_chunkwise` follows the FP16/BF16 storage conversions. Six paired reference modes compare outputs and all six input gradients. The FP64 formula also passes autograd gradcheck.
 
-Four smoke-marked cases check the low-level FlashAttention output, contiguous FP32 log-normalizers, packed backward workspace and all Q/K/V gradients at representative FP16/BF16 widths. Output bounds remain 5e-3 for FP16 and 2e-2 for BF16, log-normalizers use 1e-2, and relative maximum gradient error uses 5e-2. A fifth case verifies that production preflight rejects unsupported devices/dtypes/widths and mismatched schemas, caches only successful checks, and does not generate random inputs or invoke autograd.
+Projection tests execute all three screened H20 GEMM geometries and compare outputs and gradients against native bytes. They cover FP32 autocast inputs, aligned BF16 views, unaligned activations and gradients, and separate unaligned GEMM operands. Dispatch assertions check both accelerated calls and native fallbacks. SwiGLU materializes an aligned activation; its unaligned-gradient case uses the native einsum operation.
 
-Production startup no longer runs an automatic numerical probe for each device/dtype/head width. It retains dependency, device, dtype, width and parameter-schema checks; numerical compatibility is verified explicitly by the operator/smoke tests. Cache-free inference and non-reentrant checkpoint cases also pass with this startup behavior.
+FlashAttention contract tests check output, contiguous FP32 log-normalizers, packed backward workspace and Q/K/V gradients. Output bounds are 5e-3 for FP16 and 2e-2 for BF16; log-normalizers use 1e-2 and relative maximum gradient error uses 5e-2. Production preflight checks dependencies, device support and the parameter schema.
 
-Every complete-step pair matches all 267 initial parameter tensors, inputs, first-step loss/norm and first-step raw/clipped gradient bytes. Final parameter and optimizer-state hashes also match after 70 steps. The freshly installed split wheels also pass the 1.264B model gate with all three exact GEMM sessions active: loss `10.784871101379395`, gradient norm `2.495190382003784`, and zero raw or clipped gradient mismatches.
+Across all 15 complete-step pairs, initial parameters, inputs, first-step raw/clipped gradients and every recorded loss/norm match. Final parameters and optimizer states match after 70 steps. The installed 1.264B model audit matches all **267 raw and clipped parameter gradients**, with three exact GEMM sessions active: loss **10.784871101379395**, gradient norm **2.495190382003784**. Producer launches use ordered scheduling and zero spills; register counts are 168 for the baseline and 164 or 168 for PHBA.
 
-## Official split-package installation
+## Model coverage
 
-The formal `scripts/build_packages.py` path builds both wheels and source distributions. All **640** packaged Python/C++/JSON files match the source bytes: 453 in `fla-core` and 187 in `flash-linear-attention`. The superseded private modules, including gate.py, linear.py and tape.py, are absent, as are the earlier obsolete reference modules; both reference families and their active oracles live in `naive.py`. The two C++ helpers and algorithm JSON are present in `fla-core` only; no prebuilt shared library or optimizer is added.
+The 41 dedicated model cases exercise real two-layer PHBA models for attention, fusion and interface comparisons. Lightweight loss-contract cases use zero-layer models.
 
-Fresh installation outside the checkout passes **95 tests, no skips**, including import binding, registration and alignment/fallback checks. Four host-side split-package contract/install-order tests also pass. Their full-runtime-dependency companion is intentionally deselected on the local host; the separate installed GPU suite and full-model gate execute on H20. The unchanged shared integration previously passed 574 tests at `3f39ae4aa64411221ea935b267630f212cd2edc1`; that count is prior evidence, not a new run.
+| Area                            | Checks                                                                                                                                                          |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dense, packed and padded inputs | Hidden states, logits, loss and every parameter gradient; FP16/BF16; one-token sequences; left/right padding                                                    |
+| Loss and fusion                 | Mean/sum reduction, label smoothing, ignore indices, custom criteria, item-count scaling, native/fused CE, fused-linear CE, norm/SwiGLU fusion and tied weights |
+| Forward and generation          | IDs/embeddings, positional/keyword calls, tuple/dict outputs, hidden states, logits selection and cache-free greedy generation                                  |
+| Initialization                  | Affine-free and fused norms, QKV biases, tied weights, pad embeddings, rotary frequencies, meta-to-CPU materialization and residual initialization              |
+| Integration                     | Save/load, exports, configuration round-trip, embedding accessors/resize and non-reentrant checkpoint gradients                                                 |
 
-## Smoke selection
+Loss-interface comparisons use a 1e-3 bound and full-model AMP gradient comparisons use 0.006. Native CE follows PyTorch autocast input precision; fused-loss cases use an explicit FP32 CE reference. Meta initialization runs in a subprocess to isolate Torch's cached device-factory set from the operator tests' NaN-allocation wrappers.
 
-The smoke workflow selects eight marked cases: four PHBA forward/backward cases and four FlashAttention contract cases. Its strict H20 run passes all eight, with 20 deselected and zero skips; the current 111-case source suite also executes them. The workflow installs/preflights FlashAttention and rejects empty or skipped JUnit reports. The H100/PyTorch 2.12 runner itself remains unrun.
+Four normalized-L2Warp cases compare the additional gradient with an independent FP64 max-logit penalty at `rtol=1.3e-6, atol=0`. An identity head and a zero hidden row isolate the L2 contribution, including reciprocal `num_items_in_batch` scaling. At revision `73a9e98a`, disabling the normalized branch or removing its gradient scaling causes all four cases to fail. These tests and the loss implementation are unchanged.
 
-## Paired complete-step throughput
+## Split-package installation
 
-Baseline: `9e0a46499798e080969ecc2f6fe39d5d1aa1f131`, before the int64 address-offset and metadata-return cleanup. The candidate is identified by the runtime manifest above. Each workload uses three same-device paired seeds, 3407/3408/3409, with alternating role order and matched native normalization launch choices. The recipe is 1,264,423,936 parameters, 24 layers, hidden width 2048, 16 heads, FFN width 4272, vocabulary 32000, 128 prefix slots, B1 x 8192, FP32 parameters/BF16 autocast, no activation checkpointing, native fused AdamW, lr=0, betas 0.9/0.95, clipping at 1, and weight decay 0.1 excluding one-dimensional parameters. Each run has 20 warmup and 50 measured complete steps. Packed lengths are 2048/3072/3072, with sequence-boundary labels masked before shifted language-model loss. Zero-grad, forward/loss, backward, clipping, optimizer, allocations, alignment checks and dispatch are timed together. Input generation and validation hooks are outside measured steps.
+The official `scripts/build_packages.py` path builds both wheels and source distributions. The release checks verify **640 Python/C++/JSON files** against their build source: 453 in `fla-core` and 187 in `flash-linear-attention`.
 
-| Workload       | Baseline ms/step | Candidate ms/step | Paired throughput change | Allocated delta KiB | Reserved delta MiB |
-| -------------- | ---------------: | ----------------: | -----------------------: | ------------------: | -----------------: |
-| Dense C64/K16  | 1040.57          | 1041.68           | -0.106%                  | +0                  | +0                 |
-| Dense C128/K8  | 849.72           | 850.68            | -0.113%                  | +0                  | +0                 |
-| Dense C256/K4  | 774.13           | 775.77            | -0.212%                  | +0                  | +0                 |
-| Dense C512/K2  | 749.42           | 749.67            | -0.033%                  | +0                  | +0                 |
-| Packed C128/K8 | 783.16           | 784.39            | -0.157%                  | +0                  | +0                 |
+`fla-core` contains `lt_exact.cpp`, `native_autocast.cpp` and `exact_gemm_algorithms.json`; all three resources are also present in its source distribution. Layers and models belong to `flash-linear-attention`. Installation tests run outside the checkout and verify import ownership, registration, H20 execution and native fallbacks.
 
-Latency columns are arithmetic means; throughput changes are geometric means of paired throughput ratios. Dense geometric-mean throughput change is -0.1161%; packed change is -0.1567%. All positive and negative pairs are retained. The final address-safe candidate has a small measured throughput cost; these results do not establish zero regression or a speedup. Peak allocated and peak reserved memory are unchanged in every matched workload. No kernel workspace reduction is claimed. No dense-FLOPs hardware-floor estimate or new NCU bottleneck claim is made. The lr=0 runs measure training computation, not convergence.
+```bash
+uv run --no-project --python 3.12 --with pytest --with packaging \
+  --with setuptools --with wheel python -m pytest --noconftest -q \
+  tests/test_split_package_release.py -k "not full_split_import"
+```
 
-The preceding private-option cleanup measurements are preserved in [the previous validation record](https://github.com/ReyJerry/flash-linear-attention/blob/9e0a46499798e080969ecc2f6fe39d5d1aa1f131/docs/phba_validation.md). They use a different baseline and are not the numbers above.
+`--noconftest` isolates host packaging tests from accelerator fixtures.
 
-## Normalized L2Warp sensitivity
+## Complete-step throughput
 
-The four focused cases below pass again in the current source and installed suites. Mutation sensitivity was verified at `73a9e98a`; the model test file and loss implementation are byte-identical in this refactor, so those fault-injection results are retained evidence.
+Baseline: `9e0a46499798e080969ecc2f6fe39d5d1aa1f131`. Three same-card paired seeds (3407/3408/3409) use alternating execution order and matched native normalization launch choices. Each run has 20 warmup and 50 measured steps.
 
-Four focused cases cover native CE with integer/tensor item counts, fused CE and fused-linear CE. An identity head and one valid CE target on a zero hidden row isolate the L2 contribution: ignored-token hidden gradients and head-weight gradients have no CE component. The test compares them with an independently differentiated FP64 max-logit penalty, both without item-count normalization and after normalization. It additionally checks the reciprocal item-count scaling directly and requires a nonzero signal.
+The model has 1,264,423,936 parameters, 24 layers, hidden width 2048, 16 heads, FFN width 4272, vocabulary 32000 and 128 prefix slots. Inputs are B1 x 8192, with FP32 parameters and BF16 autocast. The compute benchmark uses no activation checkpointing, native fused AdamW, lr=0, betas 0.9/0.95, clip=1 and weight decay 0.1 excluding 1D parameters. Packed lengths are 2048/3072/3072; sequence-boundary labels are masked before shifted LM loss.
 
-These FP32 loss-head checks use `rtol=1.3e-6, atol=0`; no absolute-error shortcut can hide the normalized term. Existing total-gradient and full-model AMP checks remain unchanged. The focused test is a separate loss-head contract check, not a claim that all mixed-precision fusion variants are bitwise equal.
+Timing includes zero-grad, forward/loss, backward, clipping, optimizer, allocations and dispatch. Inputs and validation hooks are prepared outside timed steps. Values below are arithmetic means of the three runs. Step time and peak allocated/reserved memory refer to PHBA.
 
-Two temporary process-local mutations validate sensitivity. With L2Warp disabled only when `num_items_in_batch` is supplied, all four new cases fail while the ten older loss/fusion cases still pass. With forward values preserved but normalized gradients incorrectly rescaled to the unnormalized value, all four new cases also fail (two older normalization cases fail as well). These failures are expected mutation results, separate from the green source/CPU/installed suites; no production mutation is committed.
+| Workload       | Baseline tokens/s | PHBA tokens/s | Step ms | Allocated GiB | Reserved GiB |
+| -------------- | ----------------- | ------------- | ------- | ------------- | ------------ |
+| Dense C64/K16  | 7,872.60          | 7,864.23      | 1041.68 | 41.294        | 43.855       |
+| Dense C128/K8  | 9,640.89          | 9,629.95      | 850.68  | 39.422        | 40.754       |
+| Dense C256/K4  | 10,582.27         | 10,559.89     | 775.77  | 38.494        | 39.602       |
+| Dense C512/K2  | 10,931.07         | 10,927.47     | 749.67  | 38.013        | 39.266       |
+| Packed C128/K8 | 10,460.22         | 10,443.82     | 784.39  | 39.422        | 40.754       |
 
-## Model test scope
+```bash
+python benchmarks/benchmark_phba.py --chunk-size 128 --topk 8 \
+  --warmup-steps 20 --steps 50 --optimizer torch.optim:AdamW --output result.json
+```
 
-PHBA has 41 dedicated model cases, alongside 28 operator, 25 projection and two PHBA registry cases. Fifteen existing shared benchmark cases complete the 111-case source gate. Seven shared configuration/Transformers PHBA cases and an 18-case CPU subset are also executed separately. The GPU equivalence, fusion and interface tests execute real two-layer PHBA models.
+Add `--lengths 2048,3072,3072` for packed inputs. Exact paired reproduction uses the recorded normalization launch choices and reference hashes. The standard operator entry is `python -m benchmarks.ops.run --op chunk_phba --no-base`.
 
-| Area                                | Current PHBA coverage                                                                                                                                                                                                 | Boundary                                                                               |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Dense/packed equivalence            | Batched dense BF16, ragged BF16 and left-padded FP16 with a one-token sequence; all hidden states, logits, loss and every parameter gradient compared                                                                 | Labels explicitly mask padding and sequence starts before shifted LM loss              |
-| Padding and generation              | Right/left padding in BF16 and left padding in FP16 against independent sequences; cache-free greedy generation, including a left-padded batch crossing a chunk boundary                                              | Persistent cache decoding remains unsupported                                          |
-| Loss contracts                      | Mean/sum, label smoothing, ignore indices, custom criteria, integer/tensor item counts, unchanged input labels and an independent L2Warp gradient oracle                                                              | Lightweight CPU contract cases use a zero-layer model                                  |
-| Loss/fusion combinations            | Native CE, fused CE and fused-linear CE; all four norm/SwiGLU fusion settings in five representative cases; L2Warp, packed inputs and tied weights included                                                           | Representative combinations, not a full Cartesian product                              |
-| Forward/decoder interfaces          | Token IDs/embeddings, positional/keyword calls, training/eval, tuple/dict returns, hidden states, no-cache outputs, logits slicing/index selection and legacy selection alias; head/loss and all gradients checked    | Supported cache-free contract only                                                     |
-| Initialization                      | Native/fused and affine-free norms, QKV biases, tied weights, pad embeddings, rotary frequencies, meta-to-CPU materialization, NaN-poisoned reinitialization, residual rescale/zero strategies and parameter identity | Ordinary tensors; DTensor initialization remains unvalidated                           |
-| Registration and checkpointing      | Save/load, exports, shared embedding accessors/ties/resize/config round-trip, and non-reentrant checkpoint gradient equality                                                                                          | Reentrant checkpointing is not claimed                                                 |
-| Unsupported or unvalidated features | Runtime/config cache rejection is checked; existing dimension/plan rejection tests remain                                                                                                                             | AttnRes/persistent caches unsupported; CP/TP and other accelerators outside validation |
+## Validation snapshots
 
-Native loss-interface comparisons preserve PyTorch's autocast input precision. Fused-loss comparisons use an explicit FP32 cross-entropy reference, matching their accumulation contract. Loss comparisons use the existing 1e-3 bound and full-model AMP gradient comparisons use 0.006; no existing tolerance was relaxed. The original L2Warp CPU oracle remains, supplemented by the isolated FP64-oracle scaling checks above. Meta initialization runs in a subprocess so the shared operator-test NaN-allocation wrappers cannot pollute Torch's cached device-factory set.
+The SHA256 manifests cover tracked non-Markdown `fla` files and the complete-step benchmark script. Digests use `json.dumps(path_to_sha256, sort_keys=True).encode()` with repository-relative paths.
 
-The PHBA model and projection test files are unchanged; operator metadata coverage is extended. The existing low-workspace operator test continues to reject backward-time plan construction. Prior numerical assertions and tolerances are preserved; the operator alignment case is strengthened. Other models' tests and production modules are untouched. PHBA remains outside the hand-written shared forward/decoder/initialization lists; its dedicated tests now cover the supported equivalent contracts directly. The scripts remain `tests/models/test_modeling_phba.py`, `tests/ops/test_phba.py`, `tests/layers/test_phba_linear.py` and `tests/benchmarks/test_phba_registry.py`.
+| Snapshot                                         | SHA256                                                             |
+| ------------------------------------------------ | ------------------------------------------------------------------ |
+| Complete-step measurements                       | `c48f2fec053cc03d983b2389dfa0d7f964b4c0a39021e8aab03bee1255cb8395` |
+| Source and installed suites, revision `9a2a5b54` | `ad8aa642ccda2097172c506d56d356e079a5cec280f01f26fd33f8a97eff0b91` |
+| Formatting revision `83f9b9c9`                   | `7ad406baca29530111d99ef52797c0cba34a3b6c5ae68945c063834e3b03ef8f` |
 
-## Reproduction and scope
-
-See [the PHBA guide](phba.md) for installation, supported APIs, execution paths and benchmark commands. Exact paired reproduction additionally requires the recorded native normalization launch choices and reference hashes; raw experiment artifacts remain outside the source tree. Shared Python edits in the full PR remain limited to central exports, benchmark registration, the split-package builder and its contract test. Other model implementations are unchanged.
-
-Default PHBA parameter names and training mathematics are preserved. Invalid sequence plans are rejected; `elementwise_affine=False` omits normalization scale parameters. Persistent decode caching, context/tensor parallelism, full-graph compilation, other accelerators and convergence remain outside validation. Optimizer selection remains the training framework's responsibility.
-
-Host release-contract command: `uv run --no-project --python 3.12 --with pytest --with packaging --with setuptools --with wheel python -m pytest --noconftest -q tests/test_split_package_release.py -k "not full_split_import"`. The host has no Torch/CUDA runtime; `--noconftest` isolates these packaging tests from accelerator fixtures.
-
-Compiled producer register counts: baseline [168], candidate [164, 168]; every recorded producer launch has zero spills and ordered scheduling. These resource counts are not numerical tolerances.
+Runtime Python ASTs are identical across these snapshots. See [the PHBA guide](phba.md) for API constraints, installation and execution paths.

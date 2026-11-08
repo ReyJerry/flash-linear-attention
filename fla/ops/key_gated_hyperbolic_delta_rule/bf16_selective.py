@@ -17,6 +17,7 @@ import torch
 import triton
 
 from fla.ops.key_gated_hyperbolic_delta_rule import bf16_selective_kernels as kernels
+from fla.ops.key_gated_hyperbolic_delta_rule.fixed_curvature import curvature_tensor
 from fla.ops.key_gated_hyperbolic_delta_rule.naive import _validate
 from fla.utils import IS_NVIDIA, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -276,9 +277,12 @@ class _ChunkBF16(torch.autograd.Function):
         # retain FP32 partials until aliased source contributions have been combined
         grads = [torch.empty_like(x, dtype=torch.float32) for x in sources]
         need_curve_grad = ctx.needs_input_grad[6]
+        coupled = opts.get('coupled', False)
+        coupled_state = opts.get('coupled_state', False)
+        source_owner = opts.get('source_owner', False)
         dc = torch.empty((ctx.nc*h*ng if need_curve_grad else 0,), device=q.device, dtype=torch.float32)
         _, _, ss = shapes(c, kt)
-        shared = tuple(torch.empty((0 if i in (3, 4) else ctx.nc*h*(1 if i in (0, 1, 2, 3, 5, 6, 7) else ng), *shape),
+        shared = tuple(torch.empty((0 if i in (3, 4) or (coupled and i in (2, 6)) else ctx.nc*h*(1 if i in (0, 1, 2, 3, 5, 6, 7) else ng), *shape),
                                    device=q.device, dtype=torch.float32)
                        for i, shape in enumerate(ss[:-1]))
         shared += buffers(ctx.nc*h if opts['carry'] else 0, ss[-1:], q.device)
@@ -291,54 +295,79 @@ class _ChunkBF16(torch.autograd.Function):
                     h, kd, vd, gs, ng, c, kt, gt), ctx.telemetry, num_warps=8, RHO_MATERIALIZED=opts['rho_materialized'])
         launch(kernels.state_bwd_kernel, (state.shape[0]*h*ng,),
                (v, curve, ds, grads[2], grads[5], *meta[:3], p, gp, saved_s, local, shared, output_adj, carry, edge_y,
-                h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
+                h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'], COUPLED_STATE=coupled_state)
         if ctx.nc:
-            for coefficient_mode in range(4):
+            matrix_work = buffers(ctx.nc*h, [(kt, c), (0, kt) if source_owner else (c, kt),
+                                  (kt,) if source_owner else (0, c) if coupled else (c, c), (c, kt)], q.device)
+            coupled_work = buffers(ctx.nc*h*ng if coupled else 0, [(c, gt)], q.device)
+            coupled_work += (output_adj[1],) if coupled_state else buffers(ctx.nc*h*ng if coupled else 0, [(c, gt)], q.device)
+            if coupled:
+                from fla.ops.key_gated_hyperbolic_delta_rule import bf16_coupled_kernels as coupled_kernels
+                launch(coupled_kernels.coupled_residual_bwd, (ctx.nc*h*ng,),
+                       (v, *meta[:2], p, gp, curve, saved_u, output_adj, coupled_work,
+                        h, vd, ng, gs, c, gt, opts['rho_materialized']), ctx.telemetry, num_warps=4, PI_READY=coupled_state)
+            for coefficient_mode in ((0, 3) if coupled else range(4)):
                 launch(kernels.shared_coefficients_bwd,
                        (ctx.nc*h, kt//64 if coefficient_mode == 3 else c//tc, c//tc if coefficient_mode in (1, 3) else kt//64),
                        (do, grads[2], *meta[:2], gp, saved_s, saved_u, saved_r, saved_t, output_adj, shared,
                         h, vd, gs, ng, c, kt, gt, coefficient_mode), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
-            launch(kernels.shared_feedback_gl_bwd, (ctx.nc*h, c//tc, c//tc),
-                   (gp, saved_y, output_adj, shared, ng, c, gt), ctx.telemetry, num_warps=8)
-            launch(kernels.shared_feedback_system_bwd, (ctx.nc*h, c//tc, c//tc),
-                   (curve, gp, saved_y, saved_w, output_adj, shared, ng, gs, c, gt), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
+            if coupled:
+                for source_mode in range(4):
+                    launch(coupled_kernels.coupled_sources_bwd,
+                           (ctx.nc*h, kt//32 if source_mode == 3 else c//32, kt//64 if source_mode == 1 else c//64),
+                           (do, *meta[:2], p, gp, saved_s, saved_r, saved_t, output_adj, coupled_work, shared, matrix_work,
+                            h, vd, gs, ng, c, kt, gt, source_mode, opts['rho_materialized']), ctx.telemetry, num_warps=4)
+            else:
+                launch(kernels.shared_feedback_gl_bwd, (ctx.nc*h, c//tc, c//tc),
+                       (gp, saved_y, output_adj, shared, ng, c, gt), ctx.telemetry, num_warps=8)
+                launch(kernels.shared_feedback_system_bwd, (ctx.nc*h, c//tc, c//tc),
+                       (curve, gp, saved_y, saved_w, output_adj, shared, ng, gs, c, gt), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
             launch(kernels.parameter_bwd_kernel, (ctx.nc*h*ng,),
                    (v, curve, do, grads[2], dc, *meta[:2], meta[3], meta[4], p, gp, saved_s, saved_y, local,
                     shared, output_adj, edge_y, h, kd, vd, gs, ng, c, kt, gt, opts['carry']),
-                   ctx.telemetry, NEED_DC=need_curve_grad, num_warps=4 if c == 32 else 8, RHO_MATERIALIZED=opts['rho_materialized'])
+                   ctx.telemetry, NEED_DC=need_curve_grad, num_warps=4 if c == 32 else 8, RHO_MATERIALIZED=opts['rho_materialized'], COUPLED=coupled, Coupled=coupled_work)
         if ctx.nc:
             assert kt == 128 and c in (16, 32, 64, 128)
-            matrix_work = buffers(ctx.nc*h, [(kt, c), (c, kt), (c, c), (c, kt)], q.device, dtype=torch.float32)
             launch(kernels.mass_source_reduce, (ctx.nc*h, c//16),
                    (shared, gauge, ng, c), ctx.telemetry, num_warps=4)
             launch(kernels.common_tail_bwd, (ctx.nc*h,),
                    (*meta[:2], p, shared, matrix_work, grads[1], grads[3], h, kd, ng, c, kt),
-                   ctx.telemetry, num_warps=8)
-            launch(kernels.common_ga_bwd, (ctx.nc*h, c//tc, c//tc),
-                   (*meta[:2], p, shared, matrix_work, h, ng, c, kt), ctx.telemetry, num_warps=4)
-            for matrix_mode in range(3):
-                launch(kernels.common_products_bwd, (ctx.nc*h, c//tc, c//tc if matrix_mode == 1 else kt//64),
-                       (*meta[:2], p, shared, matrix_work, h, ng, c, kt, matrix_mode), ctx.telemetry, num_warps=4)
-            launch(kernels.common_inverse_left_bwd, (ctx.nc*h, c//tc, c//tc),
-                   (p, matrix_work, c), ctx.telemetry, num_warps=4)
+                   ctx.telemetry, num_warps=8, COUPLED=coupled, SOURCE_OWNER=source_owner)
+            if not coupled:
+                launch(kernels.common_ga_bwd, (ctx.nc*h, c//tc, c//tc),
+                       (*meta[:2], p, shared, matrix_work, h, ng, c, kt), ctx.telemetry, num_warps=4)
+                for matrix_mode in range(3):
+                    launch(kernels.common_products_bwd, (ctx.nc*h, c//tc, c//tc if matrix_mode == 1 else kt//64),
+                           (*meta[:2], p, shared, matrix_work, h, ng, c, kt, matrix_mode), ctx.telemetry, num_warps=4)
+                launch(kernels.common_inverse_left_bwd, (ctx.nc*h, c//tc, c//tc),
+                       (p, matrix_work, c), ctx.telemetry, num_warps=4)
             launch(kernels.common_lower_bwd, (ctx.nc*h, c//16),
-                   (p, shared, matrix_work, grads[3], *meta[:2], h, ng, c), ctx.telemetry, num_warps=4)
-            launch(kernels.common_base_bwd, (ctx.nc*h, c//16),
-                   (p, shared, matrix_work, grads[0], grads[1], grads[3], grads[4], *meta[:2],
-                    h, kd, ng, c, kt), ctx.telemetry, num_warps=4)
-            if c >= 64:
-                launch(kernels.interval_bwd_cross, (ctx.nc*h, c//64, kt//64),
-                       (ell, grads[0], grads[1], *meta[:2], p, shared, matrix_work[:2], h, kd, ng, c, kt), ctx.telemetry, num_warps=8)
+                   (p, shared, matrix_work, grads[3], *meta[:2], h, ng, c), ctx.telemetry, num_warps=4, COUPLED=coupled)
+            if source_owner:
+                launch(coupled_kernels.coupled_interval_sources_bwd, (ctx.nc*h, 2, kt//32),
+                       (ell, grads[0], grads[1], grads[4], *meta[:2], p, shared, matrix_work, diagonal_flags,
+                        h, kd, ng, c, kt), ctx.telemetry, num_warps=4)
+                launch(coupled_kernels.coupled_interval_gate_bwd, (ctx.nc*h, kt//32),
+                       (grads[4], *meta[:2], p, shared, h, kd, c, kt), ctx.telemetry, num_warps=4)
+                launch(coupled_kernels.coupled_gamma_sources_bwd, (ctx.nc*h,),
+                       (shared, matrix_work, grads[3], *meta[:2], h, ng, c), ctx.telemetry, num_warps=4)
             else:
-                launch(kernels.interval_bwd_small, (ctx.nc*h, kt//32),
-                       (ell, grads[0], grads[1], *meta[:2], p, shared, matrix_work[:2], h, kd, ng, c, kt), ctx.telemetry, num_warps=4)
-            launch(kernels.interval_diagonal_tc_bwd, (ctx.nc*h, c//bc, kt//32),
-                   (ell, grads[0], grads[1], *meta[:2], p, shared, matrix_work[:2], diagonal_flags, h, kd, ng, c, kt),
-                   ctx.telemetry, num_warps=4)
-            launch(kernels.interval_bwd_diagonal, (ctx.nc*h, c//bc, kt//32),
-                   (ell, grads[0], grads[1], *meta[:2], p, shared, matrix_work[:2], diagonal_flags, h, kd, ng, c, kt), ctx.telemetry, num_warps=4)
-            launch(kernels.interval_gate_bwd, (ctx.nc*h, kt//32),
-                   (grads[4], *meta[:2], p, matrix_work[:2], h, kd, c, kt), ctx.telemetry, num_warps=4)
+                launch(kernels.common_base_bwd, (ctx.nc*h, c//16),
+                       (p, shared, matrix_work, grads[0], grads[1], grads[3], grads[4], *meta[:2],
+                        h, kd, ng, c, kt), ctx.telemetry, num_warps=4)
+                if c >= 64:
+                    launch(kernels.interval_bwd_cross, (ctx.nc*h, c//64, kt//64),
+                           (ell, grads[0], grads[1], *meta[:2], p, shared, matrix_work[:2], h, kd, ng, c, kt), ctx.telemetry, num_warps=8)
+                else:
+                    launch(kernels.interval_bwd_small, (ctx.nc*h, kt//32),
+                           (ell, grads[0], grads[1], *meta[:2], p, shared, matrix_work[:2], h, kd, ng, c, kt), ctx.telemetry, num_warps=4)
+                launch(kernels.interval_diagonal_tc_bwd, (ctx.nc*h, c//bc, kt//32),
+                       (ell, grads[0], grads[1], *meta[:2], p, shared, matrix_work[:2], diagonal_flags, h, kd, ng, c, kt),
+                       ctx.telemetry, num_warps=4)
+                launch(kernels.interval_bwd_diagonal, (ctx.nc*h, c//bc, kt//32),
+                       (ell, grads[0], grads[1], *meta[:2], p, shared, matrix_work[:2], diagonal_flags, h, kd, ng, c, kt), ctx.telemetry, num_warps=4)
+                launch(kernels.interval_gate_bwd, (ctx.nc*h, kt//32),
+                       (grads[4], *meta[:2], p, matrix_work[:2], h, kd, c, kt), ctx.telemetry, num_warps=4)
             launch(kernels.common_input_bwd, (ctx.nc*h, c//bc),
                    (q, grads[0], grads[1], grads[3], *meta[:2], p, shared, gauge, h, kd, ng, c, kt, opts['scale']),
                    ctx.telemetry, num_warps=4)
@@ -357,13 +386,13 @@ class _ChunkBF16(torch.autograd.Function):
                 result[owners[0]] = total.to(sources[owners[0]].dtype)
         if ctx.telemetry is not None:
             ctx.telemetry.update(backward='manual_triton_chunk_source_vjp', backward_precision='device_float32',
-                                 backward_precision_route='bf16', backward_fallback_subblocks=0)
+                                 backward_precision_route='bf16', backward_fallback_subblocks=0, source_vjp=opts['source_vjp'])
         return (*result, None, None)
 
 
 def chunk_bf16(q, k, v, beta, log_decay, curvature=1., initial_state=None, output_final_state=False,
                scale=None, cu_seqlens=None, group_size=32, chunk_size=64, carry_mode='no_carry',
-               arithmetic='bf16', telemetry=None):
+               arithmetic='bf16', telemetry=None, source_vjp='expanded'):
     if q.ndim != 4 or v.ndim != 4 or q.shape[-1] != 128 or v.shape[-1] not in (32, 64, 128) or group_size != 32:
         raise ValueError('Blocked BF16 requires K=128, V in {32, 64, 128}, and group_size=32.')
     _require_runtime(q)
@@ -378,8 +407,13 @@ def chunk_bf16(q, k, v, beta, log_decay, curvature=1., initial_state=None, outpu
         raise ValueError('CUDA BF16/FP32 candidate and explicit carry mode required')
     if isinstance(chunk_size, bool) or chunk_size not in (16, 32, 64, 128):
         raise ValueError('invalid execution chunk size')
+    if source_vjp not in ('expanded', 'coupled', 'coupled_state', 'coupled_fused'):
+        raise ValueError('invalid source VJP selection')
+    if source_vjp != 'expanded' and (chunk_size != 64 or
+                                     isinstance(curvature, torch.Tensor) and curvature.requires_grad):
+        raise ValueError('coupled source VJP requires C64 and fixed curvature')
     bounds, scale = _validate(q, k, v, beta, log_decay, curvature, initial_state, scale, cu_seqlens, group_size, False)
-    c = curvature if isinstance(curvature, torch.Tensor) else torch.tensor(curvature, dtype=torch.float32, device=q.device)
+    c = curvature_tensor(curvature, q.device)
     state = initial_state if initial_state is not None else torch.zeros(
         (len(bounds)-1, q.shape[2], q.shape[3], v.shape[-1]), dtype=torch.float32, device=q.device)
     sources = (q, k, v, beta, log_decay, state, c)
@@ -392,7 +426,7 @@ def chunk_bf16(q, k, v, beta, log_decay, curvature=1., initial_state=None, outpu
     for i, x in enumerate(sources):
         aliases.setdefault(id(x), []).append(i)
     opts = dict(bounds=bounds, scale=scale, rho_materialized=not rho_bounded, g=group_size, c=chunk_size, carry=carry_mode ==
-                'y_carry', arithmetic=arithmetic, aliases=[a for a in aliases.values() if len(a) > 1])
+                'y_carry', arithmetic=arithmetic, coupled=source_vjp != 'expanded', coupled_state=source_vjp in ('coupled_state', 'coupled_fused'), source_owner=source_vjp == 'coupled_fused', source_vjp=source_vjp, aliases=[a for a in aliases.values() if len(a) > 1])
     if telemetry is not None:
         telemetry.update(source_alias_groups=opts['aliases'], precision_requested='bf16_selective',
                          readout_compensated=c.requires_grad)

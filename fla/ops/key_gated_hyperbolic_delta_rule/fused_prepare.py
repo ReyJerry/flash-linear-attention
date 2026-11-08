@@ -12,6 +12,7 @@ import weakref
 import torch
 
 from fla.ops.key_gated_hyperbolic_delta_rule import fused_prepare_kernels as kernels
+from fla.ops.key_gated_hyperbolic_delta_rule.fixed_curvature import curvature_tensor
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd
 
 BT = 8
@@ -79,6 +80,5 @@ class Preprocessing(torch.autograd.Function):
 
 
 def fused_preprocessing(q, k, v, br, gr, a, dt, curve, margin):
-    if not isinstance(curve, torch.Tensor):
-        curve = torch.tensor(curve, device=q.device, dtype=torch.float32)
+    curve = curvature_tensor(curve, q.device)
     return Preprocessing.apply(*(x.contiguous() for x in (q, k, v, br, gr, a, dt, curve)), margin)

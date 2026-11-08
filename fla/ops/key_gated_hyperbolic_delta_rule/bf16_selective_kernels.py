@@ -81,6 +81,11 @@ def add_rn_f32(a, b):
 
 
 @triton.jit
+def stack_rows(a, b, M: tl.constexpr, N: tl.constexpr):
+    return tl.reshape(tl.permute(tl.join(a, b), (2, 0, 1)), (2 * M, N))
+
+
+@triton.jit
 def mm_precise(a, b, M: tl.constexpr, N: tl.constexpr, R: tl.constexpr):
     if M >= 16 and N >= 16 and (R >= 16):
         (ah32, bh32) = (round_bf16_f32(a), round_bf16_f32(b))
@@ -503,7 +508,21 @@ def saved_state_tail(P, Gp, ch, block, v, s, u, length, C: tl.constexpr, K: tl.c
 
 
 @triton.jit
-def state_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp, SavedS, Local, Sh, OutputAdj, Carry, EdgeY, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True):
+def coupled_state_source(P, ch, gradient, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr):
+    tl.static_assert(K == 128 and C == 64)
+    a = tl.arange(0, 64).to(tl.int64)
+    i = tl.arange(0, C).to(tl.int64)
+    off = ch * C * K + i[:, None] * K + a[None, :]
+    gamma = load_vector(P[19], ch, C)
+    b0 = gamma[:, None] * (tl.load(P[2] + off) * tl.load(P[1] + off))
+    g0 = mm_precise(tl.trans(b0), gradient, 64, G, C)
+    b1 = gamma[:, None] * (tl.load(P[2] + off + 64) * tl.load(P[1] + off + 64))
+    g1 = mm_precise(tl.trans(b1), gradient, 64, G, C)
+    return stack_rows(g0, g1, 64, G)
+
+
+@triton.jit
+def state_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp, SavedS, Local, Sh, OutputAdj, Carry, EdgeY, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True, COUPLED_STATE: tl.constexpr = False):
     shg = tl.program_id(0).to(tl.int64)
     (group, head, seq) = (shg % NG, shg // NG % H, shg // (NG * H))
     (a, g, i) = (tl.arange(0, K), tl.arange(0, G), tl.arange(0, C))
@@ -578,24 +597,35 @@ def state_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp,
         source_n, source_beta = mass_system_sources(b, beta, lam, w, zp, C)
         gn += source_n
         gb += source_beta
-        rhs = nu * b
-        gh = -kap * rhs
-        gy = -pointer_mm_backward(P[10], ch, nu[:, None] * gu, C, G, C, True)
-        gy += gh[:, None] * tl.load(V0 + vo, mask, 0).to(tl.float32)
-        tl.debug_barrier()
-        store_matrix(OutputAdj[1], block, gu, C, G)
+        if COUPLED_STATE:
+            tl.static_assert(not CARRY and C == 64)
+            rho = read_rho_matrix(Gp, block, i, i, C, RHO_MATERIALIZED)
+            ahat = load_matrix(P[11], ch, C, C) * rho
+            v = tl.load(V0 + vo, mask, 0).to(tl.float32)
+            pi = gu + kap * mm_precise(tl.trans(ahat), b[:, None] * v, C, G, C)
+            gs -= coupled_state_source(P, ch, nu[:, None] * pi, C, K, G)
+            tl.debug_barrier()
+            store_matrix(OutputAdj[1], block, pi, C, G)
+        else:
+            rhs = nu * b
+            gh = -kap * rhs
+            gy = -pointer_mm_backward(P[10], ch, nu[:, None] * gu, C, G, C, True)
+            gy += gh[:, None] * tl.load(V0 + vo, mask, 0).to(tl.float32)
+            tl.debug_barrier()
+            store_matrix(OutputAdj[1], block, gu, C, G)
+            if not CARRY or chunk == first:
+                gs += pointer_mm_backward(P[5], ch, gy, K, G, C, True)
+            tl.store(DV + vo, gy, mask)
+            by = gy
         store_vector(OutputAdj[2], block, b, C)
-        if not CARRY or chunk == first:
-            gs += pointer_mm_backward(P[5], ch, gy, K, G, C, True)
-        tl.store(DV + vo, gy, mask)
         store_vector(Sh[8], block, gn, C)
         store_vector(Sh[12], block, gb, C)
-        (bs, by) = (gs, gy)
+        bs = gs
     tl.store(DS0 + so, bs, smask)
 
 
 @triton.jit
-def parameter_bwd_kernel(V0, Curvature, DO, DV, DC, Starts, Ends, Prev, Next, P, Gp, SavedS, SavedY, Local, Sh, OutputAdj, EdgeY, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, NEED_DC: tl.constexpr = True, RHO_MATERIALIZED: tl.constexpr = True):
+def parameter_bwd_kernel(V0, Curvature, DO, DV, DC, Starts, Ends, Prev, Next, P, Gp, SavedS, SavedY, Local, Sh, OutputAdj, EdgeY, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, NEED_DC: tl.constexpr = True, RHO_MATERIALIZED: tl.constexpr = True, COUPLED: tl.constexpr = False, Coupled=None):
     block = tl.program_id(0).to(tl.int64)
     (group, ch) = (block % NG, block // NG)
     (head, chunk) = (ch % H, ch // H)
@@ -647,25 +677,32 @@ def parameter_bwd_kernel(V0, Curvature, DO, DV, DC, Starts, Ends, Prev, Next, P,
     gto = (t / z)[:, None] * go
     gv = aq[:, None] * gto
     gv += tl.where(i[:, None] == length - 1, (tl.sum(gtarget * kl[:, None], 0) / nl)[None, :], 0.0)
-    gv += w[:, None] * gu
-    nu = load_vector(Gp[7], block, C)
-    y = load_matrix(SavedY, block, C, G)
-    rho = read_rho_matrix(Gp, block, i, i, C, RHO_MATERIALIZED)
-    gzmatrix = -rho * b[:, None] * w[None, :]
-    rhs = nu * b
-    kap = tl.load(Curvature).to(tl.float32) / GS
-    gh = -kap * rhs
-    grmat = -kap * gzmatrix
-    if NEED_DC:
-        rmat = load_matrix(Gp[4], block, C, C)
-        rmat = tl.where(i[:, None] == i[None, :], load_vector(Gp[9], block, C)[:, None], rmat)
-        h = tl.sum(v * y, 1)
-        gc = -tl.sum(rhs * h, 0) - tl.sum(tl.sum(gzmatrix * rmat, 0), 0)
-        tl.store(DC + block, gc / GS)
-    gv += gh[:, None] * y
-    inv = load_matrix(P[11], ch, C, C)
-    gram_grad = grmat * inv
-    gv += mm_state_left_two(gram_grad + tl.trans(gram_grad), v, C, G, C, False)
+    if COUPLED:
+        tl.static_assert(not NEED_DC and not CARRY and C == 64)
+        kap = tl.load(Curvature).to(tl.float32) / GS
+        pi = load_matrix(Coupled[1], block, C, G)
+        delta = load_matrix(Coupled[0], block, C, G)
+        gv += w[:, None] * pi + kap * b[:, None] * delta
+    else:
+        gv += w[:, None] * gu
+        nu = load_vector(Gp[7], block, C)
+        y = load_matrix(SavedY, block, C, G)
+        rho = read_rho_matrix(Gp, block, i, i, C, RHO_MATERIALIZED)
+        gzmatrix = -rho * b[:, None] * w[None, :]
+        rhs = nu * b
+        kap = tl.load(Curvature).to(tl.float32) / GS
+        gh = -kap * rhs
+        grmat = -kap * gzmatrix
+        if NEED_DC:
+            rmat = load_matrix(Gp[4], block, C, C)
+            rmat = tl.where(i[:, None] == i[None, :], load_vector(Gp[9], block, C)[:, None], rmat)
+            h = tl.sum(v * y, 1)
+            gc = -tl.sum(rhs * h, 0) - tl.sum(tl.sum(gzmatrix * rmat, 0), 0)
+            tl.store(DC + block, gc / GS)
+        gv += gh[:, None] * y
+        inv = load_matrix(P[11], ch, C, C)
+        gram_grad = grmat * inv
+        gv += mm_state_left_two(gram_grad + tl.trans(gram_grad), v, C, G, C, False)
     tl.store(DV + vo, gv, mask)
 
 
@@ -1029,7 +1066,7 @@ def common_input_bwd(Q0, DQ, DK, DB, Starts, Ends, P, Sh, Gauge, H: tl.constexpr
 
 
 @triton.jit
-def common_tail_bwd(Starts, Ends, P, Sh, Work, DK, DB, H: tl.constexpr, KD: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr):
+def common_tail_bwd(Starts, Ends, P, Sh, Work, DK, DB, H: tl.constexpr, KD: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, COUPLED: tl.constexpr = False, SOURCE_OWNER: tl.constexpr = False):
     ch = tl.program_id(0).to(tl.int64)
     (i, a) = (tl.arange(0, C).to(tl.int64), tl.arange(0, K).to(tl.int64))
     (start, end) = (tl.load(Starts + ch // H), tl.load(Ends + ch // H))
@@ -1039,11 +1076,19 @@ def common_tail_bwd(Starts, Ends, P, Sh, Work, DK, DB, H: tl.constexpr, KD: tl.c
     gp = load_matrix(Sh[7], ch, K, C)
     p0 = load_matrix(P[16], ch, K, C)
     (gp0, gkl, ggl) = erase_vjp(kl, gamma, p0, gp)
-    store_matrix(Work[0], ch, gp0, K, C)
-    store_matrix(Work[2], ch, load_matrix(Sh[1], ch, C, C), C, C)
+    if COUPLED:
+        raw_tail = load_matrix(Work[0], ch, K, C)
+        tl.debug_barrier()
+        store_matrix(Sh[7], ch, tl.trans(raw_tail), C, K)
+    else:
+        store_matrix(Work[0], ch, gp0, K, C)
+        store_matrix(Work[2], ch, load_matrix(Sh[1], ch, C, C), C, C)
     gk = gkl + sum_vector(Sh[11], ch, K, NG)
     off = ((start + i[:, None]) * H + ch % H) * KD + a[None, :]
-    tl.store(DK + off, tl.where(i[:, None] == last, gk[None, :], 0.0), (i[:, None] < end - start) & (a[None, :] < KD))
+    if SOURCE_OWNER:
+        store_vector(Work[2], ch, gk, K)
+    else:
+        tl.store(DK + off, tl.where(i[:, None] == last, gk[None, :], 0.0), (i[:, None] < end - start) & (a[None, :] < KD))
     tl.store(DB + (start + i) * H + ch % H, tl.where(i == last, ggl, 0.0), i < end - start)
 
 
@@ -1129,22 +1174,26 @@ def common_inverse_left_bwd(P, Work, C: tl.constexpr):
 
 
 @triton.jit
-def common_lower_bwd(P, Sh, Work, DB, Starts, Ends, H: tl.constexpr, NG: tl.constexpr, C: tl.constexpr):
+def common_lower_bwd(P, Sh, Work, DB, Starts, Ends, H: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, COUPLED: tl.constexpr = False):
     B: tl.constexpr = (C if C < 32 else 32)
     ch = tl.program_id(0).to(tl.int64)
     i = tl.program_id(1).to(tl.int64) * 16 + tl.arange(0, 16).to(tl.int64)
     j = tl.arange(0, C).to(tl.int64)
     ar = tl.arange(0, B).to(tl.int64)
-    total = tl.full((16, C), 0.0, tl.float32)
-    for tile in range(C // B):
-        r = tile * B + ar
-        left = tl.load(Work[0] + ch * C * C + i[:, None] * C + r[None, :])
-        right = tl.load(P[11] + ch * C * C + j[None, :] * C + r[:, None])
-        total += mm_left_two(left, right, 16, C, B)
-    offset = ch * C * C + i[:, None] * C + j[None, :]
-    gl = tl.where(i[:, None] > j[None, :], tl.load(Work[2] + offset) - total, 0.0)
+    if COUPLED:
+        gl = tl.load(Sh[0] + ch * C * C + i[:, None] * C + j[None, :])
+    else:
+        total = tl.full((16, C), 0.0, tl.float32)
+        for tile in range(C // B):
+            r = tile * B + ar
+            left = tl.load(Work[0] + ch * C * C + i[:, None] * C + r[None, :])
+            right = tl.load(P[11] + ch * C * C + j[None, :] * C + r[:, None])
+            total += mm_left_two(left, right, 16, C, B)
+        offset = ch * C * C + i[:, None] * C + j[None, :]
+        gl = tl.where(i[:, None] > j[None, :], tl.load(Work[2] + offset) - total, 0.0)
     gamma = tl.load(P[19] + ch * C + i)
     tl.store(Sh[0] + ch * C * C + i[:, None] * C + j[None, :], gamma[:, None] * gl)
+    offset = ch * C * C + i[:, None] * C + j[None, :]
     gram = tl.load(P[9] + offset)
     (start, end) = (tl.load(Starts + ch // H), tl.load(Ends + ch // H))
     goff = (start + i) * H + ch % H

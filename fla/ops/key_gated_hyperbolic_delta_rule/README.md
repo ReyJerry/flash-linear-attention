@@ -105,3 +105,8 @@ Passing a trace is not a numerical or throughput qualification. See the
 for operator budgets, short/long screens, initial model gradients and remaining
 model-quality/distributed acceptance. This experimental policy is not a
 production recommendation.
+
+
+## Coupled source VJP research
+
+The internal selective implementation has optional fixed-curvature C64 coupled source and state adjoints. The public operator/Layer/CLI retain their existing source graph. See the [coupled VJP equations, bounded checks and complete-step results](../../../docs/experiments/khdn_coupled_vjp_2026_11_09/README.md). No default switch or training-throughput gain is certified by this research entry.

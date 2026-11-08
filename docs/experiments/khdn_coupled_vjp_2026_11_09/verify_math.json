@@ -1,0 +1,148 @@
+{
+  "passed": true,
+  "cases": 19,
+  "max_abs": 2.220446049250313e-15,
+  "rows": [
+    {
+      "t": 1,
+      "k": 3,
+      "g": 2,
+      "c0": false,
+      "manual": false,
+      "max_abs": 5.551115123125783e-17
+    },
+    {
+      "t": 1,
+      "k": 3,
+      "g": 2,
+      "c0": false,
+      "manual": true,
+      "max_abs": 5.551115123125783e-17
+    },
+    {
+      "t": 1,
+      "k": 3,
+      "g": 2,
+      "c0": true,
+      "manual": false,
+      "max_abs": 1.1102230246251565e-16
+    },
+    {
+      "t": 1,
+      "k": 3,
+      "g": 2,
+      "c0": true,
+      "manual": true,
+      "max_abs": 1.1102230246251565e-16
+    },
+    {
+      "t": 4,
+      "k": 5,
+      "g": 3,
+      "c0": false,
+      "manual": false,
+      "max_abs": 2.220446049250313e-16
+    },
+    {
+      "t": 4,
+      "k": 5,
+      "g": 3,
+      "c0": false,
+      "manual": true,
+      "max_abs": 2.220446049250313e-16
+    },
+    {
+      "t": 4,
+      "k": 5,
+      "g": 3,
+      "c0": true,
+      "manual": false,
+      "max_abs": 3.3306690738754696e-16
+    },
+    {
+      "t": 4,
+      "k": 5,
+      "g": 3,
+      "c0": true,
+      "manual": true,
+      "max_abs": 3.3306690738754696e-16
+    },
+    {
+      "t": 7,
+      "k": 8,
+      "g": 4,
+      "c0": false,
+      "manual": false,
+      "max_abs": 3.3306690738754696e-16
+    },
+    {
+      "t": 7,
+      "k": 8,
+      "g": 4,
+      "c0": false,
+      "manual": true,
+      "max_abs": 3.3306690738754696e-16
+    },
+    {
+      "t": 7,
+      "k": 8,
+      "g": 4,
+      "c0": true,
+      "manual": false,
+      "max_abs": 6.661338147750939e-16
+    },
+    {
+      "t": 7,
+      "k": 8,
+      "g": 4,
+      "c0": true,
+      "manual": true,
+      "max_abs": 6.661338147750939e-16
+    },
+    {
+      "t": 17,
+      "k": 128,
+      "g": 32,
+      "c0": false,
+      "manual": false,
+      "max_abs": 1.9984014443252818e-15
+    },
+    {
+      "t": 17,
+      "k": 128,
+      "g": 32,
+      "c0": false,
+      "manual": true,
+      "max_abs": 2.220446049250313e-15
+    },
+    {
+      "t": 17,
+      "k": 128,
+      "g": 32,
+      "c0": true,
+      "manual": false,
+      "max_abs": 1.5543122344752192e-15
+    },
+    {
+      "t": 17,
+      "k": 128,
+      "g": 32,
+      "c0": true,
+      "manual": true,
+      "max_abs": 1.5543122344752192e-15
+    },
+    {
+      "local_gauge_t": 4,
+      "max_abs": 2.7755575615628914e-17
+    },
+    {
+      "local_gauge_t": 16,
+      "max_abs": 5.551115123125783e-17
+    },
+    {
+      "local_gauge_t": 64,
+      "max_abs": 2.220446049250313e-16
+    }
+  ],
+  "scope": "Untimed independent CPU FP64 algebra; no BF16/GPU qualification."
+}

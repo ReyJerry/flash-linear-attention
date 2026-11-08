@@ -71,6 +71,37 @@ def qualified_bf16():
         pytest.skip(str(error))
 
 
+@pytest.mark.usefixtures('qualified_bf16')
+def test_fixed_curvature_cache_lifetime_and_tensor_passthrough():
+    from fla.ops.key_gated_hyperbolic_delta_rule.fixed_curvature import _constant, curvature_tensor
+
+    _constant.cache_clear()
+    producer, consumer = torch.cuda.Stream(), torch.cuda.Stream()
+    with torch.cuda.stream(producer), torch.inference_mode():
+        initial = curvature_tensor(.6, device)
+    assert not torch.is_inference(initial) and initial.dtype == torch.float32
+    with torch.cuda.stream(consumer):
+        reused = curvature_tensor(.6, device)
+        assert reused is initial
+        source = torch.ones((), device=device, requires_grad=True)
+        (source * reused).backward()
+        snapshot = source.grad.clone()
+    for index in range(20):
+        curvature_tensor(.01 * index, device)
+    consumer.synchronize()
+    torch.testing.assert_close(snapshot, torch.tensor(.6, dtype=torch.float32, device=device), atol=0, rtol=0)
+    assert _constant.cache_info().currsize == 16
+    current = curvature_tensor(.6, device)
+    current.fill_(9.)
+    restored = curvature_tensor(.6, device)
+    assert restored is not current
+    torch.testing.assert_close(restored, torch.tensor(.6, dtype=torch.float32, device=device), atol=0, rtol=0)
+    trainable = restored.detach().clone().requires_grad_()
+    assert curvature_tensor(trainable, device) is trainable
+    restored.requires_grad_(True)
+    assert curvature_tensor(.6, device) is not restored
+
+
 def compare_bf16(actual, expected, backward=False):
     atol, rtol, rms = (.005, .03, .015) if backward else (.002, .02, .01)
     assert torch.isfinite(actual).all()
@@ -110,6 +141,60 @@ def test_selective_public_policy_source_vjp(chunk_size, packed, dtype):
     for index, (actual_value, expected_value) in enumerate(zip(
             (*actual, *gradients), (*expected, *reference_gradients))):
         compare_bf16(actual_value, expected_value, backward=index >= 2)
+
+
+@pytest.mark.parametrize('source_vjp', ['coupled', 'coupled_state', 'coupled_fused'])
+@pytest.mark.parametrize('case,dtype,packed', [
+    ('random', torch.float32, False), ('random', torch.bfloat16, False),
+    ('random', torch.float32, True), ('random', torch.bfloat16, True),
+    ('fixed_point', torch.float32, False), ('repeated_beta1', torch.float32, False),
+    ('strong_gate', torch.float32, False), ('raw_margin', torch.float32, False),
+])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_coupled_source_vjp(case, dtype, packed, source_vjp):
+    from fla.ops.key_gated_hyperbolic_delta_rule import bf16_selective
+
+    if case == 'random':
+        source, cu = make_case(129, 128, 128, 32, packed=packed, dtype=dtype)
+        source = tuple(x.detach().requires_grad_(i < 6) for i, x in enumerate(source))
+    else:
+        length = 2 if case == 'strong_gate' else 1 if case == 'raw_margin' else 65
+        q = torch.zeros(1, length, 1, 128, device=device)
+        q[..., 0] = 1
+        k = q.clone()
+        v = torch.zeros(1, length, 1, 32, device=device)
+        v[..., 0] = .5
+        if case == 'raw_margin':
+            v.fill_(.9998779296875)
+        beta = q.new_full((1, length, 1), 1. if case == 'repeated_beta1' else .5)
+        ell = torch.zeros_like(q)
+        state = q.new_zeros(1, 1, 128, 32)
+        if case == 'fixed_point':
+            state[..., 0, 0] = .5
+        if case == 'strong_gate':
+            beta[:, 0], beta[:, 1] = 1, 0
+            ell[:, 0], ell[:, 1] = -1e8, -1.
+        source = tuple(x.requires_grad_() for x in (q, k, v, beta, ell, state)) + (q.new_tensor(1.),)
+        cu = None
+    reference = tuple(x.detach().double().requires_grad_(i < 6) for i, x in enumerate(source))
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], initial_state=reference[5], curvature=reference[6], group_size=32,
+        cu_seqlens=cu, output_final_state=True,
+    )
+    cot = tuple(torch.sin(torch.arange(x.numel(), device=x.device)).reshape(x.shape).float() for x in expected)
+    reference_gradients = torch.autograd.grad(expected, reference[:6], tuple(x.double() for x in cot))
+    info = {}
+    with NoFP64():
+        actual = bf16_selective.chunk_bf16(
+            *source[:5], curvature=source[6], initial_state=source[5], cu_seqlens=cu,
+            output_final_state=True, chunk_size=64, source_vjp=source_vjp, telemetry=info,
+        )
+        gradients = torch.autograd.grad(actual, source[:6], cot, retain_graph=True)
+        repeated = torch.autograd.grad(actual, source[:6], cot)
+    assert info['source_vjp'] == source_vjp and info['host_fallback'] is False
+    assert all(torch.equal(a, b) for a, b in zip(gradients, repeated))
+    for index, (a, b) in enumerate(zip((*actual, *gradients), (*expected, *reference_gradients))):
+        compare_bf16(a, b, backward=index >= 2)
 
 
 @pytest.mark.parametrize('packed', [False, True])

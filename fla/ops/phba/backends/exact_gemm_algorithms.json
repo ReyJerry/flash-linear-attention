@@ -1,0 +1,54 @@
+{
+  "library_sha256": "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c",
+  "algorithms": [
+    {
+      "m": 2048,
+      "n": 4272,
+      "k": 8192,
+      "astride": [
+        1,
+        2048
+      ],
+      "bstride": [
+        4272,
+        1
+      ],
+      "algorithm": "QgAAABQAAAAjAAAAAQAAAAAAAAAAAAAAAwAAAAAABQABAAAA5NcBAA4AAAAOAAAADgAOAEQAAAAAAAAAAAAAAA==",
+      "algorithm_sha256": "0d158e07042078f034d34f83899122d4f8e17d3dfde02675ca0791940b1a1577",
+      "workspace": 4
+    },
+    {
+      "m": 2048,
+      "n": 2048,
+      "k": 8192,
+      "astride": [
+        1,
+        2048
+      ],
+      "bstride": [
+        2048,
+        1
+      ],
+      "algorithm": "QgAAABIAAAAjAAAAAQAAAAAAAAAAAAAAAwAAAAAABQABAAAA5NcBAA4AAAAOAAAADgAOAEQAAAAAAAAAAAAAAA==",
+      "algorithm_sha256": "689d17cc7c350fb76d005296a5b13e51805e7c3848290e89b65826d84e60522a",
+      "workspace": 4
+    },
+    {
+      "m": 4272,
+      "n": 2048,
+      "k": 8192,
+      "astride": [
+        1,
+        4272
+      ],
+      "bstride": [
+        2048,
+        1
+      ],
+      "algorithm": "QgAAABQAAAAjAAAAAQAAAAAAAAAAAAAAAQAAAAAAAwABAAAA5NcBAA4AAAAOAAAADgAOAEQAAAAAAAAAAAAAAA==",
+      "algorithm_sha256": "347eb1a1d4698983433db6b4e45f92c683221bb18f8881d60a090ce3343da193",
+      "workspace": 4
+    }
+  ],
+  "workspace_limit": 33554432
+}

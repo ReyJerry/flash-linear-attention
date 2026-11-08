@@ -12,9 +12,10 @@ import re
 ARITHMETIC = 'selective_bf16_adjoint_queryless'
 
 
-def stages(chunk_size, backward=True):
+def stages(chunk_size, backward=True, source_vjp='expanded'):
     if chunk_size not in (16, 32, 64, 128):
         raise AssertionError('Selective BF16 requires C16/C32/C64/C128')
+    reverse = backward_stages(chunk_size, source_vjp)
     levels = (chunk_size // 16).bit_length() - 1
     forward = (
         'common_decay_kernel', 'common_input_kernel', 'interval_cache_kernel', 'diagonal_eligibility',
@@ -25,10 +26,23 @@ def stages(chunk_size, backward=True):
         'group_system_tiles', 'diagonal_inverse_kernel', *('inverse_offdiagonal_kernel',)*levels,
         'group_feedback_tiles', 'state_fwd_kernel', 'output_fwd_kernel',
     )
-    return forward + (backward_stages(chunk_size) if backward else ())
+    return forward + (reverse if backward else ())
 
 
-def backward_stages(chunk_size):
+def backward_stages(chunk_size, source_vjp='expanded'):
+    if source_vjp not in ('expanded', 'coupled', 'coupled_state', 'coupled_fused'):
+        raise AssertionError('Unknown selective source VJP')
+    if source_vjp != 'expanded':
+        if chunk_size != 64:
+            raise AssertionError('Coupled source VJP requires C64')
+        tail = ('coupled_interval_sources_bwd', 'coupled_interval_gate_bwd', 'coupled_gamma_sources_bwd') if (
+            source_vjp == 'coupled_fused') else (
+                'common_base_bwd', 'interval_bwd_cross', 'interval_diagonal_tc_bwd', 'interval_bwd_diagonal', 'interval_gate_bwd')
+        return (
+            'output_bwd_kernel', 'state_bwd_kernel', 'coupled_residual_bwd', *('shared_coefficients_bwd',)*2,
+            *('coupled_sources_bwd',)*4, 'parameter_bwd_kernel', 'mass_source_reduce', 'common_tail_bwd',
+            'common_lower_bwd', *tail, 'common_input_bwd',
+        )
     return (
         'output_bwd_kernel', 'state_bwd_kernel', *('shared_coefficients_bwd',)*4,
         'shared_feedback_gl_bwd', 'shared_feedback_system_bwd', 'parameter_bwd_kernel',
@@ -39,10 +53,10 @@ def backward_stages(chunk_size):
     )
 
 
-def attest_schedule(launches, backward, chunk_size):
-    if [row['kernel'] for row in launches] != list(stages(chunk_size, backward)):
+def attest_schedule(launches, backward, chunk_size, source_vjp='expanded'):
+    if [row['kernel'] for row in launches] != list(stages(chunk_size, backward, source_vjp)):
         raise AssertionError('Selective BF16 missing/duplicated/reordered computational stage')
-    reverse = backward_stages(chunk_size)
+    reverse = backward_stages(chunk_size, source_vjp)
     for row in launches:
         phase = 'backward' if row['kernel'] in reverse else 'forward'
         if row['phase'] != phase or row['arguments'].get('C') != chunk_size:
@@ -59,12 +73,30 @@ def attest_schedule(launches, backward, chunk_size):
          128 and not (chunk_size == 64 and curvature[0])] * len(widths)),
         ('inverse_offdiagonal_kernel', 'NEED_DC', [curvature[0]] * len(widths)),
         ('common_finish_tiles', 'MODE', [0, 1, 2]),
-        ('shared_coefficients_bwd', 'MODE', [0, 1, 2, 3] if backward else []),
-        ('common_products_bwd', 'MODE', [0, 1, 2] if backward else []),
+        ('shared_coefficients_bwd', 'MODE', ([0, 3] if source_vjp != 'expanded' else [0, 1, 2, 3]) if backward else []),
+        ('common_products_bwd', 'MODE', [0, 1, 2] if backward and source_vjp == 'expanded' else []),
+        ('coupled_sources_bwd', 'MODE', [0, 1, 2, 3] if backward and source_vjp != 'expanded' else []),
     ):
         actual = [row['arguments'].get(argument) for row in launches if row['kernel'] == name]
         if actual != expected:
             raise AssertionError(f'Selective BF16 specialization differs: {name}/{argument}')
+    if source_vjp != 'expanded' and curvature[0]:
+        raise AssertionError('Coupled source VJP does not support curvature gradients')
+    if backward:
+        for name, key, expected in (
+            ('state_bwd_kernel', 'COUPLED_STATE', source_vjp in ('coupled_state', 'coupled_fused')),
+            ('parameter_bwd_kernel', 'COUPLED', source_vjp != 'expanded'),
+            ('common_tail_bwd', 'COUPLED', source_vjp != 'expanded'),
+            ('common_tail_bwd', 'SOURCE_OWNER', source_vjp == 'coupled_fused'),
+            ('common_lower_bwd', 'COUPLED', source_vjp != 'expanded'),
+        ):
+            rows = [r for r in launches if r['kernel'] == name]
+            if len(rows) != 1 or rows[0]['arguments'].get(key, False) is not expected:
+                raise AssertionError(f'Selective source specialization differs: {name}/{key}')
+        if source_vjp != 'expanded':
+            row = next(r for r in launches if r['kernel'] == 'coupled_residual_bwd')
+            if row['arguments'].get('PI_READY', False) is not (source_vjp != 'coupled'):
+                raise AssertionError('Selective coupled Pi ownership differs')
     rho = [row['arguments']['RHO_MATERIALIZED'] for row in launches if 'RHO_MATERIALIZED' in row['arguments']]
     if not rho or any(type(value) is not bool or value != rho[0] for value in rho):
         raise AssertionError('Selective BF16 rho representation differs across stages')
@@ -72,8 +104,20 @@ def attest_schedule(launches, backward, chunk_size):
 
 def expected_dot_count(name, flags):
     chunk = flags.get('C')
-    if chunk not in (16, 32, 64, 128) or name not in stages(chunk):
+    coupled_names = ('coupled_residual_bwd', 'coupled_sources_bwd', 'coupled_interval_sources_bwd',
+                     'coupled_interval_gate_bwd', 'coupled_gamma_sources_bwd')
+    if chunk not in (16, 32, 64, 128) or name not in (*stages(chunk), *coupled_names):
         raise AssertionError('Unknown selective BF16 kernel/geometry')
+    if name in coupled_names:
+        if chunk != 64:
+            raise AssertionError('Coupled source kernel requires C64')
+        return {'coupled_residual_bwd': 3 if flags.get('PI_READY') is True else 6,
+                'coupled_sources_bwd': 3, 'coupled_interval_sources_bwd': 24,
+                'coupled_interval_gate_bwd': 0, 'coupled_gamma_sources_bwd': 0}[name]
+    if name in ('parameter_bwd_kernel', 'common_lower_bwd') and flags.get('COUPLED') is True:
+        if chunk != 64:
+            raise AssertionError('Coupled source kernel requires C64')
+        return 0
     if name == 'inverse_offdiagonal_kernel':
         if type(flags.get('NEED_DC')) is not bool:
             raise AssertionError('Selective inverse requires a curvature-gradient specialization')
@@ -93,6 +137,10 @@ def expected_dot_count(name, flags):
     if name == 'state_fwd_kernel':
         return 6 if chunk == 128 else 4
     if name == 'state_bwd_kernel':
+        if flags.get('COUPLED_STATE') is True:
+            if chunk != 64:
+                raise AssertionError('Coupled state requires C64')
+            return 15
         return 18 if chunk == 128 else 12
     return {
         'interval_fwd_cross': 2, 'interval_diagonal_tc_fwd': 2, 'common_finish_tiles': 1,

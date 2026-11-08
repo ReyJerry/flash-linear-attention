@@ -77,6 +77,7 @@ class KeyGatedHyperbolicDeltaNet(nn.Module):
         norm_eps: float = 1e-6,
         layer_idx: int | None = None,
         precision_policy: str = 'strict',
+        source_vjp: str = 'expanded',
         **kwargs,
     ):
         super().__init__()
@@ -108,6 +109,12 @@ class KeyGatedHyperbolicDeltaNet(nn.Module):
         if precision_policy == 'bf16_selective' and (mode != 'chunk' or head_dim != 128
                                                      or self.head_v_dim != 128 or group_size != 32 or carry_mode != 'no_carry'):
             raise ValueError('bf16_selective requires chunk mode, K=V128, g32 and no_carry.')
+        if source_vjp not in ('expanded', 'coupled', 'coupled_state', 'coupled_fused'):
+            raise ValueError('Unknown KHDN source_vjp.')
+        if source_vjp != 'expanded' and (precision_policy != 'bf16_selective' or mode != 'chunk'
+                                         or chunk_size != 64 or learnable_curvature):
+            raise ValueError('Coupled source_vjp requires fixed-curvature bf16_selective C64 chunk mode.')
+        self.source_vjp = source_vjp
         self.precision_policy = precision_policy
         if carry_mode not in ('no_carry', 'y_carry'):
             raise ValueError('carry_mode must be no_carry or y_carry.')
@@ -306,6 +313,8 @@ class KeyGatedHyperbolicDeltaNet(nn.Module):
         elif mode == 'chunk':
             from fla.ops.key_gated_hyperbolic_delta_rule import chunk_key_gated_hyperbolic_delta_rule as op
             extra = dict(chunk_size=self.chunk_size, carry_mode=self.carry_mode)
+            if self.source_vjp != 'expanded':
+                extra['source_vjp'] = self.source_vjp
             if self.precision_policy != 'strict':
                 extra['precision_policy'] = self.precision_policy
         else:

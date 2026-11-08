@@ -77,6 +77,10 @@ def parse_arguments(argv=None):
                         help='opt in to correctness-gated strict FP64 SIMT KHDN; no Tensor Core claim')
     parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective'),
                         help='explicit KHDN policy; experimental policies reject fallback/replay')
+    parser.add_argument('--khdn-source-vjp', choices=('expanded', 'coupled', 'coupled_state', 'coupled_fused'),
+                        default='expanded', help='opt-in C64 fixed-curvature source graph; default keeps expanded VJP')
+    parser.add_argument('--linear-checkpoint-policy', choices=('recompute', 'save_mm'), default='recompute',
+                        help='save_mm retains external Linear outputs; custom-op private tape is recomputed')
     parser.add_argument('--operator-sweep', action='store_true',
                         help='bounded KHDN operator-only correctness/profile/timing, separate from model/DDP')
     parser.add_argument('--operator-lengths', type=int, nargs='+', default=[17, 33, 65])
@@ -123,6 +127,15 @@ def parse_arguments(argv=None):
     parser.add_argument('--memory-only', action='store_true',
                         help='one fresh-process method/trial; defer health diagnostics until after memory samples')
     args = parser.parse_args(argv)
+    if args.khdn_source_vjp != 'expanded' and (args.khdn_precision_policy != 'bf16_selective'
+                                               or args.chunk_size != 64 or args.learnable_curvature
+                                               or args.methods != ['khdn_no_carry']):
+        parser.error('coupled source VJP requires fixed-curvature bf16_selective C64 khdn_no_carry')
+    if args.linear_checkpoint_policy == 'save_mm' and any(
+            method not in ('khdn_no_carry', 'kda') for method in args.methods):
+        parser.error('save_mm currently supports KHDN no_carry and KDA model routes')
+    if args.linear_checkpoint_policy == 'save_mm' and (args.no_layer_checkpoint or args.operator_sweep):
+        parser.error('save_mm requires model layer checkpointing')
     if args.khdn_strict and args.khdn_precision_policy not in (None, 'strict'):
         parser.error('--khdn-strict conflicts with an experimental --khdn-precision-policy')
     if args.khdn_strict:
@@ -235,7 +248,10 @@ def model_configuration(args, name, *, small=False):
                       chunk_size=min(args.chunk_size, 64) if name == 'khdn_naive' else args.chunk_size, carry_mode='y_carry' if name == 'khdn_y_carry' else 'no_carry',
                       attn_mode='naive' if name == 'khdn_naive' else 'chunk',
                       precision_policy='strict' if name == 'khdn_naive' else (args.khdn_precision_policy or 'strict'))
-        if small and args.khdn_precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
+        source_vjp = getattr(args, 'khdn_source_vjp', 'expanded')
+        if source_vjp != 'expanded' and name != 'khdn_naive':
+            common['source_vjp'] = source_vjp
+        if small and args.khdn_precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective') and source_vjp == 'expanded':
             common['learnable_curvature'] = True
     elif name not in ('gdn', 'kda', 'comba', 'gdn2'):
         common.update(tensor_core=True, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
@@ -263,7 +279,13 @@ def build_model(args, spec, *, small=False):
     model.float().train()
     digest = weight_digest(model)
     if not args.no_layer_checkpoint:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+        checkpoint_options = {'use_reentrant': False}
+        if getattr(args, 'linear_checkpoint_policy', 'recompute') == 'save_mm':
+            from benchmarks.linear_checkpoint import context_fn
+            checkpoint_options['context_fn'] = context_fn
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_options)
+    from benchmarks.linear_checkpoint import attest_policy
+    attest_policy(model, getattr(args, 'linear_checkpoint_policy', 'recompute'))
     parameter_count = sum(x.numel() for x in model.parameters())
     if any(x.dtype != torch.float32 for x in model.parameters()):
         raise AssertionError('Training benchmark requires FP32 parameters.')

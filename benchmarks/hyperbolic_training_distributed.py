@@ -397,6 +397,8 @@ def checkpoint_contract(args, name, world_size):
 
     if getattr(args, 'optimizer_backend', 'native') == 'fp32':
         contract['optimizer_backend'] = 'triton_fp32_adamw_v1'
+    if getattr(args, 'linear_checkpoint_policy', 'recompute') != 'recompute':
+        contract['linear_checkpoint_policy'] = args.linear_checkpoint_policy
     return contract
 
 
@@ -767,8 +769,11 @@ def trace_route(model, batch, args, name, benchmark):
     started = time.perf_counter()
     model.zero_grad(set_to_none=True)
     strict = name in ('khdn_no_carry', 'khdn_y_carry')
+    from benchmarks.linear_checkpoint import attest_policy
+    checkpoint_policy = attest_policy(unwrap(model), getattr(args, 'linear_checkpoint_policy', 'recompute'))
     context = (KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
-                         model.config.num_hidden_layers, precision_policy=args.khdn_precision_policy or 'strict') if strict else
+                         model.config.num_hidden_layers, precision_policy=args.khdn_precision_policy or 'strict',
+                         source_vjp=getattr(args, 'khdn_source_vjp', 'expanded')) if strict else
                NativeTrainingTrace(name) if name in ('kda', 'comba') else
                benchmark.GDNBackendTrace() if name == 'gdn' else
                contextlib.nullcontext() if name == 'khdn_naive' else benchmark.KernelTrace())
@@ -815,6 +820,7 @@ def trace_route(model, batch, args, name, benchmark):
         if not gates:
             raise AssertionError('KHDN gate projection was not observed')
         route['key_gate_observations'] = gates
+    route['linear_checkpoint_policy'] = checkpoint_policy
     route['untimed_trace_wall_ms'] = (time.perf_counter() - started) * 1000
     return route
 
@@ -850,11 +856,14 @@ def khdn_update_guard(args, name, stage, records, *, model=None, batches=None, s
         yield
         return
     with KHDNExceptionGuard(precision_policy=args.khdn_precision_policy or 'strict') as guard:
+        from benchmarks.linear_checkpoint import attest_policy
         record = {'stage': stage, 'guard': guard.evidence()}
         if args.khdn_precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
             record['arm'] = arm
         records.append(record)
         try:
+            if model is not None:
+                attest_policy(unwrap(model), getattr(args, 'linear_checkpoint_policy', 'recompute'))
             if args.khdn_precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
                 if model is None or not batches or not source_binding:
                     raise AssertionError('KHDN update missing positive model/batch/source contracts')
@@ -1311,7 +1320,8 @@ def khdn_model_oracle_precision():
 def khdn_model_oracle_gate(args, name, benchmark):
     """Use identical g32 KHDN models and the explicit dense Oracle, including learned-curvature gradients."""
     gate_args = copy.copy(args)
-    gate_args.group_size, gate_args.learnable_curvature = 32, True
+    gate_args.group_size = 32
+    gate_args.learnable_curvature = getattr(args, 'khdn_source_vjp', 'expanded') == 'expanded'
     gate_args.batch, gate_args.seq_len, gate_args.vocab_size = 2, 2 * args.chunk_size + 1, 97
     gate_args.head_dim = benchmark.model_configuration(gate_args, name, small=True)['head_dim']
     result = {}
@@ -1341,13 +1351,14 @@ def khdn_model_oracle_gate(args, name, benchmark):
             del model
         parity = (benchmark.compare_bf16_model_results(*outputs) if args.khdn_precision_policy in ('bf16', 'bf16_selective')
                   else benchmark.compare_model_results(*outputs))
-        required = ('f_proj.0.weight', 'f_proj.1.weight', 'A_log', 'dt_bias', 'curvature_raw')
+        required = ('f_proj.0.weight', 'f_proj.1.weight', 'A_log', 'dt_bias') + (
+            ('curvature_raw',) if gate_args.learnable_curvature else ())
         for suffix in required:
             if not any(key.endswith(suffix) for key in outputs[0]['gradients']):
                 raise AssertionError(f'KHDN Oracle gate did not exercise parameter gradient {suffix}')
         result[layout]['parity'] = parity
     source_gate = khdn_operator_gate(gate_args, name, khdn_operator_sources(gate_args, 2 * args.chunk_size + 1))
-    return {'cases': result, 'source_vjp_gate': source_gate, 'scope': 'same FP32 parameters/public autocast, g32, learned positive curvature, '
+    return {'cases': result, 'source_vjp_gate': source_gate, 'scope': 'same FP32 parameters/public autocast, g32, positive curvature (learned only on expanded source graph), '
             'identical weights and outer checkpoint; explicit naive dense-solve Oracle only in this untimed small gate',
             'dense_fp64_truth_scope': 'independent operator and model Oracle; model reference internally promotes prepared '
             'sources differentiably to FP64 and restores public output/state dtypes; outer autocast and parameters unchanged'}
@@ -1395,7 +1406,8 @@ def khdn_operator_sources(args, length):
 def khdn_operator_call(entry, sources, args, name, *, oracle=False):
     options = {} if oracle else {'chunk_size': args.chunk_size,
                                  'carry_mode': 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
-                                 'precision_policy': args.khdn_precision_policy or 'strict'}
+                                 'precision_policy': args.khdn_precision_policy or 'strict',
+                                 'source_vjp': getattr(args, 'khdn_source_vjp', 'expanded')}
     return entry(*sources[:5], curvature=sources[6], initial_state=sources[5], output_final_state=True,
                  group_size=args.group_size, check_inputs=True, **options)
 
@@ -1403,25 +1415,27 @@ def khdn_operator_call(entry, sources, args, name, *, oracle=False):
 def khdn_operator_gate(args, name, sources):
     """Compare unrounded dense FP64 truth to the public FP32 route with the frozen operator budgets."""
     import fla.ops.key_gated_hyperbolic_delta_rule as ops
-    actual_sources = tuple(value.detach().clone().requires_grad_() for value in sources)
+    source_vjp = getattr(args, 'khdn_source_vjp', 'expanded')
+    target_count = 7 if source_vjp == 'expanded' else 6
+    actual_sources = tuple(value.detach().clone().requires_grad_(i < target_count) for i, value in enumerate(sources))
     truth_sources = tuple(value.detach().double().requires_grad_() for value in sources)
     oracle_checkpoint = verify_checkpointed_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, sources, args, name)
     truth = checkpointed_dense_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, truth_sources, args, name)
     guard = KHDNExceptionGuard(args.khdn_precision_policy) if args.khdn_precision_policy in (
         'bf16_fs6', 'bf16', 'bf16_selective') else contextlib.nullcontext()
     with guard, KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
-                          precision_policy=args.khdn_precision_policy or 'strict') as trace:
+                          precision_policy=args.khdn_precision_policy or 'strict', source_vjp=source_vjp) as trace:
         actual = khdn_operator_call(ops.chunk_key_gated_hyperbolic_delta_rule, actual_sources, args, name)
         cotangents = tuple(torch.cos(torch.arange(value.numel(), device=value.device)).reshape(value.shape).to(value)
                            for value in actual)
-        actual_grads = torch.autograd.grad(actual, actual_sources, cotangents)
+        actual_grads = torch.autograd.grad(actual, actual_sources[:target_count], cotangents)
     try:
-        truth_grads = torch.autograd.grad(truth, truth_sources, tuple(value.double() for value in cotangents))
+        truth_grads = torch.autograd.grad(truth, truth_sources[:target_count], tuple(value.double() for value in cotangents))
         errors = {}
         bf16_policy = args.khdn_precision_policy in ('bf16', 'bf16_selective')
         for category, values, references, names, budget in (
             ('forward', actual, truth, ('output', 'state'), (.002, .02, .01) if bf16_policy else (2e-5, 2e-4, 1e-4)),
-            ('backward', actual_grads, truth_grads, ('q', 'k', 'v', 'beta', 'log_decay', 'S0', 'curvature'),
+            ('backward', actual_grads, truth_grads, ('q', 'k', 'v', 'beta', 'log_decay', 'S0', 'curvature')[:target_count],
              (.005, .03, .015) if bf16_policy else (5e-5, 5e-4, 2e-4)),
         ):
             for key, value, reference in zip(names, values, references):
@@ -1447,6 +1461,7 @@ def khdn_operator_gate(args, name, sources):
         error.khdn_evidence = trace.calls
         raise
     return {'route': trace.attest(), 'errors_against_dense_fp64_truth': errors,
+            'requested_gradient_sources': ['q', 'k', 'v', 'beta', 'log_decay', 'S0', 'curvature'][:target_count],
             'independent_oracle_checkpoint_verification': oracle_checkpoint,
             'scope': 'same rounded FP32 sources promoted to dense FP64 truth; exceptional high-precision routes excluded'}
 

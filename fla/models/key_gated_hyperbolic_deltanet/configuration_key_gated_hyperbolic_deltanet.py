@@ -66,6 +66,7 @@ class KeyGatedHyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
         precision_policy: str = 'strict',
+        source_vjp: str = 'expanded',
         **kwargs,
     ):
         identity = kwargs.pop('model_type', self.model_type)
@@ -98,6 +99,13 @@ class KeyGatedHyperbolicDeltaNetConfig(AttentionConfigBase, PretrainedConfig):
         if precision_policy == 'bf16_selective' and (attn_mode != 'chunk' or head_dim != 128
                                                      or head_v_dim != 128 or group_size != 32 or carry_mode != 'no_carry'):
             raise ValueError('bf16_selective requires chunk mode, K=V128, g32 and no_carry.')
+        if source_vjp not in ('expanded', 'coupled', 'coupled_state', 'coupled_fused'):
+            raise ValueError('Unknown KHDN source_vjp.')
+        if source_vjp != 'expanded' and (precision_policy != 'bf16_selective' or attn_mode != 'chunk'
+                                         or chunk_size != 64 or learnable_curvature):
+            raise ValueError('Coupled source_vjp requires fixed-curvature bf16_selective C64 chunk mode.')
+        if source_vjp != 'expanded':
+            self.source_vjp = source_vjp
         self.precision_policy = precision_policy
         if carry_mode not in ('no_carry', 'y_carry'):
             raise ValueError('carry_mode must be no_carry or y_carry.')

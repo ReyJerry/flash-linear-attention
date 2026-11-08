@@ -152,8 +152,6 @@ def test_selective_public_policy_source_vjp(chunk_size, packed, dtype):
 ])
 @pytest.mark.usefixtures('qualified_bf16')
 def test_selective_coupled_source_vjp(case, dtype, packed, source_vjp):
-    from fla.ops.key_gated_hyperbolic_delta_rule import bf16_selective
-
     if case == 'random':
         source, cu = make_case(129, 128, 128, 32, packed=packed, dtype=dtype)
         source = tuple(x.detach().requires_grad_(i < 6) for i, x in enumerate(source))
@@ -185,9 +183,9 @@ def test_selective_coupled_source_vjp(case, dtype, packed, source_vjp):
     reference_gradients = torch.autograd.grad(expected, reference[:6], tuple(x.double() for x in cot))
     info = {}
     with NoFP64():
-        actual = bf16_selective.chunk_bf16(
+        actual = ops.chunk_key_gated_hyperbolic_delta_rule(
             *source[:5], curvature=source[6], initial_state=source[5], cu_seqlens=cu,
-            output_final_state=True, chunk_size=64, source_vjp=source_vjp, telemetry=info,
+            output_final_state=True, chunk_size=64, source_vjp=source_vjp, telemetry=info, precision_policy='bf16_selective',
         )
         gradients = torch.autograd.grad(actual, source[:6], cot, retain_graph=True)
         repeated = torch.autograd.grad(actual, source[:6], cot)

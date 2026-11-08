@@ -109,4 +109,4 @@ production recommendation.
 
 ## Coupled source VJP research
 
-The internal selective implementation has optional fixed-curvature C64 coupled source and state adjoints. The public operator/Layer/CLI retain their existing source graph. See the [coupled VJP equations, bounded checks and complete-step results](../../../docs/experiments/khdn_coupled_vjp_2026_11_09/README.md). No default switch or training-throughput gain is certified by this research entry.
+The public operator, Layer/config and native CLI accept optional fixed-curvature C64 coupled source and state adjoints through `source_vjp`. The default remains `expanded`. The [native interface and validation record](../../../docs/experiments/khdn_coupled_vjp_2026_11_09/NATIVE.md) describes the supported selections and checkpoint policy. See the [coupled VJP equations, bounded checks and complete-step results](../../../docs/experiments/khdn_coupled_vjp_2026_11_09/README.md). No default switch or training-throughput gain is certified by this research entry.

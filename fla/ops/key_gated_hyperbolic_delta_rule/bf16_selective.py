@@ -429,6 +429,6 @@ def chunk_bf16(q, k, v, beta, log_decay, curvature=1., initial_state=None, outpu
                 'y_carry', arithmetic=arithmetic, coupled=source_vjp != 'expanded', coupled_state=source_vjp in ('coupled_state', 'coupled_fused'), source_owner=source_vjp == 'coupled_fused', source_vjp=source_vjp, aliases=[a for a in aliases.values() if len(a) > 1])
     if telemetry is not None:
         telemetry.update(source_alias_groups=opts['aliases'], precision_requested='bf16_selective',
-                         readout_compensated=c.requires_grad)
+                         readout_compensated=c.requires_grad, source_vjp=source_vjp)
     output, final = _ChunkBF16.apply(*(x.contiguous() for x in sources), opts, telemetry)
     return output, final if output_final_state else None

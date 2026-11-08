@@ -50,6 +50,63 @@ def test_selective_cli_explicitly_selects_its_chunk_without_mutating_arguments(c
     assert benchmark.model_configuration(args, 'khdn_naive', small=True)['precision_policy'] == 'strict'
 
 
+@pytest.mark.parametrize('source_vjp', ['coupled', 'coupled_state', 'coupled_fused'])
+def test_coupled_cli_keeps_fixed_curvature_and_independent_oracle(source_vjp):
+    args = benchmark.parse_arguments(FLAGS + [
+        '--khdn-precision-policy', 'bf16_selective', '--chunk-size', '64', '--khdn-source-vjp', source_vjp,
+        '--linear-checkpoint-policy', 'save_mm',
+    ])
+    actual = benchmark.model_configuration(args, 'khdn_no_carry', small=True)
+    oracle = benchmark.model_configuration(args, 'khdn_naive', small=True)
+    assert actual['source_vjp'] == source_vjp and not actual['learnable_curvature']
+    contract = training.checkpoint_contract(args, 'khdn_no_carry', 1)
+    assert contract['linear_checkpoint_policy'] == 'save_mm'
+    assert contract['config']['source_vjp'] == source_vjp
+    assert 'source_vjp' not in oracle and oracle['precision_policy'] == 'strict'
+    assert not oracle['learnable_curvature'] and args.linear_checkpoint_policy == 'save_mm'
+
+
+@pytest.mark.parametrize('extra', [
+    ['--chunk-size', '16'], ['--chunk-size', '32'], ['--chunk-size', '128'],
+    ['--learnable-curvature'], ['--khdn-precision-policy', 'bf16'],
+    ['--linear-checkpoint-policy', 'save_mm', '--no-layer-checkpoint'],
+])
+def test_coupled_cli_rejects_incompatible_routes(extra):
+    with pytest.raises(SystemExit):
+        benchmark.parse_arguments(FLAGS + [
+            '--khdn-precision-policy', 'bf16_selective', '--chunk-size', '64',
+            '--khdn-source-vjp', 'coupled_fused', *extra,
+        ])
+
+
+def test_linear_checkpoint_context_preserves_values_and_rejects_policy_substitution():
+    from functools import partial
+
+    from torch.utils.checkpoint import checkpoint
+
+    from benchmarks.linear_checkpoint import attest_policy, context_fn
+
+    torch.manual_seed(42)
+    inputs = tuple(x.requires_grad_() for x in (torch.randn(33, 16), torch.randn(16, 24), torch.randn(24, 16)))
+    results = []
+    for selected in (False, True):
+        kwargs = dict(use_reentrant=False)
+        if selected:
+            kwargs['context_fn'] = context_fn
+        value = checkpoint(lambda x, w, z: torch.sigmoid(x @ w) @ z, *inputs, **kwargs)
+        results.append((value, *torch.autograd.grad(value.sum(), inputs)))
+    assert all(torch.equal(a, b) for a, b in zip(*results))
+    module = torch.nn.Linear(16, 24)
+    module.gradient_checkpointing = True
+    module._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False, context_fn=context_fn)
+    assert attest_policy(copy.deepcopy(module), 'save_mm')['checkpoint_layers'] == 1
+    with pytest.raises(AssertionError):
+        attest_policy(module, 'recompute')
+    module._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+    with pytest.raises(AssertionError):
+        attest_policy(module, 'save_mm')
+
+
 @pytest.mark.parametrize('extra', [
     ['--optimizer-backend', 'native'], ['--dtype', 'fp32'], ['--group-size', '16'],
     ['--no-short-conv'], ['--head-dim', '64', '--hidden-size', '1024'],
@@ -144,12 +201,17 @@ def test_bf16_tensor_guard_rejects_inputs_and_results():
     assert torch.ones(1, dtype=torch.float64).dtype == torch.float64
 
 
-@pytest.mark.parametrize('precision_policy,chunk_size', [
-    ('bf16', 16), ('bf16', 128),
-    ('bf16_selective', 16), ('bf16_selective', 32), ('bf16_selective', 64), ('bf16_selective', 128),
+@pytest.mark.parametrize('precision_policy,chunk_size,source_vjp,checkpoint,linear_policy', [
+    *((policy, size, 'expanded', checkpoint, 'recompute')
+      for policy, size in [('bf16', 16), ('bf16', 128), ('bf16_selective', 16),
+                           ('bf16_selective', 32), ('bf16_selective', 64), ('bf16_selective', 128)]
+      for checkpoint in (False, True)),
+    *(('bf16_selective', 64, source, checkpoint, 'recompute')
+      for source in ('coupled', 'coupled_state', 'coupled_fused') for checkpoint in (False, True)),
+    ('bf16_selective', 64, 'coupled_fused', True, 'save_mm'),
 ])
-@pytest.mark.parametrize('checkpoint', [False, True])
-def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, chunk_size, monkeypatch, precision_policy):
+def test_bf16_native_model_trace_and_serialized_rejection(
+        tmp_path, checkpoint, chunk_size, monkeypatch, precision_policy, source_vjp, linear_policy):
     pytest.importorskip('triton')
     from benchmarks.fp32_adamw import FP32AdamW
     from fla.models import KeyGatedHyperbolicDeltaNetConfig, KeyGatedHyperbolicDeltaNetForCausalLM
@@ -169,16 +231,20 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
     torch.manual_seed(42)
     config = KeyGatedHyperbolicDeltaNetConfig(
         hidden_size=256, head_dim=128, num_heads=2, num_hidden_layers=2, intermediate_size=512,
-        vocab_size=97, group_size=32, chunk_size=chunk_size, curvature=.6, learnable_curvature=True,
-        precision_policy=precision_policy, use_short_conv=True, fuse_norm=False, fuse_swiglu=False,
+        vocab_size=97, group_size=32, chunk_size=chunk_size, curvature=.6, learnable_curvature=source_vjp == 'expanded',
+        source_vjp=source_vjp, precision_policy=precision_policy, use_short_conv=True, fuse_norm=False, fuse_swiglu=False,
         fuse_cross_entropy=False, use_cache=False,
     )
     model = KeyGatedHyperbolicDeltaNetForCausalLM(config).to(device).train()
     if checkpoint:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+        options = {'use_reentrant': False}
+        if linear_policy == 'save_mm':
+            from benchmarks.linear_checkpoint import context_fn
+            options['context_fn'] = context_fn
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=options)
     ids = torch.randint(1, 97, (2, chunk_size + 1), device=device)
     original_forward = vars(bf16._ChunkBF16)['forward']
-    trace = utils.KHDNTrace(chunk_size, 32, 'no_carry', 2, precision_policy).bind_model(model)
+    trace = utils.KHDNTrace(chunk_size, 32, 'no_carry', 2, precision_policy, source_vjp).bind_model(model)
     trace.expected_checkpoint = checkpoint
     with utils.KHDNExceptionGuard(precision_policy) as guard, trace:
         with torch.autocast('cuda', dtype=torch.bfloat16):
@@ -216,9 +282,18 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
     if precision_policy == 'bf16_selective':
         mutations.extend((
             lambda row: next(x for x in row['launches'] if x['kernel'] == 'output_fwd_kernel')[
-                'arguments'].update(NEED_DC=False),
-            lambda row: row['telemetry'].update(readout_compensated=False),
-            lambda row: row['source_requires_grad'].__setitem__(6, False),
+                'arguments'].update(NEED_DC=source_vjp != 'expanded'),
+            lambda row: row['telemetry'].update(readout_compensated=source_vjp != 'expanded'),
+            lambda row: row['source_requires_grad'].__setitem__(6, source_vjp != 'expanded'),
+        ))
+    if source_vjp != 'expanded':
+        mutations.extend((
+            lambda row: row['requested'].update(source_vjp='expanded'),
+            lambda row: row['executed_options'].update(source_vjp='expanded'),
+            lambda row: next(x for x in row['launches'] if x['kernel'] == 'parameter_bwd_kernel')[
+                'arguments'].update(COUPLED=False),
+            lambda row: next(x for x in row['launches'] if x['kernel'] == 'coupled_residual_bwd')[
+                'arguments'].update(PI_READY=source_vjp == 'coupled'),
         ))
     for mutate in mutations:
         altered = copy.deepcopy(result)
@@ -228,7 +303,8 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
             utils.reparse_khdn_trace(altered, expected_source_binding=binding)
     batch = training.Batch(dict(input_ids=ids, labels=ids), 2*chunk_size, ids.numel(), ids.numel(), 0,
                            training.batch_digest(dict(input_ids=ids, labels=ids)))
-    args = SimpleNamespace(khdn_precision_policy=precision_policy, no_layer_checkpoint=not checkpoint, dtype='bf16')
+    args = SimpleNamespace(khdn_precision_policy=precision_policy, khdn_source_vjp=source_vjp,
+                           no_layer_checkpoint=not checkpoint, dtype='bf16', linear_checkpoint_policy=linear_policy)
     optimizer = FP32AdamW(model.parameters(), lr=1e-4)
     records = []
     optimizer.zero_grad(set_to_none=True)
@@ -237,7 +313,12 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
         training.weighted_loss(model, batch, args, batch.valid_labels, 1).backward()
     assert records[-1]['positive_observation']['attested_before_optimizer_step']
     optimizer.step()
-    for corruption in ('policy', 'batch_identity', 'missing_layer'):
+    corruptions = ('policy', 'batch_identity', 'missing_layer')
+    if source_vjp != 'expanded':
+        corruptions += ('source_vjp',)
+    if linear_policy == 'save_mm':
+        corruptions += ('checkpoint_policy',)
+    for corruption in corruptions:
         before = {name: value.detach().clone() for name, value in model.named_parameters()}
         optimizer_before = training.state_digest(optimizer.state_dict())
         optimizer.zero_grad(set_to_none=True)
@@ -248,6 +329,14 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
             elif corruption == 'batch_identity':
                 supplied = copy.copy(batch)
                 supplied.inputs = {key: value.clone() for key, value in batch.inputs.items()}
+            elif corruption == 'source_vjp':
+                patch.setattr(model.model.layers[0].attn, 'source_vjp', 'expanded')
+            elif corruption == 'checkpoint_policy':
+                from functools import partial
+
+                from torch.utils.checkpoint import checkpoint as checkpoint_fn
+                patch.setattr(model.model.layers[0], '_gradient_checkpointing_func',
+                              partial(checkpoint_fn, use_reentrant=False))
             else:
                 patch.setattr(model.model.layers[0].attn, 'forward',
                               lambda hidden_states, *args, **kwargs: (hidden_states, None, kwargs.get('past_key_values')))

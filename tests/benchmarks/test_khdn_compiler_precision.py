@@ -129,6 +129,29 @@ def test_selective_compiler_contract_keeps_forward_and_adjoint_products_distinct
         attest_compiled_policy(wrong, 'bf16_selective')
 
 
+@pytest.mark.parametrize('name,flags,count', [
+    ('state_bwd_kernel', {'COUPLED_STATE': True}, 15),
+    ('parameter_bwd_kernel', {'COUPLED': True}, 0),
+    ('common_lower_bwd', {'COUPLED': True}, 0),
+    ('coupled_residual_bwd', {'PI_READY': False}, 6),
+    ('coupled_residual_bwd', {'PI_READY': True}, 3),
+    ('coupled_sources_bwd', {'MODE': 0}, 3),
+    ('coupled_interval_sources_bwd', {}, 24),
+    ('coupled_interval_gate_bwd', {}, 0),
+    ('coupled_gamma_sources_bwd', {}, 0),
+])
+def test_coupled_compiler_contract_rejects_product_substitution(name, flags, count):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+
+    launch = bf16_launch(name=name, count=count)
+    launch['arguments'].update(C=64, **flags)
+    attest_compiled_policy(launch, 'bf16_selective')
+    wrong = bf16_launch(name=name, count=count + 3)
+    wrong['arguments'].update(C=64, **flags)
+    with pytest.raises(AssertionError, match='dot count'):
+        attest_compiled_policy(wrong, 'bf16_selective')
+
+
 @pytest.mark.parametrize('chunk,needs_curvature,single,count', [
     (32, True, True, 2), (64, False, True, 2), (64, True, False, 6), (128, False, False, 6),
 ])

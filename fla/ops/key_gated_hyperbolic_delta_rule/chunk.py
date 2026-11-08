@@ -40,7 +40,7 @@ def _reset_telemetry(telemetry, requested):
         'backward_adjoint_profile', 'backward_adjoint_limit',
         'backward_output_cotangent_max', 'backward_state_cotangent_max',
         'backward_adjoint_chunks', 'backward_adjoint_sum', 'backward_adjoint_load',
-        'source_alias_groups', 'source_gradient_aggregation',
+        'source_alias_groups', 'source_gradient_aggregation', 'source_vjp',
         'native_kernel_calls', 'working_dtype', 'host_fallback',
     ):
         telemetry.pop(key, None)
@@ -434,6 +434,7 @@ def chunk_key_gated_hyperbolic_delta_rule(
     carry_mode: str = 'no_carry',
     telemetry: dict | None = None,
     precision_policy: str = 'strict',
+    source_vjp: str = 'expanded',
 ):
     """Evaluate the explicitly selected KHDN arithmetic policy.
 
@@ -443,6 +444,10 @@ def chunk_key_gated_hyperbolic_delta_rule(
     Telemetry describes the latest call; use a separate dictionary for each live autograd graph.
     """
     _reset_telemetry(telemetry, precision_policy)
+    if source_vjp not in ('expanded', 'coupled', 'coupled_state', 'coupled_fused'):
+        raise ValueError('Unknown KHDN source_vjp.')
+    if source_vjp != 'expanded' and precision_policy != 'bf16_selective':
+        raise ValueError('Coupled source_vjp requires precision_policy=bf16_selective.')
     if precision_policy in ('bf16', 'bf16_selective'):
         if precision_policy == 'bf16_selective':
             from fla.ops.key_gated_hyperbolic_delta_rule.bf16_selective import chunk_bf16
@@ -450,11 +455,12 @@ def chunk_key_gated_hyperbolic_delta_rule(
             from fla.ops.key_gated_hyperbolic_delta_rule.chunk128 import chunk_bf16
         else:
             from fla.ops.key_gated_hyperbolic_delta_rule.bf16 import chunk_bf16
+        source_options = {'source_vjp': source_vjp} if precision_policy == 'bf16_selective' else {}
         return chunk_bf16(
             q=q, k=k, v=v, beta=beta, log_decay=log_decay, curvature=curvature,
             initial_state=initial_state, output_final_state=output_final_state, scale=scale,
             cu_seqlens=cu_seqlens, group_size=group_size, chunk_size=chunk_size,
-            carry_mode=carry_mode, telemetry=telemetry,
+            carry_mode=carry_mode, telemetry=telemetry, **source_options,
         )
     bounds, scale = _validate(q, k, v, beta, log_decay, curvature, initial_state, scale, cu_seqlens, group_size, False)
     if not q.is_cuda:

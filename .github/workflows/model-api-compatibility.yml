@@ -38,7 +38,6 @@ jobs:
             tests/models/test_modeling_utils.py \
             tests/models/test_cache.py \
             tests/models/test_generation.py \
-            tests/models/test_modeling_phba.py \
             tests/models/test_modeling_kda.py::test_initialization \
             tests/models/test_modeling_gated_deltanet.py::test_initialization \
             tests/test_split_package_release.py

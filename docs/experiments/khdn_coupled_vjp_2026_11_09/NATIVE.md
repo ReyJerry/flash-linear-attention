@@ -15,8 +15,11 @@ Pinned H20/Torch2.9.0+cu128/Triton3.5.0 with compiler SHA `1f48e0f0f7fb841418645
 - 19 actual model trace cases pass across legacy/selective C16/32/64/128, coupled selections, checkpointing and mm-save. They perform real optimizer updates and reject corrupted source choices, precision, ownership, metadata, batch/model identity and checkpoint contexts before updates.
 - The raw compiled assembly and stage plans of all19 traces, plus19 update-guard records, were independently reread/reparsed on CPU. Kernel and helper hashes were also checked against actual frozen source files. Expanded arithmetic counts are retained; new coupled contractions get their own exact contracts.
 - The native check-only CLI passes41 parameter-gradient/update comparisons with serial accumulation and same-process fresh-model recovery. The16-microbatch fixture includes unequal label counts and a zero-label last microbatch. It also compares the fixed-curvature model and six requested operator sources with independent untimed dense truth. Expanded selection separately retains learned-curvature/seven-source coverage.
+- A current public-source full24 B8×T2048 initial-gradient screen captures all459 parameter tensors against frozen strict truth. The coupled C64 candidate has gradient cosine `0.9924001`, norm ratio `0.9996324`, relative L2 `0.1232652`, and15,321 coordinates beyond the older elementwise BF16 diagnostic. It performs zero optimizer updates; this is an initial-gradient gate, not continuous training quality.
 
 These are bounded integration checks, not final24-layer quality, formal throughput, cross-process recovery or distributed acceptance. The earlier1900ms research measurement predates this public integration and does not qualify its final source identity. Current inference cache/packed numerical repair remains a separate experiment.
+
+The private inference repair passes the original eight protected cache/packed/restore checks after three BF16 products with FP32 intermediates and final BF16 logits. A same-H20 full24 B1×T2048 latency screen shows the cost: baseline prefill/decode `282.30/1845.09 ms`, fused repair `443.72/2120.45 ms`. It remains a diagnostic and is excluded from the public implementation. Training arithmetic and model defaults are unchanged.
 
 ## Reproduction
 

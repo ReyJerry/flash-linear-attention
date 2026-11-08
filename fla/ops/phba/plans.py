@@ -81,9 +81,7 @@ def owner_tape_producer_stages(plan: OwnerTapePlan, bc: int) -> int:
     if (
         len(entries) != 3
         or set(stages) != {16, 32, 64}
-        or any(
-            (type(value) is not int or value not in (1, 2) for value in stages.values()),
-        )
+        or any(type(value) is not int or value not in (1, 2) for value in stages.values())
     ):
         raise fail("invalid_config", "unsupported frozen owner producer stage mapping")
     return stages[bc]

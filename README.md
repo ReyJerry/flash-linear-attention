@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-11] 🧩 Add [PHBA](fla/models/phba) (Prefix-State Hybrid Block Attention) to `fla` ([paper](https://arxiv.org/abs/2610.08527)).
 - [2026-11] 🔀 Add [dynamic short convolution](fla/modules/dynamic_conv) to `fla` ([paper](https://arxiv.org/abs/2606.03825)).
 - [2026-11] 🧱 Add [HC, mHC, and iHC](fla/ops/hc) implementations to `fla` ([paper](https://arxiv.org/abs/2409.19606)).
 - [2026-10] 🧠 Add Gated Slot Attention 2 (GSA2) implementation to `fla` ([paper](https://arxiv.org/abs/2610.02816)).

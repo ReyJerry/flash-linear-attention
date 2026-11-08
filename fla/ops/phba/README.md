@@ -103,10 +103,6 @@ FLA_CI_ENV=0 pytest tests/ops/test_phba.py tests/models/test_modeling_phba.py \
   tests/layers/test_phba_linear.py
 
 python -m benchmarks.ops.run --op chunk_phba --no-base
-
-python benchmarks/benchmark_phba.py --chunk-size 128 --topk 8 \
-  --warmup-steps 20 --steps 50 --optimizer torch.optim:AdamW \
-  --output phba-throughput.json
 ```
 
-The standard operator benchmark includes dense and packed shapes. The model benchmark measures complete training-compute steps with 1.264B parameters, B1 x 8192, FP32 parameters, BF16 autocast and lr=0. Timing includes zero-grad, forward/loss, backward, clipping and optimizer updates. Add `--lengths 2048,3072,3072` for packed inputs. Benchmark results and validation details are recorded in the PR description.
+The standard operator benchmark includes dense and packed shapes. Complete-step throughput and peak-memory results are recorded in the PR description.

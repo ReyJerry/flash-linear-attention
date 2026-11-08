@@ -80,6 +80,41 @@ def compare_bf16(actual, expected, backward=False):
         assert (a-b).square().mean().sqrt() <= rms * b.square().mean().sqrt().clamp_min(atol)
 
 
+@pytest.mark.parametrize('packed', [False, True])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_c128_interval_preparation_tail_sources(packed):
+    torch.manual_seed(702 + int(packed))
+    chunk, length = 128, 257
+    shape = (1, length, 1, 128)
+    q = torch.nn.functional.normalize(torch.randn(shape), dim=-1)
+    k = torch.nn.functional.normalize(torch.randn(shape), dim=-1)
+    v = .025 * torch.randn(shape)
+    beta = torch.sigmoid(torch.randn(1, length, 1))
+    beta[:, 0], beta[:, 1] = 0, 1
+    ell = -.02 - .08 * torch.rand(shape)
+    bounds = torch.tensor([0, 0, chunk+1, length, length], dtype=torch.int64) if packed else None
+    state = .001 * torch.randn(4 if packed else 1, 1, 128, 128)
+    curvature = torch.tensor(.5)
+    cpu = (q, k, v, beta, ell, state, curvature)
+    reference = tuple(x.double().requires_grad_() for x in cpu)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], initial_state=reference[5], curvature=reference[6], group_size=32,
+        output_final_state=True, cu_seqlens=bounds,
+    )
+    sources = tuple(x.to(device).requires_grad_() for x in cpu)
+    cu = None if bounds is None else bounds.to(device)
+    cot = [.03 * torch.randn(x.shape, device=device, dtype=torch.float32) for x in expected]
+    truth = torch.autograd.grad(expected, reference, [x.cpu().double() for x in cot])
+    with NoFP64():
+        actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+            *sources[:5], initial_state=sources[5], curvature=sources[6], group_size=32,
+            chunk_size=chunk, output_final_state=True, cu_seqlens=cu, precision_policy='bf16',
+        )
+        gradients = torch.autograd.grad(actual, sources, cot)
+    for i, (a, b) in enumerate(zip((*actual, *gradients), (*expected, *truth))):
+        compare_bf16(a.cpu(), b, backward=i >= 2)
+
+
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize('packed', [False, True])
 @pytest.mark.parametrize('chunk,carry,length', [

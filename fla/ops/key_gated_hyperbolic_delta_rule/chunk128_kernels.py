@@ -155,8 +155,6 @@ def common_input_kernel(Q, K0, Beta, Starts, Ends, P,
     decay = tl.load(P[2] + out)
     tl.store(P[0] + out, q)
     tl.store(P[1] + out, k)
-    tl.store(P[3] + out, decay * k)
-    tl.store(P[4] + out, gamma[:, None] * decay * k)
     tl.store(P[6] + out, qr)
     tl.store(P[7] + out, qr * decay)
     tl.store(P[18] + ch * C + i, n)

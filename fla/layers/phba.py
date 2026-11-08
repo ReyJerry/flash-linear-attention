@@ -24,12 +24,20 @@ class PHBALinear(nn.Linear):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         eligible = (
-            not torch.compiler.is_compiling() and type(x) in (torch.Tensor, nn.Parameter)
+            not torch.compiler.is_compiling()
+            and type(x) in (torch.Tensor, nn.Parameter)
             and type(self.weight) in (torch.Tensor, nn.Parameter)
-            and self.bias is None and self.training and torch.is_grad_enabled() and x.is_cuda
-            and torch.is_autocast_enabled('cuda') and torch.get_autocast_dtype('cuda') == torch.bfloat16
-            and x.is_contiguous() and self.weight.is_contiguous()
-            and x.shape[-1] == 2048 and x.numel() == 8192 * 2048 and self.out_features in (2048, 4272)
+            and self.bias is None
+            and self.training
+            and torch.is_grad_enabled()
+            and x.is_cuda
+            and torch.is_autocast_enabled("cuda")
+            and torch.get_autocast_dtype("cuda") == torch.bfloat16
+            and x.is_contiguous()
+            and self.weight.is_contiguous()
+            and x.shape[-1] == 2048
+            and x.numel() == 8192 * 2048
+            and self.out_features in (2048, 4272)
         )
         backend = exact_backend(x.device) if eligible else None
         if backend is None:
@@ -61,13 +69,13 @@ class PHBA(nn.Module):
     ):
         super().__init__()
         if not use_phba:
-            raise ValueError('PHBA requires use_phba=True')
+            raise ValueError("PHBA requires use_phba=True")
         if hidden_size <= 0 or num_heads <= 0 or hidden_size % num_heads or num_kv_heads not in (None, num_heads):
-            raise ValueError('PHBA requires equal query/key/value head counts dividing hidden_size')
+            raise ValueError("PHBA requires equal query/key/value head counts dividing hidden_size")
         if window_size is not None:
-            raise ValueError('PHBA uses causal blocks rather than an additional sliding window')
+            raise ValueError("PHBA uses causal blocks rather than an additional sliding window")
         if not 16 <= hidden_size // num_heads <= 128 or (hidden_size // num_heads) % 8:
-            raise ValueError("PHBA head dimensions must be multiples of8 from16 through128")
+            raise ValueError("PHBA head dimensions must be multiples of 8 from 16 through 128")
         if type(elementwise_affine) is not bool:
             raise ValueError("PHBA elementwise_affine must be bool")
         self.hidden_size = hidden_size
@@ -96,8 +104,8 @@ class PHBA(nn.Module):
             )
             self.o_norm = FusedRMSNormGated(
                 self.head_dim,
-                activation='sigmoid',
-                eps=1e-6,
+                activation="sigmoid",
+                eps=1e-06,
                 elementwise_affine=elementwise_affine,
             )
         else:
@@ -113,27 +121,30 @@ class PHBA(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, None, None]:
         if use_cache or past_key_values is not None:
-            raise ValueError('The deterministic PHBA path supports cache-free training and prefill; set use_cache=False')
+            raise ValueError("The deterministic PHBA path supports cache-free training and prefill; set use_cache=False")
         if output_attentions:
-            raise ValueError('PHBA does not materialize attention weights')
+            raise ValueError("PHBA does not materialize attention weights")
         batch, tokens, _ = hidden_states.shape
-        cu_seqlens = kwargs.get('cu_seqlens')
-        plan = kwargs.get('phba_length_plan')
+        cu_seqlens = kwargs.get("cu_seqlens")
+        plan = kwargs.get("phba_length_plan")
         if attention_mask is not None:
             if attention_mask.ndim != 2 or attention_mask.shape != (batch, tokens):
-                raise ValueError('PHBA attention_mask must be a [B,T] padding mask')
+                raise ValueError("PHBA attention_mask must be a [B,T] padding mask")
             if cu_seqlens is not None:
-                raise ValueError('PHBA padding masks and packed cu_seqlens are mutually exclusive')
+                raise ValueError("PHBA padding masks and packed cu_seqlens are mutually exclusive")
         else:
             plan = _resolve_length_plan(batch, tokens, hidden_states.device, cu_seqlens, plan)
             if (
-                cu_seqlens is not None and not plan._matches_source(cu_seqlens)
-                or cu_seqlens is None and batch == 1 and len(plan.lengths) > 1
+                cu_seqlens is not None
+                and not plan._matches_source(cu_seqlens)
+                or cu_seqlens is None
+                and batch == 1
+                and len(plan.lengths) > 1
             ):
                 cu_seqlens = plan.cu_seqlens
-        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
-        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
-        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        q = rearrange(self.q_proj(hidden_states), "... (h d) -> ... h d", d=self.head_dim)
+        k = rearrange(self.k_proj(hidden_states), "... (h d) -> ... h d", d=self.head_dim)
+        v = rearrange(self.v_proj(hidden_states), "... (h d) -> ... h d", d=self.head_dim)
         q, k = self.q_norm(q), self.k_norm(k)
         q_rope, k_rope = self.rotary(
             q=q,
@@ -154,13 +165,13 @@ class PHBA(nn.Module):
             cu_seqlens = cumulative[0]
             plan = _resolve_length_plan(1, q.shape[0], q.device, cu_seqlens, plan)
         else:
-            q_rope = rearrange(q_rope, 'b t ... -> (b t) ...')
-            k_rope = rearrange(k_rope, 'b t ... -> (b t) ...')
-            v = rearrange(v, 'b t ... -> (b t) ...')
-            q = rearrange(q, 'b t ... -> (b t) ...')
-            k = rearrange(k, 'b t ... -> (b t) ...')
-            flat_hidden = rearrange(hidden_states, 'b t d -> (b t) d')
-        gate = rearrange(self.gsa_gate_proj(flat_hidden), 't (h m) -> t h m', h=self.num_heads, m=self.gsa_num_slots)
+            q_rope = rearrange(q_rope, "b t ... -> (b t) ...")
+            k_rope = rearrange(k_rope, "b t ... -> (b t) ...")
+            v = rearrange(v, "b t ... -> (b t) ...")
+            q = rearrange(q, "b t ... -> (b t) ...")
+            k = rearrange(k, "b t ... -> (b t) ...")
+            flat_hidden = rearrange(hidden_states, "b t d -> (b t) d")
+        gate = rearrange(self.gsa_gate_proj(flat_hidden), "t (h m) -> t h m", h=self.num_heads, m=self.gsa_num_slots)
         output, _ = chunk_phba(
             q=q.unsqueeze(0),
             k=k.unsqueeze(0),
@@ -178,11 +189,11 @@ class PHBA(nn.Module):
         else:
             output = output.reshape(batch, tokens, self.num_heads, self.head_dim)
         if self.use_output_gate:
-            gate = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+            gate = rearrange(self.g_proj(hidden_states), "... (h d) -> ... h d", d=self.head_dim)
             output = self.o_norm(output, gate)
         else:
             output = self.o_norm(output)
-        return self.o_proj(rearrange(output, '... h d -> ... (h d)')), None, None
+        return self.o_proj(rearrange(output, "... h d -> ... (h d)")), None, None
 
 
 PhbaAttention = PHBA

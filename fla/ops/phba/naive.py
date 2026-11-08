@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-'FP64 mathematical, storage-aware and metadata references for PHBA.'
+"FP64 mathematical, storage-aware and metadata references for PHBA."
 
 from __future__ import annotations
 
@@ -209,38 +209,65 @@ class RefJointAttentionFn(torch.autograd.Function):
     """Joint attention reference with storage-dtype inputs/output and FP32 log-normalizers."""
 
     @staticmethod
-    def forward(ctx, q_rope, k_rope, v, q_raw, prefix_k, prefix_v, rtok, rstate, layout: HostLayout, scale: float,
-                local_impl='torch', fa_segment_batch_max=65535, fa_rows_per_call_max=1 << 20, fa_deterministic=False):
-        if local_impl not in ('torch', 'flash_attn'):
-            raise ValueError(f'unknown Reference A local_impl: {local_impl}')
+    def forward(
+        ctx,
+        q_rope,
+        k_rope,
+        v,
+        q_raw,
+        prefix_k,
+        prefix_v,
+        rtok,
+        rstate,
+        layout: HostLayout,
+        scale: float,
+        local_impl="torch",
+        fa_segment_batch_max=65535,
+        fa_rows_per_call_max=1 << 20,
+        fa_deterministic=False,
+    ):
+        if local_impl not in ("torch", "flash_attn"):
+            raise ValueError(f"unknown Reference A local_impl: {local_impl}")
         storage, cd = q_rope.dtype, compute_dtype(q_rope.dtype)
         T, H, D = q_rope.shape
         M = prefix_k.shape[1]
         ctx.local_impl, ctx.fa_deterministic = local_impl, fa_deterministic
         oloc = lloc = None
         extra = []
-        if local_impl == 'flash_attn':
+        if local_impl == "flash_attn":
             from types import SimpleNamespace
 
             from fla.ops.phba.flash_attention import ensure_ready, local_attention
             from fla.ops.phba.plans import _local_fa_batches
 
-            if q_rope.device.type != 'cuda' or storage not in (torch.float16, torch.bfloat16):
-                raise ValueError('FlashAttention Reference A requires CUDA fp16/bf16 inputs')
-            if any(x.device != q_rope.device or x.dtype != storage or x.shape != q_rope.shape
-                   or not x.is_contiguous() or x.data_ptr() % 16 for x in (q_rope, k_rope, v)):
-                raise ValueError('FlashAttention Reference A requires matching aligned contiguous Q/K/V')
+            if q_rope.device.type != "cuda" or storage not in (torch.float16, torch.bfloat16):
+                raise ValueError("FlashAttention Reference A requires CUDA fp16/bf16 inputs")
+            if any(
+                (
+                    x.device != q_rope.device
+                    or x.dtype != storage
+                    or x.shape != q_rope.shape
+                    or (not x.is_contiguous())
+                    or x.data_ptr() % 16
+                    for x in (q_rope, k_rope, v)
+                ),
+            ):
+                raise ValueError("FlashAttention Reference A requires matching aligned contiguous Q/K/V")
             if fa_segment_batch_max < 1 or fa_rows_per_call_max < 1:
-                raise ValueError('FlashAttention batch limits must be positive')
+                raise ValueError("FlashAttention batch limits must be positive")
             ensure_ready(q_rope.device, storage, D)
             block_ptr = torch.tensor(layout.block_ptr, device=q_rope.device, dtype=torch.int32)
-            fa_layout = SimpleNamespace(chunk_size=layout.chunk_size, block_ptr_host=layout.block_ptr,
-                                        block_ptr=block_ptr)
-            ctx.batches = _local_fa_batches(layout.block_ptr, layout.chunk_size,
-                                            fa_segment_batch_max, fa_rows_per_call_max)
-            oloc, lloc = local_attention(q_rope, k_rope, v, fa_layout, scale=scale,
-                                         fa_segment_batch_max=fa_segment_batch_max,
-                                         fa_rows_per_call_max=fa_rows_per_call_max)
+            fa_layout = SimpleNamespace(chunk_size=layout.chunk_size, block_ptr_host=layout.block_ptr, block_ptr=block_ptr)
+            ctx.batches = _local_fa_batches(layout.block_ptr, layout.chunk_size, fa_segment_batch_max, fa_rows_per_call_max)
+            oloc, lloc = local_attention(
+                q_rope,
+                k_rope,
+                v,
+                fa_layout,
+                scale=scale,
+                fa_segment_batch_max=fa_segment_batch_max,
+                fa_rows_per_call_max=fa_rows_per_call_max,
+            )
             extra.append(block_ptr)
         out = torch.empty((T, H, D), dtype=storage, device=q_rope.device)
         lse = torch.empty((H, T), dtype=cd, device=q_rope.device)
@@ -248,9 +275,17 @@ class RefJointAttentionFn(torch.autograd.Function):
             masks = route_masks(rtok, rstate, layout, h, M)
             seed = None if oloc is None else (oloc[:, h].to(cd), lloc[h].to(cd))
             o, l, _ = _joint_forward_head(
-                q_rope[:, h].to(cd), k_rope[:, h].to(cd), v[:, h].to(cd), q_raw[:, h].to(cd),
-                prefix_k[:, :, h].reshape(-1, D).to(cd), prefix_v[:, :, h].reshape(-1, D).to(cd),
-                masks, scale, storage, local_seed=seed)
+                q_rope[:, h].to(cd),
+                k_rope[:, h].to(cd),
+                v[:, h].to(cd),
+                q_raw[:, h].to(cd),
+                prefix_k[:, :, h].reshape(-1, D).to(cd),
+                prefix_v[:, :, h].reshape(-1, D).to(cd),
+                masks,
+                scale,
+                storage,
+                local_seed=seed,
+            )
             out[:, h], lse[h] = o, l
         ctx.layout, ctx.scale = layout, scale
         ctx.save_for_backward(q_rope, k_rope, v, q_raw, prefix_k, prefix_v, rtok, rstate, out, lse, *extra)
@@ -269,11 +304,21 @@ class RefJointAttentionFn(torch.autograd.Function):
         dpv = torch.zeros_like(dpk)
         d_out = d_out.to(storage).contiguous()
         local_grads = None
-        if ctx.local_impl == 'flash_attn':
+        if ctx.local_impl == "flash_attn":
             from fla.ops.phba.flash_attention import local_backward
 
-            local_grads = local_backward(d_out, q_rope, k_rope, v, out, lse, extra[0], ctx.batches,
-                                         deterministic=ctx.fa_deterministic, softmax_scale=scale)
+            local_grads = local_backward(
+                d_out,
+                q_rope,
+                k_rope,
+                v,
+                out,
+                lse,
+                extra[0],
+                ctx.batches,
+                deterministic=ctx.fa_deterministic,
+                softmax_scale=scale,
+            )
         for h in range(H):
             masks = route_masks(rtok, rstate, layout, h, M)
             q, k, vv, qr = (x[:, h].to(cd) for x in (q_rope, k_rope, v, q_raw))
@@ -308,8 +353,14 @@ class RefJointAttentionFn(torch.autograd.Function):
             grads["dqr"][:, h] = dqr
             dpk[:, :, h] = dpk_h.reshape(nc, M, D)
             dpv[:, :, h] = dpv_h.reshape(nc, M, D)
-        result = (grads["dq"].to(storage), grads["dk"].to(storage), grads["dv"].to(storage), grads["dqr"].to(storage),
-                  dpk.to(storage), dpv.to(storage))
+        result = (
+            grads["dq"].to(storage),
+            grads["dk"].to(storage),
+            grads["dv"].to(storage),
+            grads["dqr"].to(storage),
+            dpk.to(storage),
+            dpv.to(storage),
+        )
         return result + (None,) * (len(ctx.needs_input_grad) - len(result))
 
 
@@ -320,10 +371,24 @@ def gate_from_storage(a_storage: torch.Tensor, tau: float, storage: torch.dtype)
     return g_log, (-torch.expm1(g_log)).to(storage)
 
 
-def reference_a_chunkwise(q_raw, q_rope, k_rope, k_raw, v, a_storage, *, tau: float, layout: HostLayout,
-                          rtok: torch.Tensor, rstate: torch.Tensor, scale: float | None = None,
-                          local_impl='torch', fa_segment_batch_max=65535, fa_rows_per_call_max=1 << 20,
-                          fa_deterministic=False):
+def reference_a_chunkwise(
+    q_raw,
+    q_rope,
+    k_rope,
+    k_raw,
+    v,
+    a_storage,
+    *,
+    tau: float,
+    layout: HostLayout,
+    rtok: torch.Tensor,
+    rstate: torch.Tensor,
+    scale: float | None = None,
+    local_impl="torch",
+    fa_segment_batch_max=65535,
+    fa_rows_per_call_max=1 << 20,
+    fa_deterministic=False,
+):
     """Return output, log-normalizers and key/value prefixes using the production storage boundaries.
 
     Autograd combines attention and prefix value gradients in storage dtype, matching the production path.
@@ -332,8 +397,22 @@ def reference_a_chunkwise(q_raw, q_rope, k_rope, k_raw, v, a_storage, *, tau: fl
     scale = 1.0 / math.sqrt(q_rope.shape[-1]) if scale is None else scale
     g_log, s_val = gate_from_storage(a_storage, tau, storage)
     pk, pv = RefChunkwisePrefixFn.apply(s_val, k_raw, v, g_log, layout)
-    out, lse = RefJointAttentionFn.apply(q_rope, k_rope, v, q_raw, pk, pv, rtok, rstate, layout, scale,
-                                         local_impl, fa_segment_batch_max, fa_rows_per_call_max, fa_deterministic)
+    out, lse = RefJointAttentionFn.apply(
+        q_rope,
+        k_rope,
+        v,
+        q_raw,
+        pk,
+        pv,
+        rtok,
+        rstate,
+        layout,
+        scale,
+        local_impl,
+        fa_segment_batch_max,
+        fa_rows_per_call_max,
+        fa_deterministic,
+    )
     return out, lse, pk, pv
 
 
@@ -364,15 +443,27 @@ def prefix_states_recurrent(k_raw, v, g_log, layout: HostLayout):
         for b in layout.blocks_of_sequence(seq):
             pk[b], pv[b] = Sk.permute(1, 0, 2), Sv.permute(1, 0, 2)
             for t in range(layout.block_ptr[b], layout.block_ptr[b + 1]):
-                a_t, i_t = A[t][..., None], I[t][..., None]                     # [H, M, 1]
+                a_t, i_t = A[t][..., None], I[t][..., None]  # [H, M, 1]
                 Sk = a_t * Sk + i_t * k_raw[t][:, None, :]
                 Sv = a_t * Sv + i_t * v[t][:, None, :]
     return torch.stack(pk, 0), torch.stack(pv, 0)
 
 
-def reference_b(q_raw, q_rope, k_rope, k_raw, v, a_storage, *, tau: float, layout: HostLayout,
-                rtok: torch.Tensor, rstate: torch.Tensor, dtype: torch.dtype = torch.float32,
-                scale: float | None = None):
+def reference_b(
+    q_raw,
+    q_rope,
+    k_rope,
+    k_raw,
+    v,
+    a_storage,
+    *,
+    tau: float,
+    layout: HostLayout,
+    rtok: torch.Tensor,
+    rstate: torch.Tensor,
+    dtype: torch.dtype = torch.float32,
+    scale: float | None = None,
+):
     """Return output, log-normalizers and key/value prefixes in the requested dtype, retaining autograd links."""
     with highest_precision():
         q_raw, q_rope, k_rope, k_raw, v, a = (x.to(dtype) for x in (q_raw, q_rope, k_rope, k_raw, v, a_storage))
@@ -397,7 +488,7 @@ def reference_b(q_raw, q_rope, k_rope, k_raw, v, a_storage, *, tau: float, layou
         return torch.stack(outs, 1), torch.stack(lses, 0), pk, pv
 
 
-def naive_phba(q, k, v, q_rope, k_rope, gate, lengths, token_routes, state_routes, chunk_size=128, tau=8.):
+def naive_phba(q, k, v, q_rope, k_rope, gate, lengths, token_routes, state_routes, chunk_size=128, tau=8.0):
     """Differentiable FP64 PHBA formula for frozen routes and small reference cases."""
     shape = q.shape
     heads, width = shape[-2:]
@@ -500,24 +591,24 @@ def route_reference(q_rope, centroids, layout: RoutingLayout, kh: int):
 
 
 __all__ = [
-    'HostLayout',
-    'RefChunkwisePrefixFn',
-    'RefJointAttentionFn',
-    'centroid_reference',
-    'compute_dtype',
-    'gate_from_storage',
-    'highest_precision',
-    'local_cumsum',
-    'metadata_reference',
-    'naive_phba',
-    'prefix_backward_branch',
-    'prefix_forward',
-    'prefix_states_recurrent',
-    'reference_a_chunkwise',
-    'reference_b',
-    'route_masks',
-    'route_reference',
-    'routing_scores',
-    'rstate_from_rtok',
-    'topk_from_scores',
+    "HostLayout",
+    "RefChunkwisePrefixFn",
+    "RefJointAttentionFn",
+    "centroid_reference",
+    "compute_dtype",
+    "gate_from_storage",
+    "highest_precision",
+    "local_cumsum",
+    "metadata_reference",
+    "naive_phba",
+    "prefix_backward_branch",
+    "prefix_forward",
+    "prefix_states_recurrent",
+    "reference_a_chunkwise",
+    "reference_b",
+    "route_masks",
+    "route_reference",
+    "routing_scores",
+    "rstate_from_rtok",
+    "topk_from_scores",
 ]

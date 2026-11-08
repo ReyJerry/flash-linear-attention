@@ -1,5 +1,7 @@
 # PHBA
 
+Implementation of [PHBA: Prefix-State Hybrid Block Attention](https://arxiv.org/abs/2610.08527), by Ruijie Li, Jiaxi Hu, Shiyu Wang and Yuxuan Liang (2026).
+
 PHBA combines causal block routing, local token attention, and gated prefix states. The implementation provides the deterministic block-major training path, canonical metadata, fixed-order gradient accumulation, and bounded temporary workspaces.
 
 ## Installation and model registration

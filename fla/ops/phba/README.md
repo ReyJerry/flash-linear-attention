@@ -1,5 +1,7 @@
 # PHBA operator
 
+See the [paper](https://arxiv.org/abs/2610.08527) and [model guide](../../../docs/phba.md) for the architecture and supported model APIs.
+
 PHBA combines causal local token attention, selected historical token blocks, and gated prefix-state slots in one joint softmax. Routing is discrete and is treated as constant in backward.
 
 For gate logits `a_t` and positive normalizer `tau`, define `g_t = log_sigmoid(a_t) / tau` and `s_t = -expm1(g_t)`. Prefix states follow the recurrence
@@ -22,7 +24,7 @@ The operator returns `(output, final_state)`. When requested, final state is a p
 
 Inputs use `[B, T, H, D]` and gate logits use `[B, T, H, M]`. Packed inputs have `B == 1` and cumulative int32 lengths. A `SequenceLengthPlan` owns immutable geometry tensors and can be shared between layers; it never caches query, key, value or gradient data.
 
-Pointer arithmetic uses int64. Canonical sorting uses int32 keys only when the expert/query key range is safe, with int64 fallback otherwise. Invalid routes and metadata tails are preserved. Forward processing uses bounded query windows; deterministic backward uses the geometry plan saved by forward, with bounded grouped workspaces and a fixed-order fallback. Token metadata always supplies derived state metadata when historical routes exist; the no-history case retains direct state counting.
+Global address offsets are widened to int64 before stride multiplication. Stored metadata remains int32; bounded local loop and tile indices retain int32 arithmetic, with automatic 64-bit fallback for unbounded workspace indices. Canonical sorting uses int32 keys only when the expert/query key range is safe, with int64 fallback otherwise. Invalid routes and metadata tails are preserved. Forward processing uses bounded query windows; deterministic backward uses the geometry plan saved by forward, with bounded grouped workspaces and a fixed-order fallback. Token metadata always supplies derived state metadata when historical routes exist; the no-history case retains direct state counting.
 
 ## Implementation layout
 

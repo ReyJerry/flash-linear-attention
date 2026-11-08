@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-'Immutable sequence layouts and bounded deterministic backward workspaces.'
+"Immutable sequence layouts and bounded deterministic backward workspaces."
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ FA_SEGMENT_BATCH_LIMIT = 65535
 # KPAD_tok <= 16
 MAX_KH = 15
 CHUNKWISE_VALIDATED_C = (32, 64, 128, 256, 512)
-# prefix backward supports state and value widths up to128
+# prefix backward supports state and value widths up to 128
 CHUNKWISE_TRAIN_MAX_M = 128
 CHUNKWISE_TRAIN_MAX_DH = 128
 PREFIX_REVERSE_WORKSPACE_CAP = 256 * 1024**2
@@ -72,65 +72,70 @@ def prefix_backward_plan(nc: int, h: int, m: int, d: int) -> PrefixBackwardPlan:
 def owner_tape_producer_stages(plan: OwnerTapePlan, bc: int) -> int:
     """Read the single-stage wide-tile compatibility choice from the saved forward policy."""
     if bc != plan.geometry[7] or bc not in (16, 32, 64):
-        raise fail('invalid_config', 'owner producer tile differs from forward plan', bc=bc)
+        raise fail("invalid_config", "owner producer tile differs from forward plan", bc=bc)
     try:
-        entries = dict(plan.policy)['producer_stages_by_bc']
+        entries = dict(plan.policy)["producer_stages_by_bc"]
         stages = dict(entries)
     except (KeyError, TypeError, ValueError) as error:
-        raise fail('invalid_config', 'owner producer stage policy is missing or malformed') from error
-    if len(entries) != 3 or set(stages) != {16, 32, 64} or any(
-            type(value) is not int or value not in (1, 2) for value in stages.values()):
-        raise fail('invalid_config', 'unsupported frozen owner producer stage mapping')
+        raise fail("invalid_config", "owner producer stage policy is missing or malformed") from error
+    if (
+        len(entries) != 3
+        or set(stages) != {16, 32, 64}
+        or any(
+            (type(value) is not int or value not in (1, 2) for value in stages.values()),
+        )
+    ):
+        raise fail("invalid_config", "unsupported frozen owner producer stage mapping")
     return stages[bc]
 
 
 def owner_tape_uses_tile_major(plan: OwnerTapePlan, branch: int) -> bool:
     """Keep the high-fanout state consumer on edge-major storage using its saved policy."""
     policy = dict(plan.policy)
-    if branch not in (0, 1) or policy.get('tape_layout') != 'token_tile_state_route_bound_v2':
-        raise fail('invalid_config', 'unsupported frozen owner tape layout')
-    bound = policy.get('state_tile_major_max_routes')
+    if branch not in (0, 1) or policy.get("tape_layout") != "token_tile_state_route_bound_v2":
+        raise fail("invalid_config", "unsupported frozen owner tape layout")
+    bound = policy.get("state_tile_major_max_routes")
     if type(bound) is not int or not 1 <= bound <= MAX_KH + 1:
-        raise fail('invalid_config', 'invalid frozen state tape layout bound')
+        raise fail("invalid_config", "invalid frozen state tape layout bound")
     return branch == 0 or plan.geometry[6] <= bound
 
 
 def owner_branch_tape_policy_signature() -> tuple[tuple[str, Any], ...]:
     return (
-        ('owner_algorithm', 'branch_group_ds_tape_fused_dkv_v3'),
-        ('tape_cap_bytes', OWNER_TAPE_CAP_BYTES),
-        ('tape_layout', 'token_tile_state_route_bound_v2'),
-        ('state_tile_major_max_routes', 8),
-        ('tape_edges', 'dynamic_int64_address_stride'),
-        ('map', 'canonical_lower_bound_v1'),
-        ('offset_scan', 'tile_cumsum_int32_v1'),
-        ('owner_bq', 16),
-        ('count_bt', 128),
-        ('offset_bt', 128),
-        ('map_bt', 256),
-        ('metadata_warps', 4),
-        ('metadata_stages', 1),
-        ('producer_warps', 4),
-        ('producer_stages_by_bc', OWNER_TAPE_PRODUCER_STAGES),
-        ('producer_writes_dk', True),
-        ('dk_order', 'canonical_bq_per_dot_scale_v1'),
-        ('producer_indices', 'capacity_guarded_int32_v1'),
-        ('producer_padding_margin', 'BQ'),
-        ('owner_warps', 4),
-        ('owner_stages', 2),
-        ('branch_group_revision', 1),
-        ('token_group_limit', 8),
-        ('state_group_limit', 16),
-        ('group_candidates', 'powers_of_two_three_full_heads'),
-        ('group_selection', 'minimum_group_count_then_shared_bytes'),
-        ('workspace_reuse', 'per_buffer_maximum_across_branches'),
+        ("owner_algorithm", "branch_group_ds_tape_fused_dkv_v3"),
+        ("tape_cap_bytes", OWNER_TAPE_CAP_BYTES),
+        ("tape_layout", "token_tile_state_route_bound_v2"),
+        ("state_tile_major_max_routes", 8),
+        ("tape_edges", "dynamic_int64_address_stride"),
+        ("map", "canonical_lower_bound_v1"),
+        ("offset_scan", "tile_cumsum_int32_v1"),
+        ("owner_bq", 16),
+        ("count_bt", 128),
+        ("offset_bt", 128),
+        ("map_bt", 256),
+        ("metadata_warps", 4),
+        ("metadata_stages", 1),
+        ("producer_warps", 4),
+        ("producer_stages_by_bc", OWNER_TAPE_PRODUCER_STAGES),
+        ("producer_writes_dk", True),
+        ("dk_order", "canonical_bq_per_dot_scale_v1"),
+        ("producer_indices", "capacity_guarded_int32_v1"),
+        ("producer_padding_margin", "BQ"),
+        ("owner_warps", 4),
+        ("owner_stages", 2),
+        ("branch_group_revision", 1),
+        ("token_group_limit", 8),
+        ("state_group_limit", 16),
+        ("group_candidates", "powers_of_two_three_full_heads"),
+        ("group_selection", "minimum_group_count_then_shared_bytes"),
+        ("workspace_reuse", "per_buffer_maximum_across_branches"),
     )
 
 
 def owner_tape_index32_safe(capacity: int, padded_extent: int, bq: int) -> bool:
     """Include the masked query lanes and final loop increment in the signed-index bound."""
     if capacity < 0 or padded_extent < 1 or bq < 1:
-        raise fail('invalid_config', 'invalid producer index bounds')
+        raise fail("invalid_config", "invalid producer index bounds")
     return capacity <= INT32_MAX - bq and padded_extent <= INT32_MAX
 
 
@@ -187,19 +192,29 @@ def _owner_branch_subplan(geometry, group, branch, policy):
     mapping, count = t * group * width, nc * group
     offsets = count + 1 if group else 0
     size = tape * storage_bytes + (mapping + count + offsets) * 4
-    return OwnerTapePlan(geometry, group, tape, mapping, count, offsets,
-                         width, token_extent, state_extent, size, policy)
+    return OwnerTapePlan(geometry, group, tape, mapping, count, offsets, width, token_extent, state_extent, size, policy)
 
 
-def owner_branch_tape_plan(t: int, h: int, nc: int, c: int, m: int, kh: int, ks: int,
-                           bc: int, storage_bytes: int, *, token_group_limit: int = 8,
-                           state_group_limit: int = 16) -> OwnerBranchTapePlan:
+def owner_branch_tape_plan(
+    t: int,
+    h: int,
+    nc: int,
+    c: int,
+    m: int,
+    kh: int,
+    ks: int,
+    bc: int,
+    storage_bytes: int,
+    *,
+    token_group_limit: int = 8,
+    state_group_limit: int = 16,
+) -> OwnerBranchTapePlan:
     """Freeze independent head groups under the actual shared allocation bound."""
     geometry = (t, h, nc, c, m, kh, ks, bc, storage_bytes)
     if min(h, c, m, bc, storage_bytes) <= 0 or min(t, nc, kh, ks) < 0 or ks > MAX_KH + 1:
-        raise fail('invalid_config', 'invalid branch owner tape geometry', geometry=geometry)
+        raise fail("invalid_config", "invalid branch owner tape geometry", geometry=geometry)
     if not 1 <= token_group_limit <= 8 or not 1 <= state_group_limit <= 16:
-        raise fail('invalid_config', 'owner branch limits exceed the frozen policy')
+        raise fail("invalid_config", "owner branch limits exceed the frozen policy")
     policy = owner_branch_tape_policy_signature()
     empty = tuple(_owner_branch_subplan(geometry, 0, branch, policy) for branch in (0, 1))
     fallback = OwnerBranchTapePlan(geometry, *empty, 0, 0, 0, 0, 0, policy)
@@ -212,8 +227,12 @@ def owner_branch_tape_plan(t: int, h: int, nc: int, c: int, m: int, kh: int, ks:
         for gs in state_groups:
             token = _owner_branch_subplan(geometry, gt, 0, policy)
             state = _owner_branch_subplan(geometry, gs, 1, policy)
-            sizes = tuple(max(getattr(token, key), getattr(state, key))
-                          for key in ('tape_elements', 'map_elements', 'count_elements', 'offset_elements'))
+            sizes = tuple(
+                (
+                    max(getattr(token, key), getattr(state, key))
+                    for key in ("tape_elements", "map_elements", "count_elements", "offset_elements")
+                ),
+            )
             tape, mapping, count, offsets = sizes
             size = tape * storage_bytes + (mapping + count + offsets) * 4
             if size > OWNER_TAPE_CAP_BYTES or mapping > INT32_MAX or count > INT32_MAX - 1:
@@ -248,8 +267,11 @@ def _validate_cu_seqlens_host(cu: Sequence[int]) -> tuple[int, ...]:
         raise fail("invalid_cu_seqlens", f"cu_seqlens_host[0] must be zero, got {values[0]}")
     for i in range(len(values) - 1):
         if values[i + 1] <= values[i]:
-            raise fail("invalid_cu_seqlens", f"cu_seqlens_host must be strictly increasing; empty sequence at index {i}: "
-                       f"{values[i]} -> {values[i + 1]}", index=i)
+            raise fail(
+                "invalid_cu_seqlens",
+                f"cu_seqlens_host must be strictly increasing; empty sequence at index {i}: {values[i]} -> {values[i + 1]}",
+                index=i,
+            )
     _check_int32("T (cu_seqlens[-1])", values[-1])
     return values
 
@@ -260,8 +282,16 @@ class SequenceLengthPlan:
     The plan owns a contiguous int32 cumulative-length tensor; callers must not modify it in place.
     """
 
-    __slots__ = ("_cu_host", "_lengths", "_cu_device", "_block_layouts", "_routing_layouts",
-                 "_source_ref", "_source_version", "__weakref__")
+    __slots__ = (
+        "_cu_host",
+        "_lengths",
+        "_cu_device",
+        "_block_layouts",
+        "_routing_layouts",
+        "_source_ref",
+        "_source_version",
+        "__weakref__",
+    )
 
     def __init__(self, *_args: Any, _token: object = None, **_kwargs: Any) -> None:
         if _token is not _CONSTRUCT_TOKEN:
@@ -366,8 +396,12 @@ class SequenceLengthPlan:
                 chunk_size=c,
                 block_ptr_host=block_ptr,
                 seq_block_ptr_host=seq_block_ptr,
-                **dict(zip(("block_ptr", "seq_block_ptr"),
-                           device_block_ptrs(self._cu_device, c, len(block_ptr) - 1, self._cu_host[-1]))),
+                **dict(
+                    zip(
+                        ("block_ptr", "seq_block_ptr"),
+                        device_block_ptrs(self._cu_device, c, len(block_ptr) - 1, self._cu_host[-1]),
+                    ),
+                ),
             )
             self._block_layouts[c] = layout
         return layout
@@ -388,25 +422,30 @@ def _resolve_length_plan(
     supplied_plan = length_plan is not None
     if cu_seqlens is not None:
         if batch != 1:
-            raise ValueError('Packed PHBA inputs require batch dimension1')
+            raise ValueError("Packed PHBA inputs require batch dimension1")
         _check_cu_seqlens_tensor(cu_seqlens)
         if cu_seqlens.device != device:
-            raise ValueError('PHBA cumulative lengths must be on the input device')
+            raise ValueError("PHBA cumulative lengths must be on the input device")
     if length_plan is None:
         length_plan = (
             SequenceLengthPlan.from_device(cu_seqlens)
-            if cu_seqlens is not None else SequenceLengthPlan.from_host([tokens] * batch, device)
+            if cu_seqlens is not None
+            else SequenceLengthPlan.from_host([tokens] * batch, device)
         )
     elif not isinstance(length_plan, SequenceLengthPlan):
-        raise TypeError('PHBA length_plan must be a SequenceLengthPlan')
+        raise TypeError("PHBA length_plan must be a SequenceLengthPlan")
     if batch * tokens != length_plan.T or length_plan.device != device:
-        raise ValueError('PHBA length plan does not match the input geometry or device')
+        raise ValueError("PHBA length plan does not match the input geometry or device")
     if batch > 1 and length_plan.lengths != (tokens,) * batch:
-        raise ValueError('PHBA length plan must preserve each dense batch boundary')
-    if (supplied_plan and cu_seqlens is not None and cu_seqlens is not length_plan.cu_seqlens
-            and not length_plan._matches_source(cu_seqlens)):
+        raise ValueError("PHBA length plan must preserve each dense batch boundary")
+    if (
+        supplied_plan
+        and cu_seqlens is not None
+        and cu_seqlens is not length_plan.cu_seqlens
+        and not length_plan._matches_source(cu_seqlens)
+    ):
         if not torch.equal(cu_seqlens, length_plan.cu_seqlens):
-            raise ValueError('PHBA length_plan and cu_seqlens have different boundaries')
+            raise ValueError("PHBA length_plan and cu_seqlens have different boundaries")
     return length_plan
 
 

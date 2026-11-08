@@ -13,9 +13,8 @@ from fla.models.configuration_utils import validate_loss_config
 
 
 class PHBAConfig(PreTrainedConfig):
-
-    model_type = 'phba'
-    keys_to_ignore_at_inference = ['past_key_values']
+    model_type = "phba"
+    keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
         self,
@@ -26,7 +25,7 @@ class PHBAConfig(PreTrainedConfig):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: int | None = None,
-        rope_theta: float | None = 10000.,
+        rope_theta: float | None = 10000.0,
         max_position_embeddings: int = 2048,
         hidden_ratio: int | None = 4,
         intermediate_size: int | None = None,
@@ -105,7 +104,7 @@ class PHBAConfig(PreTrainedConfig):
             raise ValueError("PHBA does not implement AttnRes")
 
         if not 16 <= hidden_size // num_heads <= 128 or (hidden_size // num_heads) % 8:
-            raise ValueError("PHBA head dimensions must be multiples of8 from16 through128")
+            raise ValueError("PHBA head dimensions must be multiples of 8 from 16 through 128")
         if moba_chunk_size not in (32, 64, 128, 256, 512) or moba_topk > 16 or gsa_num_slots > 128:
             raise ValueError("PHBA supports chunks32-512, topk1-16 and slots1-128")
         if use_cache:

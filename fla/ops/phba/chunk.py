@@ -38,7 +38,7 @@ def chunk_phba(
     """Compute causal block-routed attention with gated prefix-state compensation.
 
     Routing is nondifferentiable. All six floating inputs support first-order gradients.
-    Head dimensions must be multiples of8 from16 through128; slot counts are1–128.
+    Head dimensions must be multiples of 8 from 16 through 128; slot counts are 1–128.
 
     Args:
         q (torch.Tensor):
@@ -54,9 +54,9 @@ def chunk_phba(
         gate (torch.Tensor):
             Gate logits [B, T, H, M], with the same device and storage dtype as q.
         chunk_size (int, Optional):
-            Block length, one of32,64,128,256,512. Default: 128.
+            Block length, one of 32, 64, 128, 256, 512. Default: 128.
         topk (int, Optional):
-            Number of selected blocks including the current block, from1 through16. Default: 8.
+            Number of selected blocks including the current block, from 1 through 16. Default: 8.
         gate_logit_normalizer (float, Optional):
             Finite positive gate-log normalization factor. Default: 8.0.
         cu_seqlens (torch.Tensor, Optional):
@@ -72,20 +72,20 @@ def chunk_phba(
             Output [B, T, H, D] and optional nondifferentiable FP32 key/value states [Nseq, H, M, D].
     """
     if q.ndim != 4 or any(x.shape != q.shape for x in (k, v, q_rope, k_rope)):
-        raise ValueError('PHBA q, k, v and rotary inputs must have the same [B, T, H, D] shape')
-    if q.device.type != 'cuda' or q.dtype not in (torch.float16, torch.bfloat16):
-        raise ValueError('PHBA requires CUDA FP16 or BF16 storage tensors')
+        raise ValueError("PHBA q, k, v and rotary inputs must have the same [B, T, H, D] shape")
+    if q.device.type != "cuda" or q.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("PHBA requires CUDA FP16 or BF16 storage tensors")
     if any(x.device != q.device or x.dtype != q.dtype for x in (k, v, q_rope, k_rope, gate)):
-        raise ValueError('PHBA floating-point inputs must have the same device and storage dtype')
+        raise ValueError("PHBA floating-point inputs must have the same device and storage dtype")
     batch, tokens, heads, width = q.shape
     if min(batch, tokens, heads) < 1 or not 16 <= width <= 128 or width % 8:
-        raise ValueError('PHBA requires nonempty inputs and head dimensions divisible by8 from16 through128')
+        raise ValueError("PHBA requires nonempty inputs and head dimensions divisible by 8 from 16 through 128")
     if gate.ndim != 4 or gate.shape[:3] != q.shape[:3] or not 1 <= gate.shape[-1] <= 128:
-        raise ValueError('PHBA gate logits must have shape [B, T, H, M], with1 <= M <=128')
+        raise ValueError("PHBA gate logits must have shape [B, T, H, M], with 1 <= M <= 128")
     if chunk_size not in CHUNKWISE_VALIDATED_C or not 1 <= topk <= MAX_KH + 1:
-        raise ValueError('PHBA chunk_size must be32,64,128,256 or512; topk must be between1 and16')
+        raise ValueError("PHBA chunk_size must be 32, 64, 128, 256 or 512; topk must be between 1 and 16")
     if not math.isfinite(gate_logit_normalizer) or gate_logit_normalizer <= 0:
-        raise ValueError('gate_logit_normalizer must be finite and positive')
+        raise ValueError("gate_logit_normalizer must be finite and positive")
     length_plan = _resolve_length_plan(batch, tokens, q.device, cu_seqlens, length_plan)
     ensure_ready(q.device, q.dtype, width)
     q, k, v, q_rope, k_rope = (x.reshape(-1, heads, width) for x in (q, k, v, q_rope, k_rope))

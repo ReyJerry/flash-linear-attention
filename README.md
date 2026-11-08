@@ -129,8 +129,9 @@
 | 2026 | CyFA                          | [CyFA: Linear Sequence Modeling with Relative-Time-Partitioned Memory](https://arxiv.org/abs/2609.36259)                                      | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cyfa)                    |
 | 2026 | Gated Slot Attention 2        | [Gated Slot Attention-2: Two-Sided Associative Memory Correction in Linear Attention](https://arxiv.org/abs/2610.02816)                       | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa2)                    |
 | 2026 | MemoryAttention               | [Memory Attention](https://arxiv.org/abs/2609.28399)                                                                                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/memory_attn)             |
+| 2026 | PHBA                          | [PHBA: Prefix-State Hybrid Block Attention](https://arxiv.org/abs/2610.08527)                                                                | [code](fla/models/phba)                                                                                |
 
-PHBA combines causal block routing with gated prefix states. See the [PHBA guide](docs/phba.md) for installation, supported inputs and training examples.
+PHBA combines block-sparse token retrieval with recurrent prefix states in a joint softmax. Its CUDA implementation provides `PHBAConfig`, `PHBAModel` and `PHBAForCausalLM` for training and cache-free generation. See the [PHBA guide](docs/phba.md) for dependencies, supported inputs and validation scope.
 
 ## Installation
 

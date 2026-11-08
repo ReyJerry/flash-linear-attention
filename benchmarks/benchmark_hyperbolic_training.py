@@ -75,7 +75,7 @@ def parse_arguments(argv=None):
     parser.add_argument('--chunk-size', type=int, choices=(16, 32, 64, 128), default=16)
     parser.add_argument('--khdn-strict', action='store_true',
                         help='opt in to correctness-gated strict FP64 SIMT KHDN; no Tensor Core claim')
-    parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout', 'bf16_fs6', 'bf16'),
+    parser.add_argument('--khdn-precision-policy', choices=('strict', 'mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective'),
                         help='explicit KHDN policy; experimental policies reject fallback/replay')
     parser.add_argument('--operator-sweep', action='store_true',
                         help='bounded KHDN operator-only correctness/profile/timing, separate from model/DDP')
@@ -128,20 +128,22 @@ def parse_arguments(argv=None):
     if args.khdn_strict:
         args.khdn_precision_policy = 'strict'
     if args.optimizer_backend is None:
-        args.optimizer_backend = 'fp32' if args.khdn_precision_policy == 'bf16' else 'native'
-    if args.khdn_precision_policy == 'bf16' and args.optimizer_backend != 'fp32':
+        args.optimizer_backend = 'fp32' if args.khdn_precision_policy in ('bf16', 'bf16_selective') else 'native'
+    if args.khdn_precision_policy in ('bf16', 'bf16_selective') and args.optimizer_backend != 'fp32':
         parser.error('BF16 KHDN training requires the FP32 optimizer backend.')
-    if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6', 'bf16') and 'khdn_naive' in args.methods:
+    if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective') and 'khdn_naive' in args.methods:
         parser.error('khdn_naive always executes strict; experimental policies require a chunk method')
     if args.khdn_precision_policy == 'bf16_fs6' and (
             args.methods != ['khdn_no_carry'] or args.chunk_size != 16 or args.group_size != 32 or args.head_dim != 128
             or args.dtype != 'bf16' or args.loss_backend != 'plain' or args.no_short_conv or args.no_layer_checkpoint):
         parser.error('bf16_fs6 requires khdn_no_carry, C16/K=V128/g32, BF16 autocast, ShortConv, checkpoint and plain CE')
-    if args.khdn_precision_policy == 'bf16':
-        if (args.methods != ['khdn_no_carry'] or args.chunk_size not in (16, 128) or args.group_size != 32 or args.head_dim != 128
+    if args.khdn_precision_policy in ('bf16', 'bf16_selective'):
+        allowed_chunks = (16, 32, 64, 128) if args.khdn_precision_policy == 'bf16_selective' else (16, 128)
+        if (args.methods != ['khdn_no_carry'] or args.chunk_size not in allowed_chunks or args.group_size != 32 or args.head_dim != 128
                 or args.dtype != 'bf16' or args.loss_backend != 'plain' or args.no_short_conv):
-            parser.error('bf16 training harness requires khdn_no_carry, C16 or C128/K=V128/g32, BF16 autocast, ShortConv and plain CE')
-        if args.chunk_size == 16 and not (args.check_only or args.dry_run):
+            parser.error(
+                f'bf16 training harness requires khdn_no_carry, C in {allowed_chunks}/K=V128/g32, BF16 autocast, ShortConv and plain CE')
+        if args.khdn_precision_policy == 'bf16' and args.chunk_size == 16 and not (args.check_only or args.dry_run):
             parser.error('C16 bf16 CLI requires --check-only; use the C128 integrated training route for full runs')
     dimensions = (args.batch, args.layers, args.hidden_size, args.heads, args.intermediate_size)
     if min(dimensions) <= 0 or args.seq_len < 2 or args.vocab_size < 4:
@@ -184,7 +186,7 @@ def parse_arguments(argv=None):
         scaling_plan(args, int(os.environ.get('WORLD_SIZE', '1')))
     except ValueError as error:
         parser.error(str(error))
-    if args.chunk_size == 128 and args.khdn_precision_policy != 'bf16':
+    if args.chunk_size == 128 and args.khdn_precision_policy not in ('bf16', 'bf16_selective'):
         parser.error('C128 requires the explicit BF16 KHDN policy.')
     if args.chunk_size in (64, 128) and any(not name.startswith('khdn_') for name in args.methods):
         parser.error('C64/C128 are supported only for KHDN; legacy HDN benchmark routes remain C16/C32')
@@ -227,13 +229,13 @@ def model_configuration(args, name, *, small=False):
     if name.startswith('khdn_'):
         if small:
             common.update(hidden_size=64, num_heads=2, head_dim=32, intermediate_size=128)
-            if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6', 'bf16'):
+            if args.khdn_precision_policy in ('mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective'):
                 common.update(hidden_size=256, head_dim=128, intermediate_size=512)
         common.update(group_size=args.group_size, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
                       chunk_size=min(args.chunk_size, 64) if name == 'khdn_naive' else args.chunk_size, carry_mode='y_carry' if name == 'khdn_y_carry' else 'no_carry',
                       attn_mode='naive' if name == 'khdn_naive' else 'chunk',
                       precision_policy='strict' if name == 'khdn_naive' else (args.khdn_precision_policy or 'strict'))
-        if small and args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
+        if small and args.khdn_precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
             common['learnable_curvature'] = True
     elif name not in ('gdn', 'kda', 'comba', 'gdn2'):
         common.update(tensor_core=True, curvature=args.curvature, learnable_curvature=args.learnable_curvature,
@@ -617,7 +619,7 @@ def main(argv=None):
             'comparison': 'Identical initial HDN weights within groups; GDN performance-only, never a numerical oracle.',
             'numerical_gate_scope': ('Small-model BF16 global gradient cosine/norm and reserved-sample FP32 CE; '
                                      'legacy elementwise failures retained; full-model finite qualification remains separate.'
-                                     if args.khdn_precision_policy == 'bf16' else
+                                     if args.khdn_precision_policy in ('bf16', 'bf16_selective') else
                                      'Small-model loss and all-parameter gradient parity; full-size runs check numerical '
                                      'finiteness and actual routes, without asserting full-size trajectory equivalence.'),
         },

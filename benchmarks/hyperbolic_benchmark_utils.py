@@ -422,10 +422,13 @@ KHDN_BF16_BACKWARD_STAGES = ('output_bwd_kernel', 'state_bwd_kernel', 'parameter
 
 
 def _khdn_stages(precision_policy, backward=True, chunk_size=16):
-    if precision_policy == 'bf16' and chunk_size == 128:
+    if precision_policy == 'bf16_selective':
+        from benchmarks.khdn_selective_trace import stages
+        return stages(chunk_size, backward)
+    if precision_policy in ('bf16', 'bf16_selective') and chunk_size == 128:
         from benchmarks.khdn_c128_trace import BACKWARD, FORWARD
         return FORWARD + (BACKWARD if backward else ())
-    if precision_policy == 'bf16':
+    if precision_policy in ('bf16', 'bf16_selective'):
         return KHDN_BF16_FORWARD_STAGES + (KHDN_BF16_BACKWARD_STAGES if backward else ())
     return KHDN_STAGES if backward else KHDN_STAGES[:4]
 
@@ -590,11 +593,15 @@ def _attest_fs6_sources(row, interrupted):
 
 def _khdn_bf16_source_binding(module, kernels):
     c128 = module.__name__.endswith('.chunk128')
-    name = 'chunk128' if c128 else 'bf16'
+    selective = module.__name__.endswith('.bf16_selective')
+    name = 'bf16_selective' if selective else 'chunk128' if c128 else 'bf16'
     files = {label: hashlib.sha256(Path(inspect.getfile(value)).read_bytes()).hexdigest()
              for label, value in ((name, module), (name + '_kernels', kernels))}
-    if c128:
-        from benchmarks.khdn_c128_trace import ARITHMETIC
+    if c128 or selective:
+        if selective:
+            from benchmarks.khdn_selective_trace import ARITHMETIC
+        else:
+            from benchmarks.khdn_c128_trace import ARITHMETIC
         root = Path(inspect.getfile(module)).resolve()
         for label, path in (('layer', root.parents[2]/'layers/key_gated_hyperbolic_deltanet.py'),
                             ('fused_prepare', root.parent/'fused_prepare.py'),
@@ -603,7 +610,7 @@ def _khdn_bf16_source_binding(module, kernels):
     return {'files': files,
             'jit_functions': {name: _khdn_kernel_source_hash(value) for name, value in vars(kernels).items()
                               if hasattr(value, 'fn')},
-            'selected_arithmetic': ARITHMETIC if c128 else 'bf16_output_source_single_c16',
+            'selected_arithmetic': ARITHMETIC if c128 or selective else 'bf16_output_source_single_c16',
             'backward_primal': 'BF16 SavedS/SavedY' if c128 else 'FP32 SavedS/SavedY'}
 
 
@@ -619,7 +626,7 @@ def _attest_bf16_sources(row, interrupted):
             or row['backward_calls'] and row.get('gradients_all_finite') is not True):
         raise AssertionError('KHDN bf16 finite output/gradient observations missing')
     forward = next((launch for launch in row['launches'] if launch['kernel'] == 'state_fwd_kernel'), {})
-    c128 = row['requested']['chunk_size'] == 128
+    c128 = row['requested']['chunk_size'] == 128 and row['requested'].get('precision_policy', 'bf16') != 'bf16_selective'
     expected_primal = 'saved_state_y_bf16' if c128 else 'saved_state_y_fp32'
     if forward.get('y_diagnostics', {}).get(expected_primal) is not True:
         raise AssertionError('KHDN bf16 saved primal state/Y precision differs')
@@ -642,10 +649,18 @@ def _attest_bf16_sources(row, interrupted):
         if not buffers or any(not isinstance(value, dict) or value.get('dtype') != (
                 'torch.bfloat16' if index in bf16_indices else 'torch.float32') for index, value in enumerate(buffers)):
             raise AssertionError('KHDN bf16 prepared/saved buffer precision differs')
-    if c128:
+    if c128 or row['requested'].get('precision_policy') == 'bf16_selective':
         output = next((launch for launch in row['launches'] if launch['kernel'] == 'output_fwd_kernel'), {})
-        if output.get('arguments', {}).get('SavedRO', {}).get('dtype') != 'torch.bfloat16':
-            raise AssertionError('KHDN C128 saved output residual must be BF16')
+        expected_dtype = 'torch.bfloat16' if c128 else 'torch.float32'
+        if output.get('arguments', {}).get('SavedRO', {}).get('dtype') != expected_dtype:
+            raise AssertionError('KHDN saved output residual precision differs')
+        if not c128 and any(flags['P'][index]['shape'][0] != 0 for index in (0, 14, 15, 22)):
+            raise AssertionError('Selective BF16 unexpectedly materializes removed preparation buffers')
+        if not c128:
+            needs_curvature = row.get('source_requires_grad', [])[6:7]
+            if (len(needs_curvature) != 1 or output['arguments'].get('NEED_DC') is not needs_curvature[0]
+                    or row['telemetry'].get('readout_compensated') is not needs_curvature[0]):
+                raise AssertionError('Selective readout precision differs from the actual curvature-gradient requirement')
 
 
 def _compact_khdn_assembly(evidence):
@@ -670,7 +685,7 @@ def reparse_khdn_trace(evidence, *, expected_source_binding):
     """Reparse a serialized BF16-family trace against a separately frozen source binding."""
     import copy
     policy = evidence.get('precision_requested', 'bf16_fs6')
-    if policy not in ('bf16_fs6', 'bf16'):
+    if policy not in ('bf16_fs6', 'bf16', 'bf16_selective'):
         raise AssertionError('KHDN serialized precision policy is unsupported')
     if evidence.get('source_binding') != expected_source_binding:
         raise AssertionError('KHDN frozen source binding differs')
@@ -708,7 +723,7 @@ class _ObservedKHDNKernel:
                    'compiler': {'raw_assembly': {name: getattr(compiled, 'asm', {}).get(name) for name in ('ttir', 'ptx')}},
                    'kernel_source_sha256': _khdn_kernel_source_hash(self.kernel),
                    'thread': threading.get_ident(), 'gemm_source_sites': self.contractions}
-            if self.trace.precision_policy in ('bf16_fs6', 'bf16'):
+            if self.trace.precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
                 row['source_binding_sha256'] = _binding_hash(self.trace.source_binding)
                 row['selected_fs_callee'] = ('bf16_fs6' if values.get('BF16_FS6') is True else None)
             current[0]['launches'].append(row)
@@ -716,7 +731,7 @@ class _ObservedKHDNKernel:
                 self.trace.chunk_size == 128 and row['kernel'] == 'gauge_collect'))
             row['compiled_precision_inventory'] = inventory
             row['compiler'] = ({'ptx_sha256': inventory['ptx_sha256'], 'contraction_ir_sha256': inventory['ttir_sha256']}
-                               if self.trace.precision_policy == 'bf16' or values.get('MIXED') is True or values.get('BF16_FS6') is True
+                               if self.trace.precision_policy in ('bf16', 'bf16_selective') or values.get('MIXED') is True or values.get('BF16_FS6') is True
                                else _strict_compiler_evidence(compiled))
             if row['kernel'] == 'group_fwd_kernel':
                 row['prepared_diagnostics'] = _khdn_buffer_diagnostics(values)
@@ -739,12 +754,13 @@ class KHDNTrace:
 
     def __init__(self, chunk_size, group_size, carry_mode, expected_backward_calls=1, precision_policy='strict'):
         self.chunk_size, self.group_size, self.carry_mode = chunk_size, group_size, carry_mode
-        if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16'):
+        if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective'):
             raise ValueError('unknown KHDN precision policy')
         self.precision_policy = precision_policy
         if precision_policy == 'bf16_fs6' and (chunk_size, group_size, carry_mode) != (16, 32, 'no_carry'):
             raise ValueError('bf16_fs6 trace requires C16/g32/no_carry')
-        if precision_policy == 'bf16' and (chunk_size not in (16, 128) or (group_size, carry_mode) != (32, 'no_carry')):
+        allowed_chunks = (16, 32, 64, 128) if precision_policy == 'bf16_selective' else (16, 128)
+        if precision_policy in ('bf16', 'bf16_selective') and (chunk_size not in allowed_chunks or (group_size, carry_mode) != (32, 'no_carry')):
             raise ValueError('bf16 training trace requires C16 or C128/g32/no_carry')
         self.expected_checkpoint = None
         self.expected_backward_calls = expected_backward_calls
@@ -794,7 +810,7 @@ class KHDNTrace:
                                    for start, end in zip(bounds, bounds[1:])]
             curvature = values['curvature']
             c_value = float(curvature.detach()) if isinstance(curvature, torch.Tensor) else float(curvature)
-            diagnostic_dtype = torch.float32 if self.precision_policy == 'bf16' else torch.float64
+            diagnostic_dtype = torch.float32 if self.precision_policy in ('bf16', 'bf16_selective') else torch.float64
             n = k.detach().to(diagnostic_dtype).square().sum(-1)
             delta = c_value / values['group_size'] * v.detach().to(diagnostic_dtype).reshape(
                 *v.shape[:-1], -1, values['group_size']).square().sum(-1) / n[..., None]
@@ -827,7 +843,7 @@ class KHDNTrace:
                 returned = function(*bound.args, **bound.kwargs)
                 row['returned'] = _tensor_descriptions(returned)
                 row['forward_complete'] = True
-                if self.precision_policy in ('bf16_fs6', 'bf16'):
+                if self.precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
                     row['output_all_finite'] = all(value is None or bool(torch.isfinite(value).all()) for value in returned)
                 return returned
             except BaseException as error:
@@ -841,8 +857,8 @@ class KHDNTrace:
         module = importlib.import_module(KHDN_PREFIX + '.chunk')
         function = module.chunk_key_gated_hyperbolic_delta_rule
         replacements = {id(function): self._entry(function)}
-        native_bf16 = self.precision_policy == 'bf16'
-        native_name = 'chunk128' if self.chunk_size == 128 else 'bf16'
+        native_bf16 = self.precision_policy in ('bf16', 'bf16_selective')
+        native_name = 'bf16_selective' if self.precision_policy == 'bf16_selective' else 'chunk128' if self.chunk_size == 128 else 'bf16'
         kernels = importlib.import_module(KHDN_PREFIX + ('.' + native_name + '_kernels' if native_bf16 else '.chunk_kernels'))
         arithmetic_module = importlib.import_module(KHDN_PREFIX + '.' + native_name) if native_bf16 else module
         autograd_class = arithmetic_module._ChunkBF16 if native_bf16 else module._Chunk
@@ -867,11 +883,11 @@ class KHDNTrace:
                 row = nested
                 self.by_telemetry[id(args[-1])] = row
             self.local.current = (row, 'forward')
-            if self.precision_policy in ('bf16_fs6', 'bf16'):
+            if self.precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
                 row['autograd_context_id'] = id(ctx)
             row['executed_options'] = dict(args[-2])
             row['executed_sources'] = [_tensor_descriptions(value) for value in args[:7]]
-            if self.precision_policy == 'bf16':
+            if self.precision_policy in ('bf16', 'bf16_selective'):
                 row['source_requires_grad'] = list(ctx.needs_input_grad[:7])
             try:
                 return original_forward.__func__(ctx, *args, **kwargs)
@@ -883,7 +899,7 @@ class KHDNTrace:
             row = self.by_telemetry.get(id(ctx.telemetry))
             if row is None:
                 raise AssertionError('KHDN backward lost its forward telemetry identity')
-            if self.precision_policy in ('bf16_fs6', 'bf16') and row.get('autograd_context_id') != id(ctx):
+            if self.precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective') and row.get('autograd_context_id') != id(ctx):
                 raise AssertionError('KHDN backward context differs from its public forward graph')
             previous = getattr(self.local, 'current', None)
             self.local.current = (row, 'backward')
@@ -893,7 +909,7 @@ class KHDNTrace:
                 returned = original_backward.__func__(ctx, *args, **kwargs)
                 row['backward_calls'] += 1
                 row['gradient_dtypes'] = _tensor_descriptions(returned[:7])
-                if self.precision_policy in ('bf16_fs6', 'bf16'):
+                if self.precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
                     row['gradients_all_finite'] = all(value is None or bool(
                         torch.isfinite(value).all()) for value in returned[:7])
                 return returned
@@ -916,9 +932,9 @@ class KHDNTrace:
                 current = _khdn_fs6_source_binding(importlib.import_module(KHDN_PREFIX + '.chunk'), self.kernel_module)
                 if current != self.source_binding:
                     raise AssertionError('KHDN source/helper binding changed during trace')
-            elif self.precision_policy == 'bf16':
+            elif self.precision_policy in ('bf16', 'bf16_selective'):
                 current = _khdn_bf16_source_binding(importlib.import_module(
-                    KHDN_PREFIX + ('.chunk128' if self.chunk_size == 128 else '.bf16')), self.kernel_module)
+                    KHDN_PREFIX + ('.bf16_selective' if self.precision_policy == 'bf16_selective' else '.chunk128' if self.chunk_size == 128 else '.bf16')), self.kernel_module)
                 if current != self.source_binding:
                     raise AssertionError('KHDN bf16 source/helper binding changed during trace')
             for row in self.calls:
@@ -932,7 +948,7 @@ class KHDNTrace:
         except BaseException as error:
             error.khdn_evidence = self.calls
             raise
-        if self.precision_policy in ('bf16_fs6', 'bf16'):
+        if self.precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
             evidence = _compact_khdn_assembly(evidence)
         else:
             evidence['source_binding'] = {name: hashlib.sha256(Path(inspect.getfile(module)).read_bytes()).hexdigest()
@@ -944,19 +960,23 @@ class KHDNTrace:
 def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_calls=1, expected_layers=None,
                 precision_policy='strict', source_binding=None, expected_checkpoint=None):
     from benchmarks.khdn_compiler_precision import attest_compiled_policy
-    if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16'):
+    if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective'):
         raise AssertionError('unknown KHDN precision policy')
     mixed = precision_policy == 'mixed_readout'
     fs6 = precision_policy == 'bf16_fs6'
-    bf16 = precision_policy == 'bf16'
+    bf16 = precision_policy in ('bf16', 'bf16_selective')
     arithmetic = 'bf16_fs6_projection' if fs6 else 'strict_readout_tf32x3_state_products' if mixed else 'device_float64'
-    c128 = bf16 and chunk_size == 128
+    selective = precision_policy == 'bf16_selective'
+    c128 = bf16 and chunk_size == 128 and not selective
+    if selective:
+        from benchmarks.khdn_selective_trace import ARITHMETIC, backward_stages
+        BACKWARD = backward_stages(chunk_size)
     if c128:
         from benchmarks.khdn_c128_trace import ARITHMETIC, BACKWARD, attest_schedule
-    arithmetic = (ARITHMETIC if c128 else 'bf16_output_source_single_c16') if bf16 else arithmetic
+    arithmetic = (ARITHMETIC if c128 or selective else 'bf16_output_source_single_c16') if bf16 else arithmetic
     backward_arithmetic = 'device_float32' if bf16 else 'device_float64' if fs6 else arithmetic
     route = 'bf16' if bf16 else 'experimental_bf16_fs6' if fs6 else 'experimental_mixed_readout' if mixed else 'strict'
-    if (fs6 or bf16) and ((chunk_size not in ((16, 128) if bf16 else (16,)))
+    if (fs6 or bf16) and ((chunk_size not in ((16, 32, 64, 128) if selective else (16, 128) if bf16 else (16,)))
                           or (group_size, carry_mode) != (32, 'no_carry') or not source_binding):
         raise AssertionError('KHDN BF16 geometry/source binding missing or different')
     if (fs6 or bf16) and expected_layers is not None and expected_checkpoint is not None:
@@ -1033,14 +1053,17 @@ def attest_khdn(calls, chunk_size, group_size, carry_mode, expected_backward_cal
                 raise AssertionError(f'KHDN missing or duplicated actual kernel launch: {name}')
         if (fs6 or bf16) and [launch['kernel'] for launch in launches] != list(required):
             raise AssertionError('KHDN BF16 stage order/phase differs')
-        if c128:
+        if selective:
+            from benchmarks.khdn_selective_trace import attest_schedule as attest_selective_schedule
+            attest_selective_schedule(launches, bool(row['backward_calls']), chunk_size)
+        elif c128:
             attest_schedule(launches, bool(row['backward_calls']))
         for launch in launches:
             flags = launch['arguments']
             if fs6 or bf16:
                 if (launch.get('source_binding_sha256') != _binding_hash(source_binding)
                         or launch['kernel_source_sha256'] != source_binding['jit_functions'].get(launch['kernel'])
-                        or launch.get('phase') != ('backward' if (launch['kernel'] in BACKWARD if c128
+                        or launch.get('phase') != ('backward' if (launch['kernel'] in BACKWARD if c128 or selective
                                                                   else launch['kernel'].endswith('bwd_kernel')) else 'forward')):
                     raise AssertionError('KHDN bf16_fs6 source/callee/phase binding differs')
                 selected = 'bf16_fs6' if fs6 and launch['kernel'] == 'state_fwd_kernel' else None
@@ -1116,10 +1139,14 @@ class _ObservedKHDNUpdateKernel:
             values.apply_defaults()
             values = values.arguments
             name, phase = self.kernel.fn.__name__, current[1]
-            c128 = self.trace.chunk_size == 128
+            selective = self.trace.precision_policy == 'bf16_selective'
+            c128 = self.trace.chunk_size == 128 and not selective
+            if selective:
+                from benchmarks.khdn_selective_trace import backward_stages
+                BACKWARD = backward_stages(self.trace.chunk_size)
             if c128:
                 from benchmarks.khdn_c128_trace import BACKWARD
-            backward = name in BACKWARD if c128 else name.endswith('bwd_kernel')
+            backward = name in BACKWARD if c128 or selective else name.endswith('bwd_kernel')
             if name not in _khdn_stages(self.trace.precision_policy, chunk_size=self.trace.chunk_size) or phase != (
                     'backward' if backward else 'forward'):
                 raise AssertionError('KHDN update native stage/phase differs')
@@ -1151,7 +1178,7 @@ class KHDNUpdateTrace(KHDNTrace):
 
     def __init__(self, model, batches, layouts, *, expected_checkpoint, expected_source_binding, arm,
                  precision_policy='bf16_fs6'):
-        if precision_policy not in ('bf16_fs6', 'bf16'):
+        if precision_policy not in ('bf16_fs6', 'bf16', 'bf16_selective'):
             raise ValueError('KHDN positive update trace requires a supported BF16 policy')
         super().__init__(getattr(model.config, 'chunk_size', 16), 32, 'no_carry', model.config.num_hidden_layers, precision_policy)
         if not batches or len(batches) != len(layouts) or not expected_source_binding:
@@ -1161,8 +1188,8 @@ class KHDNUpdateTrace(KHDNTrace):
         self.root_calls, self.active_batch = [], None
 
     def __enter__(self):
-        native_bf16 = self.precision_policy == 'bf16'
-        native_name = 'chunk128' if self.chunk_size == 128 else 'bf16'
+        native_bf16 = self.precision_policy in ('bf16', 'bf16_selective')
+        native_name = 'bf16_selective' if self.precision_policy == 'bf16_selective' else 'chunk128' if self.chunk_size == 128 else 'bf16'
         chunk = importlib.import_module(KHDN_PREFIX + ('.' + native_name if native_bf16 else '.chunk'))
         kernels = importlib.import_module(KHDN_PREFIX + ('.' + native_name + '_kernels' if native_bf16 else '.chunk_kernels'))
         bind = _khdn_bf16_source_binding if native_bf16 else _khdn_fs6_source_binding
@@ -1208,9 +1235,9 @@ class KHDNUpdateTrace(KHDNTrace):
 
     def attest(self):
         try:
-            native_bf16 = self.precision_policy == 'bf16'
+            native_bf16 = self.precision_policy in ('bf16', 'bf16_selective')
             bind = _khdn_bf16_source_binding if native_bf16 else _khdn_fs6_source_binding
-            native_name = 'chunk128' if self.chunk_size == 128 else 'bf16'
+            native_name = 'bf16_selective' if self.precision_policy == 'bf16_selective' else 'chunk128' if self.chunk_size == 128 else 'bf16'
             binding = bind(importlib.import_module(
                 KHDN_PREFIX + ('.' + native_name if native_bf16 else '.chunk')), self.kernel_module)
             route = 'bf16' if native_bf16 else 'experimental_bf16_fs6'
@@ -1258,7 +1285,10 @@ class KHDNUpdateTrace(KHDNTrace):
                     stages = _khdn_stages(self.precision_policy, backward=False, chunk_size=self.chunk_size)
                 else:
                     raise AssertionError('KHDN update missing/duplicated backward or unowned recompute')
-                if self.chunk_size == 128:
+                if self.precision_policy == 'bf16_selective':
+                    from benchmarks.khdn_selective_trace import attest_schedule as attest_selective_schedule
+                    attest_selective_schedule(row['launches'], bool(row['backward_calls']), self.chunk_size)
+                elif self.chunk_size == 128:
                     from benchmarks.khdn_c128_trace import attest_schedule
                     attest_schedule(row['launches'], bool(row['backward_calls']))
                 if [launch['kernel'] for launch in row['launches']] != list(stages):
@@ -1291,7 +1321,7 @@ class KHDNExceptionGuard:
     """Reject fallback/replay entries and experimental-policy ineligibility during execution."""
 
     def __init__(self, precision_policy='strict'):
-        if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16'):
+        if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective'):
             raise ValueError('unknown KHDN precision policy')
         self.precision_policy = precision_policy
         self.saved, self.events = [], []
@@ -1325,7 +1355,7 @@ class KHDNExceptionGuard:
         _replace_aliases(replacements, self.saved)
         if not self.saved:
             raise AssertionError('KHDN exception sentinel could not be installed')
-        self.dtype_guard = _NoFP64Training() if self.precision_policy == 'bf16' else contextlib.nullcontext()
+        self.dtype_guard = _NoFP64Training() if self.precision_policy in ('bf16', 'bf16_selective') else contextlib.nullcontext()
         self.dtype_guard.__enter__()
         return self
 
@@ -1338,7 +1368,7 @@ class KHDNExceptionGuard:
     def evidence(self):
         return {'method': 'raise_before_host_forward_or_backward_or_recurrent_or_reference',
                 'events': self.events, 'precision_requested': self.precision_policy,
-                'fp64_tensor_guard': self.precision_policy == 'bf16',
+                'fp64_tensor_guard': self.precision_policy in ('bf16', 'bf16_selective'),
                 'normal_path_wrappers': int(self.precision_policy in ('mixed_readout', 'bf16_fs6')),
                 'scope': 'exception/replay entries and requested-policy eligibility rejection installed outside timer; '
                          'original core range and eligibility checks remain timed'}
@@ -1360,7 +1390,7 @@ def _khdn_buffer_diagnostics(values):
 def _khdn_y_diagnostics(values, precision_policy='strict'):
     p, s, y, ng = values['P'], values['SavedS'], values['SavedY'], values['NG']
     maximum, finite = 0., True
-    native_bf16 = precision_policy == 'bf16'
+    native_bf16 = precision_policy in ('bf16', 'bf16_selective')
     residual_only = native_bf16 or values.get('MIXED', False) or values.get('BF16_FS6', False)
     for first in range(0, s.shape[0], 32):
         last = min(first + 32, s.shape[0])
@@ -1387,7 +1417,8 @@ def _khdn_y_diagnostics(values, precision_policy='strict'):
 
 def _khdn_contraction_sites(kernel, kernel_module):
     pending, seen, sites = [kernel.fn.__name__], set(), []
-    native_bf16 = getattr(kernel_module, '__name__', '').endswith(('.bf16_kernels', '.chunk128_kernels'))
+    native_bf16 = getattr(kernel_module, '__name__', '').endswith(
+        ('.bf16_kernels', '.chunk128_kernels', '.bf16_selective_kernels'))
     while pending:
         name = pending.pop()
         if name in seen:
@@ -1406,7 +1437,8 @@ def _khdn_contraction_sites(kernel, kernel_module):
                               'implementation': 'SIMT reduction; compiled launch arithmetic recorded separately'})
             if not isinstance(node.func, ast.Name):
                 continue
-            if node.func.id in ('mm', 'mm_state_product', 'bf16_fs6', 'mm_three'):
+            if node.func.id in ('mm', 'mm_state_product', 'bf16_fs6', 'mm_three',
+                                'mm_precise', 'mm_backward', 'mm_left_two', 'mm_right_two'):
                 sites.append({'owner': name, 'line_in_function_source': node.lineno, 'call': ast.unparse(node),
                               'implementation': ('BF16 operands/FP32 accumulation or FP32 SIMT; compiled products recorded separately'
                                                  if native_bf16 else

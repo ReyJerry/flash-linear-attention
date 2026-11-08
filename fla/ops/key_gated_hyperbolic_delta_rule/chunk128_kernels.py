@@ -1399,7 +1399,7 @@ def diagonal_eligibility(Ell, Starts, Ends, P, Flags, H: tl.constexpr, KD: tl.co
     ell = interval_ell(Ell, start, end-start, ch % H, tile, a, H, KD)
     relative = tl.cumsum(tl.where(i[:, None] > 0, ell, 0.), 0)
     n = tl.load(P[18]+ch*C+tile*32+i)
-    qr = interval_tile_load(P[6], ch, tile, a, C, K)
+    qr = interval_tile_load(P[6], ch, tile, a, C, K).to(tl.float32)
     safe = (tl.min(relative) >= -64.) & (tl.min(n) >= 0.5) & (tl.max(n) <= 2.) & (tl.max(tl.abs(qr)) <= 2.)
     tl.store(Flags+ch*(C//32)+tile, safe)
 

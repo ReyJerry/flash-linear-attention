@@ -80,6 +80,38 @@ def compare_bf16(actual, expected, backward=False):
         assert (a-b).square().mean().sqrt() <= rms * b.square().mean().sqrt().clamp_min(atol)
 
 
+@pytest.mark.parametrize('chunk_size', [64, 128])
+@pytest.mark.parametrize('packed', [False, True])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_public_policy_source_vjp(chunk_size, packed, dtype):
+    source, cu = make_case(129, 128, 128, 32, packed=packed, dtype=dtype)
+    reference = tuple(value.detach().double().requires_grad_() for value in source)
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], initial_state=reference[5], curvature=reference[6],
+        group_size=32, cu_seqlens=cu, output_final_state=True,
+    )
+    cotangents = tuple(torch.sin(torch.arange(x.numel(), device=x.device)).reshape(x.shape).float()
+                       for x in expected)
+    reference_gradients = torch.autograd.grad(expected, reference, tuple(x.double() for x in cotangents))
+    telemetry = {}
+    with NoFP64():
+        actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+            *source[:5], initial_state=source[5], curvature=source[6], group_size=32,
+            cu_seqlens=cu, output_final_state=True, chunk_size=chunk_size,
+            precision_policy='bf16_selective', telemetry=telemetry,
+        )
+        gradients = torch.autograd.grad(actual, source, cotangents, retain_graph=True)
+        repeated = torch.autograd.grad(actual, source, cotangents)
+    assert telemetry['precision_requested'] == 'bf16_selective'
+    assert telemetry['arithmetic'] == 'selective_bf16_adjoint_queryless'
+    assert telemetry['host_fallback'] is False and telemetry['native_kernel_calls'] > 0
+    assert all(torch.equal(a, b) for a, b in zip(gradients, repeated))
+    for index, (actual_value, expected_value) in enumerate(zip(
+            (*actual, *gradients), (*expected, *reference_gradients))):
+        compare_bf16(actual_value, expected_value, backward=index >= 2)
+
+
 @pytest.mark.parametrize('packed', [False, True])
 @pytest.mark.usefixtures('qualified_bf16')
 def test_c128_interval_preparation_tail_sources(packed):

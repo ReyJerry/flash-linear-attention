@@ -111,6 +111,73 @@ def bf16_launch(name='state_fwd_kernel', count=9, dtype='bf16', scalar='f32', ex
                 kernel_source_sha256='b'*64, compiled_precision_inventory=inventory)
 
 
+@pytest.mark.parametrize('chunk', [16, 32, 64, 128])
+@pytest.mark.parametrize('name,mode', [
+    ('state_fwd_kernel', None), ('state_bwd_kernel', None),
+    ('shared_coefficients_bwd', 0), ('shared_coefficients_bwd', 3),
+])
+def test_selective_compiler_contract_keeps_forward_and_adjoint_products_distinct(chunk, name, mode):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    count = (6 if chunk == 128 else 4) if name == 'state_fwd_kernel' else (
+        (18 if chunk == 128 else 12) if name == 'state_bwd_kernel' else 3 if mode == 3 else 2)
+    launch = bf16_launch(name=name, count=count)
+    launch['arguments'].update(C=chunk, MODE=mode)
+    attest_compiled_policy(launch, 'bf16_selective')
+    wrong = bf16_launch(name=name, count=count * 2)
+    wrong['arguments'].update(C=chunk, MODE=mode)
+    with pytest.raises(AssertionError, match='dot count'):
+        attest_compiled_policy(wrong, 'bf16_selective')
+
+
+@pytest.mark.parametrize('chunk,needs_curvature,single,count', [
+    (32, True, True, 2), (64, False, True, 2), (64, True, False, 6), (128, False, False, 6),
+])
+def test_selective_inverse_precision_is_bound_to_execution_chunk(chunk, needs_curvature, single, count):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    launch = bf16_launch(name='inverse_offdiagonal_kernel', count=count)
+    launch['arguments'].update(C=chunk, SINGLE=single, NEED_DC=needs_curvature)
+    attest_compiled_policy(launch, 'bf16_selective')
+    launch['arguments']['SINGLE'] = not single
+    with pytest.raises(AssertionError, match='compensation'):
+        attest_compiled_policy(launch, 'bf16_selective')
+
+
+@pytest.mark.parametrize('needs_curvature,count', [(False, 2), (True, 6)])
+def test_selective_readout_precision_tracks_curvature_gradient(needs_curvature, count):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    launch = bf16_launch(name='output_fwd_kernel', count=count)
+    launch['arguments'].update(C=64, NEED_DC=needs_curvature)
+    attest_compiled_policy(launch, 'bf16_selective')
+    launch['arguments']['NEED_DC'] = not needs_curvature
+    with pytest.raises(AssertionError, match='dot count'):
+        attest_compiled_policy(launch, 'bf16_selective')
+
+
+@pytest.mark.parametrize('chunk', [16, 32])
+def test_selective_small_interval_backward_is_fp32_elementwise(chunk):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    launch = bf16_launch(name='interval_bwd_small', count=0)
+    launch['arguments']['C'] = chunk
+    attest_compiled_policy(launch, 'bf16_selective')
+    wrong = bf16_launch(name='interval_bwd_small', count=8)
+    wrong['arguments']['C'] = chunk
+    with pytest.raises(AssertionError, match='dot count'):
+        attest_compiled_policy(wrong, 'bf16_selective')
+
+
+@pytest.mark.parametrize('options', [
+    {'dtype': 'f32'}, {'scalar': 'f64'}, {'scalar': 'bf16'},
+    {'extra_ir': '\n%hidden = arith.addf %a, %b : f64'},
+    {'extra_ptx': 'mul.f64 a,b,c;'},
+])
+def test_selective_compiler_contract_rejects_precision_substitution(options):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+    launch = bf16_launch(count=4, **options)
+    launch['arguments']['C'] = 64
+    with pytest.raises(AssertionError):
+        attest_compiled_policy(launch, 'bf16_selective')
+
+
 @pytest.mark.parametrize('name,count', [
     ('common_base_fwd_kernel', 0), ('common_interval_fwd_kernel', 0), ('common_system_fwd_kernel', 9),
     ('group_fwd_kernel', 3), ('group_af_fwd_kernel', 0), ('state_fwd_kernel', 9), ('output_fwd_kernel', 6),

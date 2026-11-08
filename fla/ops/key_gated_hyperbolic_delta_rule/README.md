@@ -57,10 +57,51 @@ These buffers live through backward. Local output/mass/state residuals are recom
 
 The public chunk entry accepts `precision_policy="bf16", chunk_size=128, carry_mode="no_carry"` for K=128, mathematical group size 32, and V in {32, 64, 128}. The Layer/config entry supports K=V128. This path requires the pinned SM90/PyTorch/Triton runtime checked by `chunk128.py`; other chunk sizes retain their existing routes. The default precision and checkpoint schema are unchanged.
 
-C128 is the state execution chunk. Internal 16/32/64 tiles prepare its full block system; they do not advance canonical state through eight separate C16 updates. Output forward/backward and parameter VJPs run separately from the state scans. Hierarchical triangular inversion retains three BF16 products, while the main contractions use one BF16 product with FP32 accumulation. Canonical state, scalar controls and normalization remain FP32.
+C128 is the state execution chunk. Internal 16/32/64 tiles prepare its full block system; they do not advance canonical state through eight separate C16 updates. Output forward/backward and parameter VJPs run separately from the state scans. Hierarchical triangular inversion and the main contractions use single BF16 products with FP32 accumulation. Canonical state, scalar controls and normalization remain FP32.
 
 The training Layer fuses query/key normalization, the Value transform, beta and Key-channel gates. Bounded gauges reconstruct the relative rho matrix from saved scales; inputs outside that bound retain the materialized FP32 representation. Source validation and finite checks remain active. Trainable curvature retains its source gradient; fixed curvature omits only work exclusively needed for that gradient.
 
 `benchmarks.fp32_adamw.FP32AdamW` provides device FP32 bias corrections, moments and updates for contiguous CUDA FP32 parameters with unscaled gradients. The training benchmark selects this optimizer for its BF16 KHDN policy; matched controls can select `--optimizer-backend fp32` explicitly. Optimizer writes advance tensor version counters, including after checkpoint restoration.
 
 C128 is still under qualification. The native small-model update/restore check passes, but current operator tests retain gradient elementwise failures on some dense/packed inputs. The C128 compiler trace and pre-update graph checks support checkpointed and non-checkpointed execution. Public CLI validation, continuous full-model quality, long training and distributed acceptance remain incomplete. Initial heldout PPL differences beyond 0.1% are recorded as observations; they do not by themselves establish or reject training quality. Research timing does not establish those qualifications.
+
+## Experimental selective BF16 policy
+
+`precision_policy="bf16_selective"` explicitly selects the mass-system-preconditioned
+implementation in `bf16_selective.py`. It supports execution chunks16/32/64/128,
+K128, V32/64/128, g32 and no-carry at the raw operator entry; Layer/config use
+K=V128. The existing `bf16` policy and all defaults retain their previous routes.
+The implementation accepts BF16/FP32 sources on the pinned SM90 runtime and
+supports first-order gradients only. Unsupported inputs raise instead of
+replaying through a reference or FP64 path.
+
+This policy preserves canonical states, inclusive readout and all seven source
+derivatives. It uses FP32 prepared/saved buffers, single-product forward BF16
+contractions except C128 inverse off-diagonal preparation, and selected
+two/three-product BF16 adjoints with FP32 accumulation. It never uses six-product
+compensation. When curvature requires a gradient, the two output readout products
+also use three-product BF16 compensation, as does C64 inverse off-diagonal
+preparation: a new cancellation-sensitive scalar
+curvature regression failed with single-product readout. Fixed-curvature calls
+retain single-product readout. Both compute the same canonical model within the
+precision contract; cross-gradient-mode bitwise equality is not promised.
+Training Layer preprocessing is fused at all four chunk lengths.
+Automatic short-sequence inference still uses the existing native BF16 C1
+recurrent path; cache/packed inference consistency remains under investigation.
+
+The training harness selects this policy without modifying parsed arguments:
+
+```bash
+python -m benchmarks.benchmark_hyperbolic_training \
+    --methods khdn_no_carry --khdn-precision-policy bf16_selective \
+    --chunk-size 64 --loss-backend plain --check-only
+```
+
+The harness requires BF16 autocast, FP32 AdamW, ShortConv, K=V128 and g32. Its
+separate trace contract checks the actual chunk, inverse specialization,
+per-family compiled BF16 dot counts, FP32 buffers and optimizer graph ownership.
+Passing a trace is not a numerical or throughput qualification. See the
+[archived candidate evidence](../../../docs/experiments/khdn_selective_bf16_2026_11_08/README.md)
+for operator budgets, short/long screens, initial model gradients and remaining
+model-quality/distributed acceptance. This experimental policy is not a
+production recommendation.

@@ -96,12 +96,13 @@ def compiled_precision_inventory(compiled, *, allow_data_movement=False):
 
 def attest_compiled_policy(launch, precision_policy):
     """Bind observed arithmetic to the requested family policy, without qualifying its numerics."""
-    if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16'):
+    if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective'):
         raise AssertionError('unknown KHDN precision policy')
     state_family = launch['kernel'] in ('state_fwd_kernel', 'state_bwd_kernel')
     mixed = precision_policy == 'mixed_readout' and state_family
     flags = launch['arguments']
-    has_mixed_selector = state_family and not (precision_policy == 'bf16' and launch['kernel'] == 'state_bwd_kernel')
+    has_mixed_selector = state_family and not (precision_policy in (
+        'bf16', 'bf16_selective') and launch['kernel'] == 'state_bwd_kernel')
     if has_mixed_selector and flags.get('MIXED') is not mixed:
         raise AssertionError('KHDN compiled MIXED flag differs from requested policy')
     if not has_mixed_selector and flags.get('MIXED', False) is not False:
@@ -121,13 +122,17 @@ def attest_compiled_policy(launch, precision_policy):
         raise AssertionError('KHDN missing/invalid kernel source hash')
     raw = inventory.get('raw_assembly', {})
     parsed = compiled_precision_inventory(SimpleNamespace(asm=raw), allow_data_movement=(
-        precision_policy == 'bf16' and launch['kernel'] == 'gauge_collect' and flags.get('C') == 128))
+        precision_policy in ('bf16', 'bf16_selective') and launch['kernel'] == 'gauge_collect' and flags.get('C') == 128))
     for key in ('ttir_sha256', 'ptx_sha256', 'multiply_add_ir_dtypes', 'dot_operations',
                 'ptx_floating_opcodes', 'ptx_tensor_core_opcodes', 'ir_float_casts'):
         if json.dumps(inventory.get(key), sort_keys=True) != json.dumps(parsed[key], sort_keys=True):
             raise AssertionError(f'KHDN compiled precision observation/hash mismatch: {key}')
     if any(inventory.get('assembly_sha256', {}).get(key) != parsed['assembly_sha256'][key] for key in ('ttir', 'ptx')):
         raise AssertionError('KHDN assembly hash disagrees with raw compiled evidence')
+    if precision_policy == 'bf16_selective':
+        from benchmarks.khdn_selective_trace import attest_compiled
+        attest_compiled(launch, inventory)
+        return
     if precision_policy == 'bf16':
         _attest_bf16_arithmetic(launch, inventory)
         return

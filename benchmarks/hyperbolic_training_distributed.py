@@ -777,7 +777,7 @@ def trace_route(model, batch, args, name, benchmark):
         context.bind_model(model)
         context.expected_checkpoint = not args.no_layer_checkpoint
     guard = KHDNExceptionGuard(args.khdn_precision_policy) if strict and args.khdn_precision_policy in (
-        'bf16_fs6', 'bf16') else contextlib.nullcontext()
+        'bf16_fs6', 'bf16', 'bf16_selective') else contextlib.nullcontext()
     with guard, context as trace, observe_key_gates(model, name if not strict else '') as gates:
         loss = weighted_loss(model, batch, args, max(1, batch.valid_labels), 1)
         loss.backward()
@@ -851,17 +851,17 @@ def khdn_update_guard(args, name, stage, records, *, model=None, batches=None, s
         return
     with KHDNExceptionGuard(precision_policy=args.khdn_precision_policy or 'strict') as guard:
         record = {'stage': stage, 'guard': guard.evidence()}
-        if args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
+        if args.khdn_precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
             record['arm'] = arm
         records.append(record)
         try:
-            if args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
+            if args.khdn_precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
                 if model is None or not batches or not source_binding:
                     raise AssertionError('KHDN update missing positive model/batch/source contracts')
                 observer = KHDNUpdateTrace(unwrap(model), batches, [khdn_batch_layout(b.inputs) for b in batches],
                                            expected_checkpoint=not args.no_layer_checkpoint,
                                            expected_source_binding=source_binding, arm=arm,
-                                           **({'precision_policy': 'bf16'} if args.khdn_precision_policy == 'bf16' else {}))
+                                           **({'precision_policy': args.khdn_precision_policy} if args.khdn_precision_policy in ('bf16', 'bf16_selective') else {}))
                 with observer:
                     yield
                 record['positive_observation'] = observer.attest()
@@ -902,7 +902,7 @@ def small_gate(args, name, runtime, benchmark):
     initial = parameters(model)
     update_guards = []
     binding = route.get('source_binding')
-    if args.khdn_precision_policy in ('bf16_fs6', 'bf16'):
+    if args.khdn_precision_policy in ('bf16_fs6', 'bf16', 'bf16_selective'):
         serial_batches = [batch.to(runtime.device) for batch in global_batches]
         with khdn_update_guard(args, name, 'accumulated_update', update_guards,
                                model=ddp, batches=local_batches, source_binding=binding, arm='ddp'):
@@ -936,7 +936,8 @@ def small_gate(args, name, runtime, benchmark):
     if name.startswith('khdn_'):
         oracle_key = {'mixed_readout': 'mixed_vs_explicit_strict_oracle',
                       'bf16_fs6': 'bf16_fs6_vs_explicit_strict_oracle',
-                      'bf16': 'bf16_vs_explicit_strict_oracle'}.get(
+                      'bf16': 'bf16_vs_explicit_strict_oracle',
+                      'bf16_selective': 'bf16_selective_vs_explicit_strict_oracle'}.get(
                           args.khdn_precision_policy, 'strict_vs_explicit_oracle')
         result[oracle_key] = oracle_parity
         gates = {}
@@ -1324,7 +1325,7 @@ def khdn_model_oracle_gate(args, name, benchmark):
             with oracle_context as oracle_evidence:
                 route = trace_route(model, batch, gate_args, method, benchmark)
                 validation = None
-                if args.khdn_precision_policy == 'bf16':
+                if args.khdn_precision_policy in ('bf16', 'bf16_selective'):
                     validation = khdn_validation_ce(model, make_batch(gate_args, 10000).to('cuda'), gate_args, benchmark,
                                                     candidate=method != 'khdn_naive')
             if method == 'khdn_naive':
@@ -1338,7 +1339,7 @@ def khdn_model_oracle_gate(args, name, benchmark):
             if method == name:
                 result[layout] = {'actual_route': route, 'model': info}
             del model
-        parity = (benchmark.compare_bf16_model_results(*outputs) if args.khdn_precision_policy == 'bf16'
+        parity = (benchmark.compare_bf16_model_results(*outputs) if args.khdn_precision_policy in ('bf16', 'bf16_selective')
                   else benchmark.compare_model_results(*outputs))
         required = ('f_proj.0.weight', 'f_proj.1.weight', 'A_log', 'dt_bias', 'curvature_raw')
         for suffix in required:
@@ -1407,7 +1408,7 @@ def khdn_operator_gate(args, name, sources):
     oracle_checkpoint = verify_checkpointed_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, sources, args, name)
     truth = checkpointed_dense_oracle(ops.naive_recurrent_key_gated_hyperbolic_delta_rule, truth_sources, args, name)
     guard = KHDNExceptionGuard(args.khdn_precision_policy) if args.khdn_precision_policy in (
-        'bf16_fs6', 'bf16') else contextlib.nullcontext()
+        'bf16_fs6', 'bf16', 'bf16_selective') else contextlib.nullcontext()
     with guard, KHDNTrace(args.chunk_size, args.group_size, 'y_carry' if name == 'khdn_y_carry' else 'no_carry',
                           precision_policy=args.khdn_precision_policy or 'strict') as trace:
         actual = khdn_operator_call(ops.chunk_key_gated_hyperbolic_delta_rule, actual_sources, args, name)
@@ -1417,7 +1418,7 @@ def khdn_operator_gate(args, name, sources):
     try:
         truth_grads = torch.autograd.grad(truth, truth_sources, tuple(value.double() for value in cotangents))
         errors = {}
-        bf16_policy = args.khdn_precision_policy == 'bf16'
+        bf16_policy = args.khdn_precision_policy in ('bf16', 'bf16_selective')
         for category, values, references, names, budget in (
             ('forward', actual, truth, ('output', 'state'), (.002, .02, .01) if bf16_policy else (2e-5, 2e-4, 1e-4)),
             ('backward', actual_grads, truth_grads, ('q', 'k', 'v', 'beta', 'log_decay', 'S0', 'curvature'),

@@ -35,6 +35,33 @@ def test_bf16_cli_and_small_model_keep_physical_geometry():
     assert oracle['head_dim'] == 128
 
 
+@pytest.mark.parametrize('chunk_size', [16, 32, 64, 128])
+def test_selective_cli_explicitly_selects_its_chunk_without_mutating_arguments(chunk_size):
+    flags = [value for value in FLAGS if value != '--check-only']
+    flags[flags.index('--khdn-precision-policy') + 1] = 'bf16_selective'
+    flags[flags.index('--chunk-size') + 1] = str(chunk_size)
+    args = benchmark.parse_arguments(flags)
+    config = benchmark.model_configuration(args, 'khdn_no_carry', small=True)
+    assert args.chunk_size == config['chunk_size'] == chunk_size
+    assert config['precision_policy'] == 'bf16_selective' and args.optimizer_backend == 'fp32'
+    assert config['head_dim'] == 128 and config['group_size'] == 32
+    trace = utils.KHDNTrace(chunk_size, 32, 'no_carry', precision_policy='bf16_selective')
+    assert trace.precision_policy == 'bf16_selective'
+    assert benchmark.model_configuration(args, 'khdn_naive', small=True)['precision_policy'] == 'strict'
+
+
+@pytest.mark.parametrize('extra', [
+    ['--optimizer-backend', 'native'], ['--dtype', 'fp32'], ['--group-size', '16'],
+    ['--no-short-conv'], ['--head-dim', '64', '--hidden-size', '1024'],
+    ['--methods', 'khdn_y_carry'], ['--methods', 'khdn_naive'],
+])
+def test_selective_cli_retains_training_geometry_and_optimizer_contract(extra):
+    flags = list(FLAGS)
+    flags[flags.index('--khdn-precision-policy') + 1] = 'bf16_selective'
+    with pytest.raises(SystemExit):
+        benchmark.parse_arguments(flags + extra)
+
+
 @pytest.mark.parametrize('extra', [
     ['--optimizer-backend', 'native'], ['--dtype', 'fp32'], ['--group-size', '16'], ['--chunk-size', '32'], ['--no-short-conv'],
     ['--head-dim', '64', '--hidden-size', '1024'], ['--methods', 'khdn_y_carry'], ['--methods', 'khdn_naive'],
@@ -117,13 +144,18 @@ def test_bf16_tensor_guard_rejects_inputs_and_results():
     assert torch.ones(1, dtype=torch.float64).dtype == torch.float64
 
 
-@pytest.mark.parametrize('chunk_size', [16, 128])
+@pytest.mark.parametrize('precision_policy,chunk_size', [
+    ('bf16', 16), ('bf16', 128),
+    ('bf16_selective', 16), ('bf16_selective', 32), ('bf16_selective', 64), ('bf16_selective', 128),
+])
 @pytest.mark.parametrize('checkpoint', [False, True])
-def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, chunk_size, monkeypatch):
+def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, chunk_size, monkeypatch, precision_policy):
     pytest.importorskip('triton')
     from benchmarks.fp32_adamw import FP32AdamW
     from fla.models import KeyGatedHyperbolicDeltaNetConfig, KeyGatedHyperbolicDeltaNetForCausalLM
-    if chunk_size == 128:
+    if precision_policy == 'bf16_selective':
+        from fla.ops.key_gated_hyperbolic_delta_rule import bf16_selective as bf16
+    elif chunk_size == 128:
         from fla.ops.key_gated_hyperbolic_delta_rule import chunk128 as bf16
     else:
         from fla.ops.key_gated_hyperbolic_delta_rule import bf16
@@ -138,7 +170,7 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
     config = KeyGatedHyperbolicDeltaNetConfig(
         hidden_size=256, head_dim=128, num_heads=2, num_hidden_layers=2, intermediate_size=512,
         vocab_size=97, group_size=32, chunk_size=chunk_size, curvature=.6, learnable_curvature=True,
-        precision_policy='bf16', use_short_conv=True, fuse_norm=False, fuse_swiglu=False,
+        precision_policy=precision_policy, use_short_conv=True, fuse_norm=False, fuse_swiglu=False,
         fuse_cross_entropy=False, use_cache=False,
     )
     model = KeyGatedHyperbolicDeltaNetForCausalLM(config).to(device).train()
@@ -146,9 +178,9 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
     ids = torch.randint(1, 97, (2, chunk_size + 1), device=device)
     original_forward = vars(bf16._ChunkBF16)['forward']
-    trace = utils.KHDNTrace(chunk_size, 32, 'no_carry', 2, 'bf16').bind_model(model)
+    trace = utils.KHDNTrace(chunk_size, 32, 'no_carry', 2, precision_policy).bind_model(model)
     trace.expected_checkpoint = checkpoint
-    with utils.KHDNExceptionGuard('bf16') as guard, trace:
+    with utils.KHDNExceptionGuard(precision_policy) as guard, trace:
         with torch.autocast('cuda', dtype=torch.bfloat16):
             loss = model(ids, labels=ids, use_cache=False).loss
         loss.backward()
@@ -172,7 +204,7 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
         lambda row: row['launches'].reverse(),
         lambda row: next(x for x in row['launches'] if x['kernel'] == 'state_fwd_kernel')[
             'arguments']['SavedU'].update(dtype='torch.float64'),
-        lambda row: row['launches'][0]['arguments'].update(C=32),
+        lambda row: row['launches'][0]['arguments'].update(C=1),
         lambda row: next(x for x in row['launches'] if x['kernel'] == 'state_fwd_kernel')[
             'arguments']['SavedS'].update(dtype='torch.float64'),
         lambda row: next(x for x in row['launches'] if x['kernel'] == 'state_fwd_kernel')[
@@ -181,6 +213,13 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
         lambda row: row['launches'][0]['compiled_precision_inventory'].update(ptx_sha256='0'*64),
         lambda row: row.update(layer='unobserved_layer'),
     ]
+    if precision_policy == 'bf16_selective':
+        mutations.extend((
+            lambda row: next(x for x in row['launches'] if x['kernel'] == 'output_fwd_kernel')[
+                'arguments'].update(NEED_DC=False),
+            lambda row: row['telemetry'].update(readout_compensated=False),
+            lambda row: row['source_requires_grad'].__setitem__(6, False),
+        ))
     for mutate in mutations:
         altered = copy.deepcopy(result)
         row = next(value for value in altered['operator_calls'] if value['backward_calls'])
@@ -189,7 +228,7 @@ def test_bf16_native_model_trace_and_serialized_rejection(tmp_path, checkpoint, 
             utils.reparse_khdn_trace(altered, expected_source_binding=binding)
     batch = training.Batch(dict(input_ids=ids, labels=ids), 2*chunk_size, ids.numel(), ids.numel(), 0,
                            training.batch_digest(dict(input_ids=ids, labels=ids)))
-    args = SimpleNamespace(khdn_precision_policy='bf16', no_layer_checkpoint=not checkpoint, dtype='bf16')
+    args = SimpleNamespace(khdn_precision_policy=precision_policy, no_layer_checkpoint=not checkpoint, dtype='bf16')
     optimizer = FP32AdamW(model.parameters(), lr=1e-4)
     records = []
     optimizer.zero_grad(set_to_none=True)

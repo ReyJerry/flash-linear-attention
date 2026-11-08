@@ -443,8 +443,10 @@ def chunk_key_gated_hyperbolic_delta_rule(
     Telemetry describes the latest call; use a separate dictionary for each live autograd graph.
     """
     _reset_telemetry(telemetry, precision_policy)
-    if precision_policy == 'bf16':
-        if chunk_size == 128:
+    if precision_policy in ('bf16', 'bf16_selective'):
+        if precision_policy == 'bf16_selective':
+            from fla.ops.key_gated_hyperbolic_delta_rule.bf16_selective import chunk_bf16
+        elif chunk_size == 128:
             from fla.ops.key_gated_hyperbolic_delta_rule.chunk128 import chunk_bf16
         else:
             from fla.ops.key_gated_hyperbolic_delta_rule.bf16 import chunk_bf16

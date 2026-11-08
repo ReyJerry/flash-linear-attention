@@ -96,15 +96,18 @@ class KeyGatedHyperbolicDeltaNet(nn.Module):
             raise ValueError('group_size must be 1, 16 or 32 and divide head_v_dim.')
         if mode not in ('chunk', 'fused_recurrent', 'naive') or chunk_size not in (16, 32, 64, 128):
             raise ValueError('Unsupported mode or chunk_size (expected 16, 32, 64 or 128).')
-        if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16'):
-            raise ValueError('precision_policy must be strict, mixed_readout, bf16_fs6, or bf16.')
-        if precision_policy == 'bf16' and mode == 'naive':
+        if precision_policy not in ('strict', 'mixed_readout', 'bf16_fs6', 'bf16', 'bf16_selective'):
+            raise ValueError('precision_policy must be strict, mixed_readout, bf16_fs6, bf16, or bf16_selective.')
+        if precision_policy in ('bf16', 'bf16_selective') and mode == 'naive':
             raise ValueError('bf16 precision requires a native chunk or fused_recurrent mode.')
         if precision_policy in ('mixed_readout', 'bf16_fs6') and mode != 'chunk':
             raise ValueError('experimental precision requires mode=chunk.')
-        if chunk_size == 128 and (precision_policy != 'bf16' or mode != 'chunk'
+        if chunk_size == 128 and (precision_policy not in ('bf16', 'bf16_selective') or mode != 'chunk'
                                   or head_dim != 128 or self.head_v_dim != 128 or group_size != 32 or carry_mode != 'no_carry'):
             raise ValueError('C128 requires BF16 chunk mode, K=V128, g32 and no_carry.')
+        if precision_policy == 'bf16_selective' and (mode != 'chunk' or head_dim != 128
+                                                     or self.head_v_dim != 128 or group_size != 32 or carry_mode != 'no_carry'):
+            raise ValueError('bf16_selective requires chunk mode, K=V128, g32 and no_carry.')
         self.precision_policy = precision_policy
         if carry_mode not in ('no_carry', 'y_carry'):
             raise ValueError('carry_mode must be no_carry or y_carry.')
@@ -281,8 +284,8 @@ class KeyGatedHyperbolicDeltaNet(nn.Module):
             q, k, raw_v = (F.silu(x) for x in projections)
         q, k = (rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim) for x in (q, k))
         raw_v = rearrange(raw_v, 'b t (h d) -> b t h d', d=self.head_v_dim)
-        if (self.precision_policy == 'bf16' and self.mode == 'chunk' and self.training
-                and self.chunk_size == 128 and q.is_cuda and q.shape[1] > 0):
+        if (self.precision_policy in ('bf16', 'bf16_selective') and self.mode == 'chunk' and self.training
+                and (self.chunk_size == 128 or self.precision_policy == 'bf16_selective') and q.is_cuda and q.shape[1] > 0):
             from fla.ops.key_gated_hyperbolic_delta_rule.fused_prepare import fused_preprocessing
             q, k, v, beta, log_decay = fused_preprocessing(
                 q, k, raw_v, self.b_proj(hidden_states), self.f_proj(hidden_states),
@@ -308,7 +311,7 @@ class KeyGatedHyperbolicDeltaNet(nn.Module):
         else:
             from fla.ops.key_gated_hyperbolic_delta_rule import fused_recurrent_key_gated_hyperbolic_delta_rule as op
             extra = dict(checkpoint_size=self.chunk_size)
-            if self.precision_policy == 'bf16':
+            if self.precision_policy in ('bf16', 'bf16_selective'):
                 extra['precision_policy'] = 'bf16'
         o, final_state = op(
             q=q,

@@ -131,7 +131,7 @@
 | 2026 | MemoryAttention               | [Memory Attention](https://arxiv.org/abs/2609.28399)                                                                                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/memory_attn)             |
 | 2026 | PHBA                          | [PHBA: Prefix-State Hybrid Block Attention](https://arxiv.org/abs/2610.08527)                                                                | [code](fla/models/phba)                                                                                |
 
-PHBA combines block-sparse token retrieval with recurrent prefix states in a joint softmax. Its CUDA implementation provides `PHBAConfig`, `PHBAModel` and `PHBAForCausalLM` for training and cache-free generation. See the [PHBA guide](docs/phba.md) for dependencies, supported inputs and validation scope.
+PHBA combines block-sparse token retrieval with recurrent prefix states in a joint softmax. Its CUDA implementation provides `PHBAConfig`, `PHBAModel` and `PHBAForCausalLM` for training and cache-free generation. See the [PHBA guide](fla/ops/phba/README.md) for dependencies, supported inputs and validation scope.
 
 ## Installation
 

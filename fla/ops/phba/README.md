@@ -1,6 +1,6 @@
 # PHBA operator
 
-See the [paper](https://arxiv.org/abs/2610.08527) and [model guide](../../../docs/phba.md) for the architecture and supported model APIs.
+Implementation of [PHBA: Prefix-State Hybrid Block Attention](https://arxiv.org/abs/2610.08527), by Ruijie Li, Jiaxi Hu, Shiyu Wang and Yuxuan Liang (2026).
 
 PHBA combines causal local token attention, selected historical token blocks, and gated prefix-state slots in one joint softmax. Routing is discrete and is treated as constant in backward.
 
@@ -38,6 +38,75 @@ The public entry is `chunk.py`, with sequence geometry and workspace limits in `
 | `utils.py`     | Input contracts, structured errors and gradient alignment                  |
 | `naive.py`     | FP64 and storage-aware references, including routing and metadata oracles  |
 
-`flash_attention.py` adapts the local-attention interface. `backends/cublaslt.py` owns projection autograd wrappers and optional acceleration, with native fallbacks and packaged source resources. Profiling and algorithm-screening tools live under `benchmarks/`, outside the production operator. Internal module paths are implementation details; use the exports from `fla.ops.phba` for the public operator and sequence plan.
+`flash_attention.py` adapts the local-attention interface. `backends/cublaslt.py` owns projection autograd wrappers and optional acceleration, with native fallbacks and packaged source resources. Internal module paths are implementation details; use the exports from `fla.ops.phba` for the public operator and sequence plan.
 
 Production FlashAttention initialization checks dependencies, device support and the low-level parameter schema. Numerical ABI checks and layout/route assertions live in `tests/ops/test_phba.py`.
+
+## Installation and model registration
+
+Install FLA with its CUDA and PHBA dependencies. FlashAttention 2.8.3 is required for the joint local-attention backward interface.
+
+```bash
+pip install -e '.[cuda,phba]'
+```
+
+PHBA is registered by the shared `fla.models` exports. Import the configuration directly or use Transformers auto classes:
+
+```python
+import torch
+from transformers import AutoModelForCausalLM
+from fla.models import PHBAConfig
+
+config = PHBAConfig(
+    hidden_size=2048,
+    num_hidden_layers=24,
+    num_heads=16,
+    num_kv_heads=16,
+    intermediate_size=4272,
+    max_position_embeddings=8192,
+    moba_chunk_size=128,
+    moba_topk=8,
+    gsa_num_slots=128,
+    qk_norm=False,
+    use_output_gate=False,
+    use_cache=False,
+)
+model = AutoModelForCausalLM.from_config(config).cuda().train()
+tokens = torch.randint(config.vocab_size, (1, 8192), device='cuda')
+with torch.autocast('cuda', dtype=torch.bfloat16):
+    loss = model(input_ids=tokens, labels=tokens).loss
+loss.backward()
+```
+
+The public model classes are `PHBAConfig`, `PHBAModel`, and `PHBAForCausalLM` in `fla.models.phba`. The layer is `fla.layers.phba.PHBA`; the operator is `fla.ops.phba.chunk_phba`. `fla.models` exports all three classes; importing `fla` also registers PHBA with Transformers. Checkpoints retain the PHBA projection, normalization, MLP, embedding and language-head parameter names.
+
+## Supported execution
+
+The operator accepts CUDA FP16 or BF16 activation tensors and accumulates prefix and attention intermediates in FP32. Models can retain FP32 parameters under autocast. Query, key and value head counts must match; head dimensions are multiples of 8 from 16 through 128; prefix slot counts are 1–128. Supported chunk sizes are 32, 64, 128, 256, 512 and topk is 1–16, including the current block.
+
+Dense inputs, packed variable-length inputs, nonempty padded sequences, first-order gradients, and non-reentrant gradient checkpointing are supported. `elementwise_affine=False` removes learnable scale parameters from all PHBA normalization layers. Packed operator inputs use `[1, total_tokens, heads, width]` and int32 cumulative sequence lengths. `SequenceLengthPlan.from_host` can supply known sequence lengths without a device-to-host length read. Dense `[B,T,...]` inputs with `B>1` require exactly `B` sequences of length `T`; packed inputs require `B=1`. When both a plan and `cu_seqlens` are supplied, their boundaries must agree. Passing `plan.cu_seqlens` itself, or a fresh, unmodified source used by `from_device`, avoids a device comparison. Other separate tensors require a value comparison and can synchronize. Model calls may pass `phba_length_plan` alone for packed sequences, and rotary positions use its boundaries. Padding masks and explicit packed `cu_seqlens` are mutually exclusive.
+
+For language-model loss, mask padding and the first label of each packed or padded sequence with the criterion's ignore index (default `-100`) so shifted targets do not cross sequence boundaries. The model tests and benchmark apply this caller-side label policy.
+
+The model supports cache-free training, prefill and generation with `use_cache=False`. `output_attentions=True`, persistent KV/prefix caching, an additional sliding window, and unequal query/key/value head counts are not implemented by this deterministic path. Final prefix states returned by the operator are FP32 and nondifferentiable. Context parallelism, tensor parallelism and full-graph compilation are outside the current validation scope.
+
+## Optional H20 acceleration
+
+PHBA projections retain the native linear path unless the exact-screened H20 geometry and runtime match. The accelerated path is restricted to PyTorch 2.9.0, CUDA 12.8, the validated cuBLASLt library, BF16 autocast and its three weight-gradient geometries. Actual GEMM operands must have 16-byte-aligned addresses; a contiguous view alone is insufficient. Unsupported alignment uses native weight-gradient operations without adding an alignment copy. The fused SwiGLU path checks its recomputed activation and incoming gradient and retains the native einsum fallback. The C++ helpers build from packaged source into the Torch extension cache; no prebuilt machine-specific binary is included. CUDA development headers and a C++ compiler are needed for this optional path. Other supported cases retain native PyTorch operations.
+
+Training uses the optimizer selected by the training framework.
+
+## Tests and benchmarks
+
+```bash
+FLA_CI_ENV=0 pytest tests/ops/test_phba.py tests/models/test_modeling_phba.py \
+  tests/layers/test_phba_linear.py
+
+python -m benchmarks.ops.run --op chunk_phba --no-base
+
+python benchmarks/benchmark_phba.py --chunk-size 128 --topk 8 \
+  --warmup-steps 20 --steps 50 --optimizer torch.optim:AdamW \
+  --output phba-throughput.json
+```
+
+The standard operator benchmark includes dense and packed shapes. The model benchmark measures complete training-compute steps with 1.264B parameters, B1 x 8192, FP32 parameters, BF16 autocast and lr=0. Timing includes zero-grad, forward/loss, backward, clipping and optimizer updates. Add `--lengths 2048,3072,3072` for packed inputs. Benchmark results and validation details are recorded in the PR description.

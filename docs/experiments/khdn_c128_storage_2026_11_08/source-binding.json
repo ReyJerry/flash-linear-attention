@@ -1,0 +1,53 @@
+{
+  "base_commit": "d9103472f6b6bc47b9a685b31d0d5abe19b16071",
+  "measured_files": {
+    "measured/host.py": "6a4bdf4dc05192be3152644c678dfcc495a7c417cc76f06a3a3566365f1bd402",
+    "measured/kernels_inverse.py": "3d468468be1b19818f875313094d705eadda75fc54fadc26e894bc8b597670bc",
+    "measured/preprocessing.py": "f3c7e4d68f651904a9647e60b16808f6610ee886b10bc5b86dca4d9b2758515b",
+    "measured/preprocessing_kernels.py": "8db953cdf2b9f9643dfb3d6ad8e356e25cc5b13231fb7307ab50940b41c19490",
+    "measured/model_screen.py": "7809d66c3c09e4284c637eccf222469094be72992ef04e2afecedd373f246316",
+    "measured/control_model.py": "2d46b0c5d3ff0038cf0f865ef6310c930f96b7c942b3fd33d99f976862a59a38",
+    "benchmarks/fp32_adamw.py": "60e48956ac9f75676601b1d1ace3a064e43fea4047b75c15df11e5f2d2bd05f2",
+    "fla/layers/key_gated_hyperbolic_deltanet.py": "f9245bcfaf9de2dec928934cce9c8fc21ef00e58d626ea7fc90c8113b16b2259",
+    "fla/models/key_gated_hyperbolic_deltanet/configuration_key_gated_hyperbolic_deltanet.py": "54be89ffa7a96ff71a5a0c77eb4e18931f2f386537de7fe086eb9cec305f4ff5",
+    "fla/models/key_gated_hyperbolic_deltanet/modeling_key_gated_hyperbolic_deltanet.py": "8dc0b161e4f8d9ee1266d459daef41228ca2e5573d08ed65d3079ccf86bd74eb"
+  },
+  "mapping": {
+    "measured/host.py": "fla/ops/key_gated_hyperbolic_delta_rule/chunk128.py",
+    "measured/kernels_inverse.py": "fla/ops/key_gated_hyperbolic_delta_rule/chunk128_kernels.py",
+    "measured/preprocessing.py": "fla/ops/key_gated_hyperbolic_delta_rule/fused_prepare.py",
+    "measured/preprocessing_kernels.py": "fla/ops/key_gated_hyperbolic_delta_rule/fused_prepare_kernels.py",
+    "benchmarks/fp32_adamw.py": "benchmarks/fp32_adamw.py",
+    "fla/layers/key_gated_hyperbolic_deltanet.py": "fla/layers/key_gated_hyperbolic_deltanet.py",
+    "fla/models/key_gated_hyperbolic_deltanet/configuration_key_gated_hyperbolic_deltanet.py": "fla/models/key_gated_hyperbolic_deltanet/configuration_key_gated_hyperbolic_deltanet.py",
+    "fla/models/key_gated_hyperbolic_deltanet/modeling_key_gated_hyperbolic_deltanet.py": "fla/models/key_gated_hyperbolic_deltanet/modeling_key_gated_hyperbolic_deltanet.py"
+  },
+  "published_files": {
+    "benchmarks/fp32_adamw.py": "60e48956ac9f75676601b1d1ace3a064e43fea4047b75c15df11e5f2d2bd05f2",
+    "benchmarks/hyperbolic_benchmark_utils.py": "e916e84e6595b8c38b3a360f300ac9a4a8ccc7339b647773afbaabea173c2492",
+    "benchmarks/khdn_c128_trace.py": "2ce2ff085b49e19c4fa1c39c8aa570e838a3f038e59d6b9eab13a58c8049698b",
+    "benchmarks/khdn_compiler_precision.py": "2f2cddadab5fd17fd771fb80de6990004eb42a2c0d6627b80db61bc5c9b19a3b",
+    "fla/layers/key_gated_hyperbolic_deltanet.py": "f9245bcfaf9de2dec928934cce9c8fc21ef00e58d626ea7fc90c8113b16b2259",
+    "fla/models/key_gated_hyperbolic_deltanet/configuration_key_gated_hyperbolic_deltanet.py": "54be89ffa7a96ff71a5a0c77eb4e18931f2f386537de7fe086eb9cec305f4ff5",
+    "fla/models/key_gated_hyperbolic_deltanet/modeling_key_gated_hyperbolic_deltanet.py": "8dc0b161e4f8d9ee1266d459daef41228ca2e5573d08ed65d3079ccf86bd74eb",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk128.py": "07c6505200e187c5e935f246ad0f9288310e7099c64bf9e07d15515536fa7010",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk128_kernels.py": "c80dcc483b9781756122900c1f6b64385ee2b4f178e0524f1b42ee80b1a64a7a",
+    "fla/ops/key_gated_hyperbolic_delta_rule/fused_prepare.py": "92fc3c5db32ab529861e06b53c85a4f964cf5587bd778819c9b6ff5a43e83fad",
+    "fla/ops/key_gated_hyperbolic_delta_rule/fused_prepare_kernels.py": "aa2d6c4f5c65dbdeadb1230dba2992e32fb480b1a4e15763e81dfd804416ccb9",
+    "tests/benchmarks/test_khdn_bf16_harness.py": "c452283c3dda27f104cdc09aa4895ab10826effeb4d63ce68e420abc0c09e10b",
+    "tests/benchmarks/test_khdn_compiler_precision.py": "1662455dd1dfec49aa6489d5f2eb0fa6d88f44aa3cd65e4ee5a2dd80f63c96a5",
+    "tests/ops/test_key_gated_hyperbolic_bf16.py": "5f2240a402b5a341f364404c9264a8eaf39a327d8271fa294551277e7ce061ac"
+  },
+  "post_measurement_functions": {
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk128_kernels.py": [
+      "erase",
+      "erase_vjp"
+    ]
+  },
+  "normalization": "Imports and unused shared_feedback_system_bwd g/nu and Preprocessing.backward rows assignments only. Explicit FP32 reduction-input conversion in erase/erase_vjp is a post-measurement correction, not claimed measured.",
+  "excluded_unrelated_files": [
+    "tests/models/test_key_gated_hyperbolic_precision.py",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk_parallel_bwd.py",
+    "tests/ops/test_key_gated_hyperbolic_delta_rule_parallel.py"
+  ]
+}

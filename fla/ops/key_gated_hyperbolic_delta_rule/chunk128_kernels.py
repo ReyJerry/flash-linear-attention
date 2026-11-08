@@ -108,13 +108,13 @@ def inverse_lower(a, C: tl.constexpr):
 
 @triton.jit
 def erase(k, gamma, x):
-    return x - gamma * k[:, None] * tl.sum(k[:, None] * x, 0)[None, :]
+    return x - gamma * k[:, None] * tl.sum((k[:, None] * x).to(tl.float32), 0)[None, :]
 
 
 @triton.jit
 def erase_vjp(k, gamma, x, grad):
-    p = tl.sum(k[:, None] * x, 0)
-    h = tl.sum(k[:, None] * grad, 0)
+    p = tl.sum((k[:, None] * x).to(tl.float32), 0)
+    h = tl.sum((k[:, None] * grad).to(tl.float32), 0)
     gx = grad - gamma * k[:, None] * h[None, :]
     gk = -gamma * tl.sum(grad * p[None, :] + x * h[None, :], 1)
     gg = -tl.sum(p * h, 0)
@@ -166,22 +166,48 @@ def common_input_kernel(Q, K0, Beta, Starts, Ends, P,
 
 
 @triton.jit
+def product_combine(x, y):
+    return x*y
+
+
+@triton.jit
 def common_products_kernel(P, C: tl.constexpr):
+    tl.static_assert(C == 128)
     ch = tl.program_id(0).to(tl.int64)
-    row_id = tl.program_id(1).to(tl.int64)
-    j = tl.arange(0, C).to(tl.int64)
-    beta = load_vector(P[21], ch, C)
-    n = load_vector(P[18], ch, C)
-    br = tl.load(P[21] + ch * C + row_id)
-    factor = tl.where(j < row_id, 1. - beta, 1.)
-    inclusive = tl.cumprod(factor, 0, reverse=True)
-    exclusive = tl.where(j + 1 < C, tl.gather(inclusive, tl.minimum(j + 1, C-1).to(tl.int32), 0), 1.)
-    product = tl.where(j < row_id, exclusive, 0.)
-    qs = tl.where(j < row_id, -br * n * product, tl.where(j == row_id, n, 0.))
-    offset = ch * C * C + row_id * C + j
-    tl.store(P[14] + offset, qs)
-    tl.store(P[15] + offset, product)
-    tl.store(P[22] + ch * C + row_id, br * at(inclusive, 0, C))
+    tile = tl.program_id(1).to(tl.int64)
+    rt, ct = tile // (C//16), tile % (C//16)
+    i = tl.arange(0, 16).to(tl.int64)
+    all_i = tl.arange(0, C).to(tl.int64)
+    rows, cols = rt*16+i, ct*16+i
+    br = tl.load(P[21]+ch*C+rows)
+    nc = tl.load(P[18]+ch*C+cols)
+    if rt == ct:
+        factor = tl.where(i[:, None] > i[None, :], 1.-br[:, None], 1.)
+        inclusive = tl.cumprod(factor, axis=0)
+        previous = tl.gather(inclusive, tl.broadcast_to(tl.maximum(i-1, 0)[:, None].to(tl.int32), (16, 16)), 0)
+        prod = tl.where(i[:, None] > i[None, :], previous, 0.)
+    elif rt > ct:
+        bc = tl.load(P[21]+ch*C+cols)
+        rp = tl.cumprod(1.-br, 0)
+        rp = tl.where(i > 0, tl.gather(rp, tl.maximum(i-1, 0).to(tl.int32), 0), 1.)
+        cp = tl.cumprod(1.-bc, 0, reverse=True)
+        cp = tl.where(i < 15, tl.gather(cp, tl.minimum(i+1, 15).to(tl.int32), 0), 1.)
+        all_beta = load_vector(P[21], ch, C)
+        middle = tl.reduce(tl.where((all_i >= (ct+1)*16) & (all_i < rt*16), 1.-all_beta, 1.), 0, product_combine)
+        prod = rp[:, None]*cp[None, :]*middle
+    else:
+        prod = tl.full((16, 16), 0., tl.float32)
+    offset = ch*C*C+rows[:, None]*C+cols[None, :]
+    qs = tl.where(rows[:, None] > cols[None, :], -br[:, None]*nc[None, :]*prod,
+                  tl.where(rows[:, None] == cols[None, :], nc[None, :], 0.))
+    tl.store(P[15]+offset, prod)
+    tl.store(P[14]+offset, qs)
+    if ct == 0:
+        all_beta = load_vector(P[21], ch, C)
+        prior = tl.reduce(tl.where(all_i < rt*16, 1.-all_beta, 1.), 0, product_combine)
+        prefix = tl.cumprod(1.-br, 0)
+        prefix = tl.where(i > 0, tl.gather(prefix, tl.maximum(i-1, 0).to(tl.int32), 0), 1.)
+        tl.store(P[22]+ch*C+rows, br*prior*prefix)
 
 
 @triton.jit
@@ -225,7 +251,7 @@ def group_gauge_kernel(Curvature, P, Gp, GS: tl.constexpr, NG: tl.constexpr, C: 
         history, lam = tl.full((C,), 0, tl.float32), tl.full((C,), 1, tl.float32)
         for r in range(C):
             offset = r.to(tl.int64) * C + i.to(tl.int64)
-            rr = tl.load(P[11] + ch * C * C + offset) * tl.load(Gp[3] + block * C * C + offset)
+            rr = tl.load(P[11] + ch * C * C + offset).to(tl.float32) * tl.load(Gp[3] + block * C * C + offset).to(tl.float32)
             nr, br = at(n, r, C), at(beta, r, C)
             u0 = (br + kap * tl.sum(rr * history, 0)) / (nr - kap * at(rr, r, C))
             ratio = 1 - br + nr * u0
@@ -277,7 +303,7 @@ def local_state_graph(P, Gp, ch, block, v, s, y, length, kap,
     nu = load_vector(Gp[7], block, C)
     h = tl.sum(v * y, 1)
     w = af - kap * pointer_mv(Gp[0], block, nu * h, C)
-    u = w[:, None] * v - nu[:, None] * pointer_mm(P[10], ch, y, C, G, C)
+    u = (w[:, None] * v - nu[:, None] * pointer_mm(P[10], ch, y, C, G, C)).to(tl.bfloat16)
     if C >= 16:
         r, t, zp = mass_forward_scan(beta, lam, n, w, C)
     else:
@@ -327,17 +353,17 @@ def state_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, 
         start, end = tl.load(Starts + chunk), tl.load(Ends + chunk)
         vo = ((start + i.to(tl.int64))[:, None] * H + head) * VD + group * GS + g[None, :].to(tl.int64)
         vmask = (i[:, None] < end - start) & (g[None, :] < GS)
-        v = tl.load(V0 + vo, vmask, 0).to(tl.float32)
         if CARRY and chunk > first:
             y = yn
         else:
             if BF16_FS6:
                 tl.static_assert(not MIXED and not CARRY)
-                y = pointer_mm(P[5], ch, s, C, G, K)
+                y = pointer_mm(P[5], ch, s, C, G, K).to(tl.bfloat16)
             else:
-                y = pointer_mm(P[5], ch, s, C, G, K)
+                y = pointer_mm(P[5], ch, s, C, G, K).to(tl.bfloat16)
         store_matrix(SavedS, block, s, K, G)
         store_matrix(SavedY, block, y, C, G)
+        v = tl.load(V0 + vo, vmask, 0).to(tl.float32)
         s, u, r, t, ss, us, w, zp = local_state_graph(
             P, Gp, ch, block, v, s, y, end - start, kap, C, K, G, MIXED, RHO_MATERIALIZED)
         if CARRY and chunk + 1 < last:
@@ -463,49 +489,49 @@ def state_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp,
         length = end - start
         vo = ((start + i.to(tl.int64))[:, None] * H + head) * VD + group * GS + g[None, :].to(tl.int64)
         mask = (i[:, None] < length) & (g[None, :] < GS)
-        v = tl.load(V0 + vo, mask, 0).to(tl.float32)
-        s = load_matrix(SavedS, block, K, G)
-        u = load_matrix(Local[0], block, C, G)
         r, t = load_vector(Local[1], block, C), load_vector(Local[2], block, C)
-        w, zp = load_vector(Local[4], block, C), load_vector(Local[5], block, C)
         n = load_vector(P[18], ch, C)
-        beta = load_vector(P[21], ch, C)
-        rhol = read_rho_row(Gp, block, length-1, i, C, RHO_MATERIALIZED)
         nu = load_vector(Gp[7], block, C)
-        lam = load_vector(Gp[6], block, C)
         z = r + t
-        gu = load_matrix(OutputAdj[1], block, C, G)
-        gr, gt = load_vector(OutputAdj[2], block, C), load_vector(OutputAdj[3], block, C)
         rl, tt, zz = at(r, length - 1, C), at(t, length - 1, C), at(z, length - 1, C)
         kl = tl.load(P[1] + ch * C * K + (length - 1).to(tl.int64) * K + a)
         tau = tl.load(P[2] + ch * C * K + (length - 1).to(tl.int64) * K + a)
         gl = tl.load(P[19] + ch * C + (length - 1).to(tl.int64))
-        ss = at(nu, length - 1, C) * s
-        us = tl.where(i[:, None] < length - 1, rhol[:, None] * u, 0.)
-        ts = kl[:, None] * row(v, length - 1, C, G)[None, :] / at(n, length - 1, C)
-        projected = pointer_mm(P[17], ch, bs, C, G, K, True)
+        ss = at(nu, length - 1, C) * load_matrix(SavedS, block, K, G)
+        last_v = tl.load(V0+((end-1)*H+head)*VD+group*GS+g.to(tl.int64), g < GS, 0.).to(tl.float32)
+        ts = kl[:, None] * last_v[None, :] / at(n, length - 1, C)
         adj = bs
         if CARRY:
             store_matrix(EdgeY, block, by, C, G)
         if CARRY and chunk + 1 < last:
-            hc = load_matrix(Carry[1], ch, C, C)
             fn = load_matrix(P[5], ch + H, C, K)
             adj += mm_state_three(tl.trans(fn), by, K, G, C, False)
-            projected += mm_state_three(tl.trans(hc), by, C, G, C, False)
         # contraction duality avoids rebuilding the state and carry residual matrices
         gx_norm = erase(kl, gl, adj / zz)
         norm_s = tl.sum(tl.sum(gx_norm * (tau[:, None] * ss), 0), 0)
-        norm_s += tl.sum(tl.sum((projected / zz) * us, 0), 0)
         dot_s = tl.sum(tl.sum(adj * ts, 0), 0)
         gs = load_matrix(OutputAdj[0], block, K, G)
         gs += at(nu, length - 1, C) * tau[:, None] * gx_norm
         # consume the output-state partial before reusing its storage for the tail adjoint
         tl.debug_barrier()
         store_matrix(OutputAdj[0], block, adj, K, G)
+        projected = pointer_mm(P[17], ch, bs, C, G, K, True)
+        if CARRY and chunk + 1 < last:
+            hc = load_matrix(Carry[1], ch, C, C)
+            projected += mm_state_three(tl.trans(hc), by, C, G, C, False)
+        rhol = read_rho_row(Gp, block, length-1, i, C, RHO_MATERIALIZED)
+        u = load_matrix(Local[0], block, C, G)
+        us = tl.where(i[:, None] < length - 1, rhol[:, None] * u, 0.)
+        norm_s += tl.sum(tl.sum((projected / zz) * us, 0), 0)
+        gu = load_matrix(OutputAdj[1], block, C, G)
+        gr, gt = load_vector(OutputAdj[2], block, C), load_vector(OutputAdj[3], block, C)
         gr += tl.where(i == length - 1, -(norm_s + (tt / zz) * dot_s) / zz, 0.)
         gt += tl.where(i == length - 1, ((rl / zz) * dot_s - norm_s) / zz, 0.)
         gu += tl.where(i[:, None] < length - 1,
                        rhol[:, None] * projected / zz, 0.)
+        w, zp = load_vector(Local[4], block, C), load_vector(Local[5], block, C)
+        beta = load_vector(P[21], ch, C)
+        lam = load_vector(Gp[6], block, C)
         if C >= 16:
             gb, gn, gw = mass_reverse_scan(beta, lam, n, w, zp, gr, gt, C)
         else:
@@ -518,12 +544,13 @@ def state_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp,
                 gz = gri * (1 - at(beta, j, C)) / at(lam, j, C)
                 gn += tl.where(i == j, gti * at(w, j, C), 0.)
                 gw += tl.where(i == j, gti * at(n, j, C), 0.)
-        gw += tl.sum(gu * v, 1)
+        # Reload V after the transpose contraction instead of keeping it live across that GEMM.
+        gw += tl.sum(gu * tl.load(V0 + vo, mask, 0, volatile=True).to(tl.float32), 1)
         b = pointer_mv(Gp[0], block, gw, C, True)
         rhs = nu * b
         gh = -kap * rhs
         gy = -pointer_mm(P[10], ch, nu[:, None] * gu, C, G, C, True)
-        gy += gh[:, None] * v
+        gy += gh[:, None] * tl.load(V0 + vo, mask, 0).to(tl.float32)
         # the U and mass partials have been consumed before their storage is reused
         tl.debug_barrier()
         store_matrix(OutputAdj[1], block, gu, C, G)
@@ -647,13 +674,13 @@ def diagonal_inverse_kernel(A, Inv, C: tl.constexpr, B: tl.constexpr):
     matrix = tl.program_id(0).to(tl.int64)
     row_block = tl.program_id(1).to(tl.int64)
     i = tl.arange(0, B).to(tl.int64)
-    j = tl.arange(0, C).to(tl.int64)
     row = row_block*B+i
+    for column_block in range(row_block+1, C//B):
+        upper = matrix*C*C+row[:, None]*C+column_block*B+i[None, :]
+        tl.store(Inv+upper, tl.full((B, B), 0., tl.float32))
     offsets = matrix*C*C+row[:, None]*C+row_block*B+i[None, :]
     value = inverse_lower(tl.load(A+offsets).to(tl.float32), B)
     tl.store(Inv+offsets, value)
-    upper = matrix*C*C+row[:, None]*C+j[None, :]
-    tl.store(Inv+upper, tl.full((B, C), 0., tl.float32), j[None, :] >= (row_block+1)*B)
 
 
 @triton.jit
@@ -677,11 +704,20 @@ def inverse_offdiagonal_kernel(A, Inv, C: tl.constexpr, N: tl.constexpr, SINGLE:
 @triton.jit
 def pointer_mm(p, block, b, M: tl.constexpr, N: tl.constexpr,
                R: tl.constexpr, TRANS: tl.constexpr = False):
+    tl.static_assert(M == 128 and R == 128 and N == 32)
+    m = tl.arange(0, M).to(tl.int64)
+    k = tl.arange(0, 64).to(tl.int64)
+    b0, b1 = tl.split(tl.permute(tl.reshape(b, (2, 64, N)), (1, 2, 0)))
     if TRANS:
-        a = tl.trans(load_matrix(p, block, R, M))
+        off = block*R*M + k[None, :]*M + m[:, None]
+        stride = 64*M
     else:
-        a = load_matrix(p, block, M, R)
-    return mm_three(a, b, M, N, R)
+        off = block*M*R + m[:, None]*R + k[None, :]
+        stride = 64
+    a0 = tl.load(p+off).to(tl.bfloat16)
+    result = tl.dot(a0, b0.to(tl.bfloat16), out_dtype=tl.float32)
+    a1 = tl.load(p+off+stride).to(tl.bfloat16)
+    return tl.dot(a1, b1.to(tl.bfloat16), acc=result, out_dtype=tl.float32)
 
 
 @triton.jit
@@ -1469,19 +1505,19 @@ def reduce_domain_flags(Flags, Reduced, N: tl.constexpr, BLOCK: tl.constexpr):
 def shared_feedback_bwd(Curvature, Gp, SavedY, SavedW, OutputAdj, Sh,
                         NG: tl.constexpr, GS: tl.constexpr, C: tl.constexpr, G: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True):
     ch = tl.program_id(0).to(tl.int64)
-    i = tl.program_id(1).to(tl.int64)*64+tl.arange(0, 64).to(tl.int64)
+    i = tl.program_id(1).to(tl.int64)*32+tl.arange(0, 32).to(tl.int64)
     j = tl.program_id(2).to(tl.int64)*64+tl.arange(0, 64).to(tl.int64)
     g = tl.arange(0, G).to(tl.int64)
     kap = tl.load(Curvature).to(tl.float32)/GS
-    ga = tl.full((64, 64), 0., tl.float32)
-    gl = tl.full((64, 64), 0., tl.float32)
-    gqs = tl.full((64, 64), 0., tl.float32)
+    ga = tl.full((32, 64), 0., tl.float32)
+    gl = tl.full((32, 64), 0., tl.float32)
+    gqs = tl.full((32, 64), 0., tl.float32)
     for group in range(NG):
         block = ch*NG+group
         nu = tl.load(Gp[7]+block*C+i)
         gu = tl.load(OutputAdj[1]+block*C*G+i[:, None]*G+g[None, :])
         y = tl.load(SavedY+block*C*G+j[:, None]*G+g[None, :])
-        gl -= mm_three(nu[:, None]*gu, tl.trans(y), 64, 64, G)
+        gl -= mm_three(nu[:, None]*gu, tl.trans(y), 32, 64, G)
         b = tl.load(OutputAdj[2]+block*C+i)
         w = tl.load(SavedW+block*C+j)
         off = block*C*C+i[:, None]*C+j[None, :]
@@ -1514,3 +1550,41 @@ def read_rho_row(Gp, block, row_id, cols, C: tl.constexpr, MATERIALIZED: tl.cons
     nr = tl.load(Gp[7]+block*C+row_id)
     inverse = 1./tl.load(Gp[7]+block*C+cc)
     return tl.where(cc < row_id, nr*inverse, (cc == row_id).to(tl.float32))
+
+
+@triton.jit
+def shared_feedback_gl_bwd(Gp, SavedY, OutputAdj, Sh, NG: tl.constexpr, C: tl.constexpr, G: tl.constexpr):
+    ch = tl.program_id(0).to(tl.int64)
+    i = tl.program_id(1).to(tl.int64)*64+tl.arange(0, 64).to(tl.int64)
+    j = tl.program_id(2).to(tl.int64)*64+tl.arange(0, 64).to(tl.int64)
+    r = tl.arange(0, NG*G).to(tl.int64)
+    blocks = ch*NG+r//G
+    nu = tl.load(Gp[7]+blocks[None, :]*C+i[:, None])
+    gu = tl.load(OutputAdj[1]+blocks[None, :]*C*G+i[:, None]*G+(r % G)[None, :])
+    y = tl.load(SavedY+blocks[None, :]*C*G+j[:, None]*G+(r % G)[None, :])
+    value = -tl.dot((nu*gu).to(tl.bfloat16), tl.trans(y).to(tl.bfloat16), out_dtype=tl.float32)
+    tl.store(Sh[1]+ch*C*C+i[:, None]*C+j[None, :], value)
+
+
+@triton.jit
+def shared_feedback_system_bwd(Curvature, Gp, SavedY, SavedW, OutputAdj, Sh,
+                               NG: tl.constexpr, GS: tl.constexpr, C: tl.constexpr, G: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True):
+    ch = tl.program_id(0).to(tl.int64)
+    i = tl.program_id(1).to(tl.int64)*64+tl.arange(0, 64).to(tl.int64)
+    j = tl.program_id(2).to(tl.int64)*64+tl.arange(0, 64).to(tl.int64)
+    kap = tl.load(Curvature).to(tl.float32)/GS
+    ga = tl.full((64, 64), 0., tl.float32)
+    gqs = tl.full((64, 64), 0., tl.float32)
+    for group in range(NG):
+        block = ch*NG+group
+        b = tl.load(OutputAdj[2]+block*C+i)
+        w = tl.load(SavedW+block*C+j)
+        off = block*C*C+i[:, None]*C+j[None, :]
+        rho = read_rho_matrix(Gp, block, i, j, C, RHO_MATERIALIZED)
+        gz = -rho*b[:, None]*w[None, :]
+        gqs += gz
+        vv = tl.load(Gp[3]+off)
+        ga += (-kap*gz)*vv
+    off = ch*C*C+i[:, None]*C+j[None, :]
+    tl.store(Sh[0]+off, ga)
+    tl.store(Sh[3]+off, gqs)

@@ -155,6 +155,33 @@ def attest_compiled_policy(launch, precision_policy):
         raise AssertionError('KHDN strict family requires FP64 arithmetic without Tensor Cores/dots')
 
 
+def _attest_c128_bf16_matrix_arithmetic(name, inventory):
+    """Admit source-bound matrix elementwise operations, never BF16 scalar reductions or controls."""
+    shapes = {
+        'common_tail_finish': (128, 32),
+        'group_system_tiles': (128, 32),
+        'common_base_bwd': (16, 128),
+        'interval_bwd_diagonal': (32, 32),
+    }
+    observed = 0
+    for source_line in _compiler_without_comments(inventory['raw_assembly']['ttir']).splitlines():
+        probe = re.sub(r'"(?:\\.|[^"\\])*"', '""', source_line)
+        if not re.search(r'\b(?:arith\.(?:mulf|addf|subf|divf|negf|maxnumf|minnumf)|math\.\w+)\b', probe):
+            continue
+        line = _mlir_without_location(source_line)
+        operation = re.search(r'\b(arith\.(?:mulf|addf|subf|divf|negf|maxnumf|minnumf)|math\.\w+)\b', line)
+        if not re.search(r'(?:\bbf16\b|xbf16\b)', line.rsplit(':', 1)[-1]):
+            continue
+        matrix = re.search(r':\s*tensor<(\d+)x(\d+)xbf16>\s*$', line)
+        if (operation[1] not in ('arith.mulf', 'arith.addf', 'math.fma') or matrix is None
+                or name not in shapes or tuple(map(int, matrix.groups())) != shapes[name]):
+            raise AssertionError('KHDN C128 BF16 arithmetic is restricted to declared matrix elementwise sites')
+        observed += 1
+    if observed != inventory['multiply_add_ir_dtypes'].get('bf16', 0):
+        raise AssertionError('KHDN C128 BF16 matrix arithmetic inventory differs')
+    return observed > 0
+
+
 def _attest_bf16_arithmetic(launch, inventory):
     """Check C16 product counts or the source-bound C128 BF16/FP32 specialization."""
     counts = dict(common_base_fwd_kernel=0, common_interval_fwd_kernel=0, common_system_fwd_kernel=9,
@@ -179,9 +206,11 @@ def _attest_bf16_arithmetic(launch, inventory):
     if re.search(r'\bf64\b|xf64\b', raw['ttir']) or re.search(r'\.f64\b', raw['ptx']):
         raise AssertionError('KHDN bf16 compiled FP64 type or instruction is forbidden')
     scalar_types = set(inventory['multiply_add_ir_dtypes'])
-    if (not scalar_types <= {'f32'} or (not c128 and scalar_types != {'f32'})
+    matrix_bf16 = _attest_c128_bf16_matrix_arithmetic(name, inventory) if c128 else False
+    if (not scalar_types <= ({'f32', 'bf16'} if matrix_bf16 else {'f32'})
+            or (not c128 and scalar_types != {'f32'})
             or (c128 and name == 'gauge_collect' and scalar_types)):
-        raise AssertionError('KHDN bf16 scalar/control arithmetic must be FP32')
+        raise AssertionError('KHDN bf16 non-dot arithmetic precision differs')
     dots, mma = inventory['dot_operations'], inventory['ptx_tensor_core_opcodes']
     if (not c128 and len(dots) != counts[name]) or any(
         dot['operand_dtypes'] != ['bf16', 'bf16'] or dot['result_dtype'] != 'f32'
@@ -190,7 +219,8 @@ def _attest_bf16_arithmetic(launch, inventory):
         raise AssertionError('KHDN bf16 per-GEMM compiled dot count or operand/accumulator type differs')
     if bool(dots) != bool(mma) or any(not re.search(r'\.f32\.bf16\.bf16(?:\.f32)?$', opcode) for opcode in mma):
         raise AssertionError('KHDN bf16 requires matching BF16/FP32 Tensor Core instructions')
-    if any(not opcode.endswith('.f32') for opcode in inventory['ptx_floating_opcodes']):
+    if any(not (opcode.endswith('.f32') or matrix_bf16 and re.fullmatch(
+            r'(?:add|mul|fma)(?:\.[\w]+)*\.bf16(?:x2)?', opcode)) for opcode in inventory['ptx_floating_opcodes']):
         raise AssertionError('KHDN bf16 PTX scalar arithmetic must be FP32')
 
 

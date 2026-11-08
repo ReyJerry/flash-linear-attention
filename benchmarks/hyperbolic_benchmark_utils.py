@@ -604,7 +604,7 @@ def _khdn_bf16_source_binding(module, kernels):
             'jit_functions': {name: _khdn_kernel_source_hash(value) for name, value in vars(kernels).items()
                               if hasattr(value, 'fn')},
             'selected_arithmetic': ARITHMETIC if c128 else 'bf16_output_source_single_c16',
-            'backward_primal': 'FP32 SavedS/SavedY'}
+            'backward_primal': 'BF16 SavedS/SavedY' if c128 else 'FP32 SavedS/SavedY'}
 
 
 def _attest_bf16_sources(row, interrupted):
@@ -619,8 +619,10 @@ def _attest_bf16_sources(row, interrupted):
             or row['backward_calls'] and row.get('gradients_all_finite') is not True):
         raise AssertionError('KHDN bf16 finite output/gradient observations missing')
     forward = next((launch for launch in row['launches'] if launch['kernel'] == 'state_fwd_kernel'), {})
-    if forward.get('y_diagnostics', {}).get('saved_state_y_fp32') is not True:
-        raise AssertionError('KHDN bf16 saved primal state/Y must be FP32')
+    c128 = row['requested']['chunk_size'] == 128
+    expected_primal = 'saved_state_y_bf16' if c128 else 'saved_state_y_fp32'
+    if forward.get('y_diagnostics', {}).get(expected_primal) is not True:
+        raise AssertionError('KHDN bf16 saved primal state/Y precision differs')
     flags = forward.get('arguments', {})
     for name, count in (('Starts', len(row['expected_chunk_lengths'])), ('Ends', len(row['expected_chunk_lengths'])),
                         ('SeqChunks', len(row['sequence_bounds']))):
@@ -629,10 +631,21 @@ def _attest_bf16_sources(row, interrupted):
     for name in ('P', 'Gp', 'SavedS', 'SavedY', 'Carry', 'SavedU', 'SavedR', 'SavedT', 'SavedW', 'SavedZP'):
         buffers = flags.get(name)
         buffers = buffers if isinstance(buffers, list) else [buffers]
-        bf16_indices = {5, 7, 8, 12, 13, 17} if row['requested']['chunk_size'] == 128 and name == 'P' else set()
+        bf16_indices = set()
+        if c128:
+            if name == 'P':
+                bf16_indices = set(range(18)) - {2, 3, 4}
+            elif name == 'Gp':
+                bf16_indices = {0, 1, 3, 4}
+            elif name in ('SavedS', 'SavedY', 'SavedU'):
+                bf16_indices = {0}
         if not buffers or any(not isinstance(value, dict) or value.get('dtype') != (
                 'torch.bfloat16' if index in bf16_indices else 'torch.float32') for index, value in enumerate(buffers)):
             raise AssertionError('KHDN bf16 prepared/saved buffer precision differs')
+    if c128:
+        output = next((launch for launch in row['launches'] if launch['kernel'] == 'output_fwd_kernel'), {})
+        if output.get('arguments', {}).get('SavedRO', {}).get('dtype') != 'torch.bfloat16':
+            raise AssertionError('KHDN C128 saved output residual must be BF16')
 
 
 def _compact_khdn_assembly(evidence):
@@ -1353,7 +1366,8 @@ def _khdn_y_diagnostics(values, precision_policy='strict'):
         last = min(first + 32, s.shape[0])
         owners = torch.arange(first, last, device=s.device) // ng
         with torch.autocast(device_type=s.device.type, enabled=False):
-            expected = torch.bmm(p[5][owners].to(s.dtype), s[first:last])
+            projection_dtype = torch.float32 if native_bf16 else s.dtype
+            expected = torch.bmm(p[5][owners].to(projection_dtype), s[first:last].to(projection_dtype))
         if not residual_only:
             torch.testing.assert_close(y[first:last], expected, atol=1e-10, rtol=1e-9)
         maximum = max(maximum, float((y[first:last] - expected).abs().max()))
@@ -1366,6 +1380,7 @@ def _khdn_y_diagnostics(values, precision_policy='strict'):
               'scope': 'untimed FP64 buffer projection in at most 32 chunk/head/group blocks; no timed projection'}
     if native_bf16:
         result.update(saved_state_y_fp32=s.dtype == y.dtype == torch.float32,
+                      saved_state_y_bf16=s.dtype == y.dtype == torch.bfloat16,
                       scope='untimed FP32 buffer projection, autocast disabled; no timed projection or numerical gate')
     return result
 

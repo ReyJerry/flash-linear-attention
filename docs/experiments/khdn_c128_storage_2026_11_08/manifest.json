@@ -1,0 +1,10 @@
+{
+  "files": {
+    "README.md": "64f8dee6f73ea11fb72b3d7a9f3d6e7bf1300bec24adfff467a4c94b5778175c",
+    "PROGRESS.zh-CN.md": "7549feafb39ad55197244995c470f97ea088d9a98b5ad892255a75a36dad7691",
+    "summarize.py": "85a66e2f02504df9eb3a22b44cbc6c767b0ee4e5a542a120ab22d21a118818a5",
+    "observations.json.gz": "92bc91754cbeb53ab0ea0374f1fc559c80cad60ba5ab8ba15125c8f880a27a62",
+    "source-binding.json": "cfb6c9ec3f729c9d18aabb545324f9e48d7b6e7aa5eacffa5eff7beda3ed051f",
+    "measured-sources.tar.gz": "6ad81182a36dc1eb6c1388011f3727c23f3dd5a7b631ce1ba3032f9312cf14f2"
+  }
+}

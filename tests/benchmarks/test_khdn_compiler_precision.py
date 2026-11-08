@@ -266,3 +266,34 @@ def test_c128_inverse_can_use_fp32_inline_assembly_without_arith_addf():
     row['arguments']['C'] = 128
     assert row['compiled_precision_inventory']['multiply_add_ir_dtypes'] == {}
     attest_compiled_policy(row, 'bf16')
+
+
+@pytest.mark.parametrize('name,shape', [
+    ('common_tail_finish', '128x32'), ('group_system_tiles', '128x32'),
+    ('common_base_bwd', '16x128'), ('interval_bwd_diagonal', '32x32'),
+])
+def test_c128_matrix_bf16_does_not_require_fp32_storage_arithmetic(name, shape):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+
+    row = bf16_launch(name=name, count=0,
+                      extra_ir=f'\n%m = arith.mulf %a, %b : tensor<{shape}xbf16>',
+                      extra_ptx='\nmul.bf16x2 a,b,c;')
+    row['arguments']['C'] = 128
+    attest_compiled_policy(row, 'bf16')
+
+
+@pytest.mark.parametrize('ir,ptx,name', [
+    ('%m = arith.addf %a, %b : bf16', 'add.bf16 a,b,c;', 'common_tail_finish'),
+    ('%m = arith.addf %a, %b : tensor<32xbf16>', 'add.bf16 a,b,c;', 'common_tail_finish'),
+    ('%m = arith.mulf %a, %b : tensor<128x32xbf16>', 'mul.bf16 a,b,c;', 'state_fwd_kernel'),
+    ('%m = arith.mulf %a, %b : tensor<128x64xbf16>', 'mul.bf16 a,b,c;', 'common_tail_finish'),
+    ('%m = arith.divf %a, %b : tensor<128x32xbf16>', 'div.rn.bf16 a,b,c;', 'common_tail_finish'),
+    ('%m = arith.mulf %a, %b : tensor<128x32xbf16>', 'rcp.approx.bf16 a,b;', 'common_tail_finish'),
+])
+def test_c128_matrix_policy_rejects_bf16_reductions_controls_and_other_shapes(ir, ptx, name):
+    from benchmarks.khdn_compiler_precision import attest_compiled_policy
+
+    row = bf16_launch(name=name, count=0, extra_ir='\n'+ir, extra_ptx='\n'+ptx)
+    row['arguments']['C'] = 128
+    with pytest.raises(AssertionError):
+        attest_compiled_policy(row, 'bf16')

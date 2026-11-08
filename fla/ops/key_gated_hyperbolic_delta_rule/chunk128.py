@@ -74,10 +74,10 @@ def launch(kernel, grid, args, telemetry, **kwargs):
 
 
 def blocked_inverse_into(a, result, count, c, telemetry):
-    launch(kernels.diagonal_inverse_kernel, (count, c//16), (a, result, c, 16), telemetry, num_warps=4)
+    launch(kernels.diagonal_inverse_kernel, (count, c//16), (a, result, c, 16), telemetry, num_warps=1)
     for width in (16, 32, 64):
         launch(kernels.inverse_offdiagonal_kernel, (count, c//(2*width)),
-               (a, result, c, width, False), telemetry, num_warps=8 if width == 64 else 4)
+               (a, result, c, width, True), telemetry, num_warps=8 if width == 64 else 4)
 
 
 def _all_finite(tensors):
@@ -139,6 +139,37 @@ def _source_code(sources, group_size):
     return _source_code_route(sources, group_size)[0]
 
 
+@lru_cache(maxsize=16)
+def _make_chunk_metadata(device, bounds, chunk_size):
+    starts, ends, seq_chunks = [], [], [0]
+    for bos, eos in zip(bounds, bounds[1:]):
+        for pos in range(bos, eos, chunk_size):
+            starts.append(pos)
+            ends.append(min(pos+chunk_size, eos))
+        seq_chunks.append(len(starts))
+    prev, nxt = [-1]*len(starts), [-1]*len(starts)
+    for first, last in zip(seq_chunks, seq_chunks[1:]):
+        for index in range(first, last):
+            prev[index] = index-1 if index > first else -1
+            nxt[index] = index+1 if index+1 < last else -1
+    # Cached tensors may be reused by autograd after inference and on other streams.
+    with torch.cuda.device(device), torch.inference_mode(False):
+        meta = tuple(torch.tensor(value, dtype=torch.int64, device=device)
+                     for value in (starts, ends, seq_chunks, prev, nxt))
+        ready = torch.cuda.Event()
+        ready.record(torch.cuda.current_stream(device))
+    return meta, len(starts), ready
+
+
+def chunk_metadata(device, bounds, chunk_size):
+    meta, count, ready = _make_chunk_metadata(device, bounds, chunk_size)
+    stream = torch.cuda.current_stream(device)
+    stream.wait_event(ready)
+    for tensor in meta:
+        tensor.record_stream(stream)
+    return meta, count
+
+
 class _ChunkBF16(torch.autograd.Function):
     @staticmethod
     @input_guard
@@ -149,29 +180,19 @@ class _ChunkBF16(torch.autograd.Function):
         _, _, h, kd = q.shape
         vd, gs, c = v.shape[-1], opts['g'], opts['c']
         ng, kt, gt = vd // gs, triton.next_power_of_2(kd), triton.next_power_of_2(gs)
-        starts, ends, seq_chunks = [], [], [0]
-        for bos, eos in zip(opts['bounds'], opts['bounds'][1:]):
-            for pos in range(bos, eos, c):
-                starts.append(pos)
-                ends.append(min(pos+c, eos))
-            seq_chunks.append(len(starts))
-        prev, nxt = [-1]*len(starts), [-1]*len(starts)
-        for first, last in zip(seq_chunks, seq_chunks[1:]):
-            for j in range(first, last):
-                prev[j] = j-1 if j > first else -1
-                nxt[j] = j+1 if j+1 < last else -1
-        meta = tuple(torch.tensor(x, dtype=torch.int64, device=q.device) for x in (starts, ends, seq_chunks, prev, nxt))
-        nc = len(starts)
+        meta, nc = chunk_metadata(q.device, tuple(opts['bounds']), c)
+        nseq = len(opts['bounds'])-1
         cs, gr, _ = shapes(c, kt)
-        p = tuple(torch.empty((nc*h, *shape), dtype=torch.bfloat16 if i in (5, 7, 8, 12, 13, 17) else torch.float32,
+        p = tuple(torch.empty((nc*h, *shape), dtype=torch.bfloat16 if i < 18 and i not in (2, 3, 4) else torch.float32,
                               device=q.device) for i, shape in enumerate(cs))
         diagonal_flags = torch.empty((nc*h, c//32), dtype=torch.bool, device=q.device)
         gp = tuple(torch.empty((nc*h*ng if (i != 4 or need_curve_grad) and (i != 2 or opts['rho_materialized']) else 0, *shape),
-                               dtype=torch.float32, device=q.device) for i, shape in enumerate(gr))
+                               dtype=torch.bfloat16 if i in (0, 1, 3, 4) else torch.float32, device=q.device) for i, shape in enumerate(gr))
         carry = buffers(nc*h if opts['carry'] else 0, [(c, kt), (c, c)], q.device)
-        saved_s, saved_y = buffers(nc*h*ng, [(kt, gt), (c, gt)], q.device)
-        saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp = buffers(
-            nc*h*ng, [(c, gt), (c,), (c,), (c, gt), (c,), (c,)], q.device)
+        saved_s, saved_y = buffers(nc*h*ng, [(kt, gt), (c, gt)], q.device, dtype=torch.bfloat16)
+        saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp = tuple(
+            torch.empty((nc*h*ng, *shape), dtype=torch.bfloat16 if index in (0, 3) else torch.float32, device=q.device)
+            for index, shape in enumerate([(c, gt), (c,), (c,), (c, gt), (c,), (c,)]))
         output = torch.empty_like(v, dtype=q.dtype)
         final = torch.empty_like(state, dtype=torch.float32)
         if nc:
@@ -179,7 +200,7 @@ class _ChunkBF16(torch.autograd.Function):
                    (ell, *meta[:2], p, h, kd, c, kt), telemetry, num_warps=4)
             launch(kernels.common_input_kernel, (nc*h, c//16),
                    (q, k, beta, *meta[:2], p, h, kd, c, kt, opts['scale']), telemetry, num_warps=4)
-            launch(kernels.common_products_kernel, (nc*h, c), (p, c), telemetry, num_warps=4)
+            launch(kernels.common_products_kernel, (nc*h, (c//16)**2), (p, c), telemetry, num_warps=4)
             launch(kernels.interval_cache_kernel, (nc*h, c//32, kt//32),
                    (ell, *meta[:2], p, h, kd, c, kt), telemetry, num_warps=4)
             launch(kernels.diagonal_eligibility, (nc*h, c//32),
@@ -211,9 +232,9 @@ class _ChunkBF16(torch.autograd.Function):
                    (curve, p, gp, gs, ng, c), telemetry, num_warps=4)
         # The group system is only needed to build the inverse; feedback uses its column scales directly.
         gp = (gp[0], gp[1].new_empty((0,)), *gp[2:])
-        launch(kernels.state_fwd_kernel, ((len(seq_chunks)-1)*h*ng,),
+        launch(kernels.state_fwd_kernel, (nseq*h*ng,),
                (v, curve, state, output, final, *meta[:3], p, gp, saved_s, saved_y, saved_u, saved_r, saved_t, saved_w, saved_zp, carry,
-                h, kd, vd, gs, ng, c, kt, gt, True, opts['carry'], False), telemetry, BF16_FS6=False, num_warps=8, RHO_MATERIALIZED=opts['rho_materialized'])
+                h, kd, vd, gs, ng, c, kt, gt, True, opts['carry'], False), telemetry, BF16_FS6=False, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
         if nc:
             launch(kernels.output_fwd_kernel, (nc*h*ng,),
                    (v, output, *meta[:2], p, gp, saved_s, saved_u, saved_r, saved_t, saved_ro,
@@ -226,7 +247,7 @@ class _ChunkBF16(torch.autograd.Function):
         ctx.set_materialize_grads(False)
         if telemetry is not None:
             telemetry.update(rho_materialized=opts['rho_materialized'], backend='triton_chunk', precision_route='bf16', precision_eligible=True,
-                             arithmetic='bf16_single_main_three_product_inverse_c128', working_dtype='float32', host_fallback=False,
+                             arithmetic='bf16_single_c128_preparation_and_workspace_bf16', working_dtype='float32', host_fallback=False,
                              readout_precision='fp32', state_control_precision='fp32',
                              contraction_precision='bf16_operands_fp32_accumulation', fallback_subblocks=0,
                              saved_buffer_bytes=sum(x.numel()*x.element_size() for x in (*p, *gp, saved_s, saved_y, *carry, saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp, diagonal_flags)))
@@ -270,14 +291,16 @@ class _ChunkBF16(torch.autograd.Function):
                     h, kd, vd, gs, ng, c, kt, gt), ctx.telemetry, num_warps=8, RHO_MATERIALIZED=opts['rho_materialized'])
         launch(kernels.state_bwd_kernel, (state.shape[0]*h*ng,),
                (v, curve, ds, grads[2], grads[5], *meta[:3], p, gp, saved_s, local, shared, output_adj, carry, edge_y,
-                h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry, num_warps=8, RHO_MATERIALIZED=opts['rho_materialized'])
+                h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
         if ctx.nc:
             for coefficient_mode in range(4):
                 launch(kernels.shared_coefficients_bwd,
                        (ctx.nc*h, (kt if coefficient_mode == 3 else c)//64, (c if coefficient_mode in (1, 3) else kt)//64),
                        (do, grads[2], *meta[:2], gp, saved_s, saved_u, saved_r, saved_t, output_adj, shared,
                         h, vd, gs, ng, c, kt, gt, coefficient_mode), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
-            launch(kernels.shared_feedback_bwd, (ctx.nc*h, c//64, c//64),
+            launch(kernels.shared_feedback_gl_bwd, (ctx.nc*h, c//64, c//64),
+                   (gp, saved_y, output_adj, shared, ng, c, gt), ctx.telemetry, num_warps=8)
+            launch(kernels.shared_feedback_system_bwd, (ctx.nc*h, c//64, c//64),
                    (curve, gp, saved_y, saved_w, output_adj, shared, ng, gs, c, gt), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
             launch(kernels.parameter_bwd_kernel, (ctx.nc*h*ng,),
                    (v, curve, do, grads[2], dc, *meta[:2], meta[3], meta[4], p, gp, saved_s, saved_y, local,

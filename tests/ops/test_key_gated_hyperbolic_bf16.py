@@ -33,6 +33,36 @@ class NoFP64(TorchDispatchMode):
         return result
 
 
+@pytest.mark.parametrize('bounds', [(0, 257), (0, 0, 129, 257, 257), (0, 0, 0), tuple(range(0, 16385, 2048))])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_c128_chunk_metadata_cache_inference_stream_and_eviction(bounds):
+    from fla.ops.key_gated_hyperbolic_delta_rule import chunk128
+
+    target = torch.device('cuda', torch.cuda.current_device())
+    producer, consumer = torch.cuda.Stream(), torch.cuda.Stream()
+    chunk128._make_chunk_metadata.cache_clear()
+    with torch.cuda.stream(producer), torch.inference_mode():
+        metadata, count = chunk128.chunk_metadata(target, bounds, 128)
+    assert all(not torch.is_inference(value) for value in metadata)
+    with torch.cuda.stream(consumer):
+        reused, repeated_count = chunk128.chunk_metadata(target, bounds, 128)
+        assert count == repeated_count and all(a is b for a, b in zip(metadata, reused))
+        values = torch.ones_like(reused[0], dtype=torch.float32, requires_grad=True)
+        (values*reused[0]).sum().backward()
+        snapshots = [value.clone() for value in reused]
+    with torch.cuda.stream(producer):
+        for length in range(1, 21):
+            chunk128.chunk_metadata(target, (0, length), 128)
+    consumer.synchronize()
+    starts = [position for start, end in zip(bounds, bounds[1:]) for position in range(start, end, 128)]
+    assert snapshots[0].cpu().tolist() == starts
+    assert values.grad.cpu().tolist() == starts
+    assert count == len(starts) and chunk128._make_chunk_metadata.cache_info().currsize == 16
+    for previous, following in zip(snapshots[0].cpu().tolist(), snapshots[1].cpu().tolist()):
+        assert 0 < following-previous <= 128
+    torch.cuda.synchronize()
+
+
 @pytest.fixture(scope='module')
 def qualified_bf16():
     try:

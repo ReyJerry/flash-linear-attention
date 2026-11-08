@@ -257,7 +257,7 @@ def test_c128_cli_and_explicit_reference_configuration():
     assert not full.check_only and full.chunk_size == 128 and full.optimizer_backend == 'fp32'
 
 
-@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'phase', 'inverse_level', 'mode', 'rho'])
+@pytest.mark.parametrize('mutation', ['missing', 'duplicate', 'phase', 'inverse_level', 'inverse_precision', 'mode', 'rho'])
 def test_c128_schedule_rejects_incomplete_or_wrong_specializations(mutation):
     from collections import defaultdict
 
@@ -272,7 +272,7 @@ def test_c128_schedule_rejects_incomplete_or_wrong_specializations(mutation):
         if name == 'diagonal_inverse_kernel':
             args['B'] = 16
         if name == 'inverse_offdiagonal_kernel':
-            args.update(N=[16, 32, 64][index % 3], SINGLE=False)
+            args.update(N=[16, 32, 64][index % 3], SINGLE=True)
         if name in ('common_finish_tiles', 'shared_coefficients_bwd', 'common_products_bwd'):
             args['MODE'] = index
         if name in ('state_fwd_kernel', 'state_bwd_kernel'):
@@ -287,6 +287,8 @@ def test_c128_schedule_rejects_incomplete_or_wrong_specializations(mutation):
         launches[-1]['phase'] = 'forward'
     elif mutation == 'inverse_level':
         next(x for x in launches if x['kernel'] == 'inverse_offdiagonal_kernel')['arguments']['N'] = 64
+    elif mutation == 'inverse_precision':
+        next(x for x in launches if x['kernel'] == 'inverse_offdiagonal_kernel')['arguments']['SINGLE'] = False
     elif mutation == 'mode':
         next(x for x in launches if x['kernel'] == 'shared_coefficients_bwd')['arguments']['MODE'] = 3
     elif mutation == 'rho':
@@ -305,6 +307,51 @@ def test_bf16_ppl_observation_preserves_excess_without_claiming_quality(relative
     assert result['validation_ppl_observation_exceeded']
     assert result['validation_ppl_observation_limit'] == .001
     assert not result['training_quality_accepted']
+
+
+@pytest.mark.parametrize('mutation', ['diagnostic', 'key_matrix', 'decay', 'inverse', 'rho', 'state', 'residual'])
+def test_c128_saved_buffer_contract_rejects_precision_mismatches(mutation):
+    from benchmarks.hyperbolic_benchmark_utils import _attest_bf16_sources
+
+    fp32, bf16 = 'torch.float32', 'torch.bfloat16'
+    flags = {
+        'P': [{'dtype': bf16 if i < 18 and i not in (2, 3, 4) else fp32} for i in range(23)],
+        'Gp': [{'dtype': bf16 if i in (0, 1, 3, 4) else fp32} for i in range(8)],
+        'Carry': [{'dtype': fp32}, {'dtype': fp32}],
+        **{name: {'dtype': bf16 if name in ('SavedS', 'SavedY', 'SavedU') else fp32}
+           for name in ('SavedS', 'SavedY', 'SavedU', 'SavedR', 'SavedT', 'SavedW', 'SavedZP')},
+        **{name: {'shape': [count], 'dtype': 'torch.int64'}
+           for name, count in (('Starts', 1), ('Ends', 1), ('SeqChunks', 2))},
+    }
+    diagnostic = {'saved_state_y_bf16': True}
+    output = {'SavedRO': {'dtype': bf16}}
+    row = {
+        'executed_sources': [{'shape': [1, 128, 1, 128], 'dtype': fp32} for _ in range(7)],
+        'requested': {'chunk_size': 128}, 'backward_calls': 1,
+        'output_all_finite': True, 'gradients_all_finite': True,
+        'expected_chunk_lengths': [128], 'sequence_bounds': [0, 128],
+        'launches': [
+            {'kernel': 'state_fwd_kernel', 'arguments': flags, 'y_diagnostics': diagnostic},
+            {'kernel': 'output_fwd_kernel', 'arguments': output},
+        ],
+    }
+    _attest_bf16_sources(row, False)
+    if mutation == 'diagnostic':
+        diagnostic['saved_state_y_bf16'] = False
+    elif mutation == 'key_matrix':
+        flags['P'][0]['dtype'] = fp32
+    elif mutation == 'decay':
+        flags['P'][2]['dtype'] = bf16
+    elif mutation == 'inverse':
+        flags['Gp'][0]['dtype'] = fp32
+    elif mutation == 'rho':
+        flags['Gp'][2]['dtype'] = bf16
+    elif mutation == 'state':
+        flags['SavedS']['dtype'] = fp32
+    else:
+        output['SavedRO']['dtype'] = fp32
+    with pytest.raises(AssertionError):
+        _attest_bf16_sources(row, False)
 
 
 def test_checkpoint_contract_distinguishes_fp32_optimizer_from_native(monkeypatch):

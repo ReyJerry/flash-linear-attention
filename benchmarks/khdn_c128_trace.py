@@ -16,13 +16,14 @@ FORWARD = (
     *('inverse_offdiagonal_kernel',)*3, 'group_feedback_tiles', 'state_fwd_kernel', 'output_fwd_kernel',
 )
 BACKWARD = (
-    'output_bwd_kernel', 'state_bwd_kernel', *('shared_coefficients_bwd',)*4, 'shared_feedback_bwd',
+    'output_bwd_kernel', 'state_bwd_kernel',
+    *('shared_coefficients_bwd',)*4, 'shared_feedback_gl_bwd', 'shared_feedback_system_bwd',
     'parameter_bwd_kernel', 'gauge_collect', 'gauge_product_bwd', 'gauge_finish_bwd', 'common_tail_bwd',
     'common_ga_bwd', *('common_products_bwd',)*3, 'common_inverse_left_bwd', 'common_lower_bwd',
     'common_base_bwd', 'interval_bwd_cross', 'interval_diagonal_tc_bwd', 'interval_bwd_diagonal',
     'interval_gate_bwd', 'common_input_bwd',
 )
-ARITHMETIC = 'bf16_single_main_three_product_inverse_c128'
+ARITHMETIC = 'bf16_single_c128_preparation_and_workspace_bf16'
 
 
 def attest_schedule(launches, backward):
@@ -36,7 +37,7 @@ def attest_schedule(launches, backward):
     for name, argument, values in (
         ('diagonal_inverse_kernel', 'B', [16, 16]),
         ('inverse_offdiagonal_kernel', 'N', [16, 32, 64]*2),
-        ('inverse_offdiagonal_kernel', 'SINGLE', [False]*6),
+        ('inverse_offdiagonal_kernel', 'SINGLE', [True]*6),
         ('common_finish_tiles', 'MODE', [0, 1, 2]),
         ('shared_coefficients_bwd', 'MODE', [0, 1, 2, 3] if backward else []),
         ('common_products_bwd', 'MODE', [0, 1, 2] if backward else []),

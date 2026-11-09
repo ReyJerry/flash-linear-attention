@@ -11,14 +11,10 @@ This update publishes the untimed per-token SM reference, its ten CPU tests,
 three frozen GPU candidate source/test files as `.py.txt`, and this progress report. Existing training kernels remain at the production
 source represented by `fba02a4c0c1fea25af2281b5c9a03ab1b089592f`.
 
-The complete 39-file local archive is preserved in local commit
-`78c650f5a72c225d5b42f1509528f2b954637dba`. Its raw evidence files, portable
-verifier and expanded reports are not yet uploaded. The five unique candidate
-source/test contents are available through the live untimed reference/CPU test
-and the three archived GPU files.
-Do not treat that local commit as an accessible GitHub revision. The figures below
-are the result of local verification, not a claim that readers can already
-reproduce the full archive from this partial publication.
+The complete experiment archive is published alongside this report, including
+raw evidence, source binding, the portable verifier and expanded reports. The
+five unique candidate source/test contents are available through the live
+untimed reference/CPU test and the three archived GPU files.
 
 ## Complete-step research screens
 
@@ -89,3 +85,4 @@ state backend have not met their required full-step benefit condition. Continuou
 training/unseen quality, known cache/packed regressions, formal four-shape timing,
 recovery and 1/8/16-GPU acceptance remain open. The draft PR stays open and
 unmerged; protected parallel work is excluded.
+

@@ -12,9 +12,13 @@ import re
 ARITHMETIC = 'selective_bf16_adjoint_queryless'
 
 
-def stages(chunk_size, backward=True, source_vjp='expanded'):
+def stages(chunk_size, backward=True, source_vjp='expanded', triangular_route='full_inverse'):
     if chunk_size not in (16, 32, 64, 128):
         raise AssertionError('Selective BF16 requires C16/C32/C64/C128')
+    if triangular_route not in ('full_inverse', 'action_solve'):
+        raise AssertionError('Unknown selective triangular route')
+    if triangular_route == 'action_solve' and chunk_size == 128:
+        raise AssertionError('Action-only route is conservatively disabled for C128')
     reverse = backward_stages(chunk_size, source_vjp)
     levels = (chunk_size // 16).bit_length() - 1
     forward = (
@@ -23,8 +27,10 @@ def stages(chunk_size, backward=True, source_vjp='expanded'):
         'interval_diagonal_tc_fwd', 'interval_fwd_diagonal', 'interval_tail_kernel', 'common_lower_kernel',
         'diagonal_inverse_kernel', *('inverse_offdiagonal_kernel',)*levels,
         *('common_finish_tiles',)*3, 'common_tail_finish', 'group_gram_kernel', 'group_gauge_kernel',
-        'group_system_tiles', 'diagonal_inverse_kernel', *('inverse_offdiagonal_kernel',)*levels,
-        'group_feedback_tiles', 'state_fwd_kernel', 'output_fwd_kernel',
+        'group_system_tiles',
+        *(() if triangular_route == 'action_solve' else ('diagonal_inverse_kernel', *('inverse_offdiagonal_kernel',)*levels,
+                                                          'group_feedback_tiles')),
+        'state_fwd_kernel', 'output_fwd_kernel',
     )
     return forward + (reverse if backward else ())
 
@@ -53,8 +59,8 @@ def backward_stages(chunk_size, source_vjp='expanded'):
     )
 
 
-def attest_schedule(launches, backward, chunk_size, source_vjp='expanded'):
-    if [row['kernel'] for row in launches] != list(stages(chunk_size, backward, source_vjp)):
+def attest_schedule(launches, backward, chunk_size, source_vjp='expanded', triangular_route='full_inverse'):
+    if [row['kernel'] for row in launches] != list(stages(chunk_size, backward, source_vjp, triangular_route)):
         raise AssertionError('Selective BF16 missing/duplicated/reordered computational stage')
     reverse = backward_stages(chunk_size, source_vjp)
     for row in launches:
@@ -65,13 +71,15 @@ def attest_schedule(launches, backward, chunk_size, source_vjp='expanded'):
                  if row['kernel'] in ('group_system_tiles', 'output_fwd_kernel', 'parameter_bwd_kernel')]
     if len(curvature) != (3 if backward else 2) or any(type(value) is not bool or value != curvature[0] for value in curvature):
         raise AssertionError('Selective BF16 curvature-gradient specialization differs across stages')
-    widths = [width for width in (16, 32, 64) if width < chunk_size] * 2
+    widths = [width for width in (16, 32, 64) if width < chunk_size]
+    if triangular_route == 'full_inverse':
+        widths = widths * 2
     for name, argument, expected in (
-        ('diagonal_inverse_kernel', 'B', [16, 16]),
-        ('inverse_offdiagonal_kernel', 'N', widths),
+        ('diagonal_inverse_kernel', 'B', [16] if triangular_route == 'action_solve' else [16, 16]),
+        ('inverse_offdiagonal_kernel', 'N', widths if triangular_route == 'full_inverse' else []),
         ('inverse_offdiagonal_kernel', 'SINGLE', [chunk_size !=
-         128 and not (chunk_size == 64 and curvature[0])] * len(widths)),
-        ('inverse_offdiagonal_kernel', 'NEED_DC', [curvature[0]] * len(widths)),
+         128 and not (chunk_size == 64 and curvature[0])] * len(widths) if triangular_route == 'full_inverse' else []),
+        ('inverse_offdiagonal_kernel', 'NEED_DC', [curvature[0]] * len(widths) if triangular_route == 'full_inverse' else []),
         ('common_finish_tiles', 'MODE', [0, 1, 2]),
         ('shared_coefficients_bwd', 'MODE', ([0, 3] if source_vjp != 'expanded' else [0, 1, 2, 3]) if backward else []),
         ('common_products_bwd', 'MODE', [0, 1, 2] if backward and source_vjp == 'expanded' else []),
@@ -97,6 +105,11 @@ def attest_schedule(launches, backward, chunk_size, source_vjp='expanded'):
             row = next(r for r in launches if r['kernel'] == 'coupled_residual_bwd')
             if row['arguments'].get('PI_READY', False) is not (source_vjp != 'coupled'):
                 raise AssertionError('Selective coupled Pi ownership differs')
+    if triangular_route == 'action_solve':
+        for name in ('state_fwd_kernel', 'state_bwd_kernel'):
+            rows = [row for row in launches if row['kernel'] == name]
+            if rows and any(row['arguments'].get('ACTION_SOLVE') is not True for row in rows):
+                raise AssertionError('Selective action route requires ACTION_SOLVE specialization')
     rho = [row['arguments']['RHO_MATERIALIZED'] for row in launches if 'RHO_MATERIALIZED' in row['arguments']]
     if not rho or any(type(value) is not bool or value != rho[0] for value in rho):
         raise AssertionError('Selective BF16 rho representation differs across stages')

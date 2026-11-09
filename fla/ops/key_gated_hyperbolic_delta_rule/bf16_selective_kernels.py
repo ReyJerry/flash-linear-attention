@@ -338,7 +338,7 @@ def mass_reverse_scan(beta, lam, n, w, zp, gr, gt, C: tl.constexpr):
 @triton.jit
 def local_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr,
                       MIXED: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True,
-                      FUSE_GROUP_RHS: tl.constexpr = False):
+                      FUSE_GROUP_RHS: tl.constexpr = False, ACTION_SOLVE: tl.constexpr = False):
     i = tl.arange(0, C)
     n = load_vector(P[18], ch, C)
     gamma = load_vector(P[19], ch, C)
@@ -353,10 +353,15 @@ def local_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.constexpr, K
         # is Z^{-1}[d nu (beta - kap (h + beta prefix(h)))].  This removes the
         # materialized feedback vector and its separate matrix-vector product.
         rhs = diagonal_inverse * nu * (beta - kap * (h + beta * prefix_h))
-        w = pointer_mv(Gp[0], block, rhs, C)
+        w = solve_lower_action(Gp[1], block, rhs, C) if ACTION_SOLVE else pointer_mv(Gp[0], block, rhs, C)
     else:
-        af = load_vector(Gp[5], block, C)
-        w = af - kap * pointer_mv(Gp[0], block, diagonal_inverse * nu * (h + beta * prefix_h), C)
+        if ACTION_SOLVE:
+            af = solve_lower_action(Gp[1], block, diagonal_inverse * nu * beta, C)
+            auxiliary = solve_lower_action(Gp[1], block, diagonal_inverse * nu * (h + beta * prefix_h), C)
+            w = af - kap * auxiliary
+        else:
+            af = load_vector(Gp[5], block, C)
+            w = af - kap * pointer_mv(Gp[0], block, diagonal_inverse * nu * (h + beta * prefix_h), C)
     u = w[:, None] * v - nu[:, None] * pointer_mm(P[10], ch, y, C, G, C)
     if C >= 16:
         (r, t, zp) = mass_forward_scan(beta, lam, n, w, C)
@@ -388,7 +393,7 @@ def local_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.constexpr, K
 
 
 @triton.jit
-def state_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, SavedU, SavedR, SavedT, SavedW, SavedZP, Carry, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr, MIXED: tl.constexpr = False, BF16_FS6: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True, FUSE_GROUP_RHS: tl.constexpr = False):
+def state_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, SavedU, SavedR, SavedT, SavedW, SavedZP, Carry, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr, MIXED: tl.constexpr = False, BF16_FS6: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True, FUSE_GROUP_RHS: tl.constexpr = False, ACTION_SOLVE: tl.constexpr = False):
     kap = tl.load(Curvature).to(tl.float32) / GS
     shg = tl.program_id(0).to(tl.int64)
     (group, head, seq) = (shg % NG, shg // NG % H, shg // (NG * H))
@@ -416,7 +421,7 @@ def state_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, 
         v = tl.load(V0 + vo, vmask, 0).to(tl.float32)
         (s, u, r, t, ss, us, w, zp) = local_state_graph(P, Gp, ch, block,
                                                         v, s, y, end - start, kap, C, K, G, MIXED, RHO_MATERIALIZED,
-                                                        FUSE_GROUP_RHS)
+                                                        FUSE_GROUP_RHS, ACTION_SOLVE)
         if CARRY and chunk + 1 < last:
             e = load_matrix(Carry[0], ch, C, K)
             hc = load_matrix(Carry[1], ch, C, C)
@@ -533,7 +538,7 @@ def coupled_state_source(P, ch, gradient, C: tl.constexpr, K: tl.constexpr, G: t
 
 
 @triton.jit
-def state_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp, SavedS, Local, Sh, OutputAdj, Carry, EdgeY, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True, COUPLED_STATE: tl.constexpr = False):
+def state_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp, SavedS, Local, Sh, OutputAdj, Carry, EdgeY, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True, COUPLED_STATE: tl.constexpr = False, ACTION_SOLVE: tl.constexpr = False):
     shg = tl.program_id(0).to(tl.int64)
     (group, head, seq) = (shg % NG, shg // NG % H, shg // (NG * H))
     (a, g, i) = (tl.arange(0, K), tl.arange(0, G), tl.arange(0, C))
@@ -603,7 +608,7 @@ def state_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp,
                 gn += tl.where(i == j, gti * at(w, j, C), 0.0)
                 gw += tl.where(i == j, gti * at(n, j, C), 0.0)
         gw += tl.sum(gu * tl.load(V0 + vo, mask, 0, volatile=True).to(tl.float32), 1)
-        f = load_vector(Gp[8], block, C) * pointer_mv(Gp[0], block, gw, C, True)
+        f = load_vector(Gp[8], block, C) * (solve_upper_transpose_action(Gp[1], block, gw, C) if ACTION_SOLVE else pointer_mv(Gp[0], block, gw, C, True))
         b = mass_system_transpose(f, beta, lam, C)
         source_n, source_beta = mass_system_sources(b, beta, lam, w, zp, C)
         gn += source_n
@@ -815,6 +820,41 @@ def pointer_mv(p, block, v, C: tl.constexpr, TRANS: tl.constexpr = False):
         x = tl.gather(v, jj.to(tl.int32), axis=0)
         result += tl.sum(a * x[None, :], 1)
     return result
+
+
+@triton.jit
+def solve_lower_action(p, block, rhs, C: tl.constexpr):
+    """Apply the inverse of a lower triangular group system to one RHS.
+
+    The loop is over the chunk dimension, inside one group program.  It is a
+    block solve, not a per-token launch.  All loads and reductions stay in
+    FP32 so the action-only route has the same stable arithmetic contract as
+    the materialized inverse route.
+    """
+    i = tl.arange(0, C).to(tl.int64)
+    x = tl.full((C,), 0.0, tl.float32)
+    for row_index in range(C):
+        row = tl.load(p + block * C * C + row_index * C + i).to(tl.float32)
+        prior = tl.sum(tl.where(i < row_index, row * x, 0.0), 0)
+        diagonal = tl.sum(tl.where(i == row_index, row, 0.0), 0)
+        value = (at(rhs, row_index, C) - prior) / diagonal
+        x = tl.where(i == row_index, value, x)
+    return x
+
+
+@triton.jit
+def solve_upper_transpose_action(p, block, rhs, C: tl.constexpr):
+    """Apply the inverse of the transpose of a lower triangular system."""
+    i = tl.arange(0, C).to(tl.int64)
+    x = tl.full((C,), 0.0, tl.float32)
+    for reverse_index in range(C):
+        row_index = C - 1 - reverse_index
+        column = tl.load(p + block * C * C + i * C + row_index).to(tl.float32)
+        future = tl.sum(tl.where(i > row_index, column * x, 0.0), 0)
+        diagonal = tl.sum(tl.where(i == row_index, column, 0.0), 0)
+        value = (at(rhs, row_index, C) - future) / diagonal
+        x = tl.where(i == row_index, value, x)
+    return x
 
 
 @triton.jit

@@ -26,6 +26,8 @@ from fla.ops.key_gated_hyperbolic_delta_rule.bf16_selective_kernels import (
     pointer_mm,
     pointer_mm_backward,
     pointer_mv,
+    solve_lower_action,
+    solve_upper_transpose_action,
     read_rho_row,
     row,
     store_matrix,
@@ -56,7 +58,7 @@ def strict_inverse_product(P, ch, wave, C: tl.constexpr, G: tl.constexpr):
 @triton.jit
 def local_direct_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr,
                             MIXED: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True,
-                            FUSE_GROUP_RHS: tl.constexpr = False):
+                            FUSE_GROUP_RHS: tl.constexpr = False, ACTION_SOLVE: tl.constexpr = False):
     tl.static_assert(not RHO_MATERIALIZED)
     i = tl.arange(0, C)
     n = load_vector(P[18], ch, C)
@@ -69,10 +71,15 @@ def local_direct_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.const
     diagonal_inverse = load_vector(Gp[8], block, C)
     if FUSE_GROUP_RHS:
         rhs = diagonal_inverse * nu * (beta - kap * (h + beta * prefix_h))
-        w = pointer_mv(Gp[0], block, rhs, C)
+        w = solve_lower_action(Gp[1], block, rhs, C) if ACTION_SOLVE else pointer_mv(Gp[0], block, rhs, C)
     else:
-        af = load_vector(Gp[5], block, C)
-        w = af - kap * pointer_mv(Gp[0], block, diagonal_inverse * nu * (h + beta * prefix_h), C)
+        if ACTION_SOLVE:
+            af = solve_lower_action(Gp[1], block, diagonal_inverse * nu * beta, C)
+            auxiliary = solve_lower_action(Gp[1], block, diagonal_inverse * nu * (h + beta * prefix_h), C)
+            w = af - kap * auxiliary
+        else:
+            af = load_vector(Gp[5], block, C)
+            w = af - kap * pointer_mv(Gp[0], block, diagonal_inverse * nu * (h + beta * prefix_h), C)
     # keep the unit diagonal exact; bounded admission keeps the inverse scale finite
     scaled_wave = (w / nu)[:, None] * v
     target_part = w[:, None] * v + nu[:, None] * strict_inverse_product(P, ch, scaled_wave, C, G)
@@ -124,7 +131,7 @@ def local_direct_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.const
 
 
 @triton.jit
-def state_direct_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, SavedU, SavedR, SavedT, SavedW, SavedZP, Carry, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr, MIXED: tl.constexpr = False, BF16_FS6: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True, FUSE_GROUP_RHS: tl.constexpr = False, Fallback=None):
+def state_direct_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, SavedU, SavedR, SavedT, SavedW, SavedZP, Carry, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr, MIXED: tl.constexpr = False, BF16_FS6: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True, FUSE_GROUP_RHS: tl.constexpr = False, ACTION_SOLVE: tl.constexpr = False, Fallback=None):
     tl.static_assert(not CARRY and C == 64)
     kap = tl.load(Curvature).to(tl.float32) / GS
     shg = tl.program_id(0).to(tl.int64)
@@ -153,7 +160,7 @@ def state_direct_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChun
         v = tl.load(V0 + vo, vmask, 0).to(tl.float32)
         (s, u, r, t, ss, us, w, zp, fallback) = local_direct_state_graph(P, Gp, ch, block,
                                                                          v, s, y, end - start, kap, C, K, G, MIXED, RHO_MATERIALIZED,
-                                                                         FUSE_GROUP_RHS)
+                                                                         FUSE_GROUP_RHS, ACTION_SOLVE)
         if CARRY and chunk + 1 < last:
             e = load_matrix(Carry[0], ch, C, K)
             hc = load_matrix(Carry[1], ch, C, C)
@@ -175,7 +182,7 @@ def state_direct_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChun
 
 
 @triton.jit
-def state_direct_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp, SavedS, Local, Sh, OutputAdj, Carry, EdgeY, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True, COUPLED_STATE: tl.constexpr = False):
+def state_direct_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks, P, Gp, SavedS, Local, Sh, OutputAdj, Carry, EdgeY, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, CARRY: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True, COUPLED_STATE: tl.constexpr = False, ACTION_SOLVE: tl.constexpr = False):
     tl.static_assert(COUPLED_STATE and not CARRY and C == 64)
     tl.static_assert(not RHO_MATERIALIZED)
     shg = tl.program_id(0).to(tl.int64)
@@ -248,7 +255,7 @@ def state_direct_bwd_kernel(V0, Curvature, DS, DV, DS0, Starts, Ends, SeqChunks,
                 gw += tl.where(i == j, gti * at(n, j, C), 0.0)
         gu_old = mm_precise(tl.trans(load_matrix(P[11], ch, C, C)), nu[:, None] * gu, C, G, C) / nu[:, None]
         gw += tl.sum(gu_old * tl.load(V0 + vo, mask, 0, volatile=True).to(tl.float32), 1)
-        f = load_vector(Gp[8], block, C) * pointer_mv(Gp[0], block, gw, C, True)
+        f = load_vector(Gp[8], block, C) * (solve_upper_transpose_action(Gp[1], block, gw, C) if ACTION_SOLVE else pointer_mv(Gp[0], block, gw, C, True))
         b = mass_system_transpose(f, beta, lam, C)
         source_n, source_beta = mass_system_sources(b, beta, lam, w, zp, C)
         gn += source_n

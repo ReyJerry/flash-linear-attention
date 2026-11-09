@@ -25,6 +25,8 @@ from fla.ops.key_gated_hyperbolic_delta_rule.bf16_selective_kernels import (
     mm_precise,
     pointer_mm,
     pointer_mv,
+    solve_lower_action,
+    solve_upper_transpose_action,
     store_matrix,
     store_vector,
 )
@@ -35,7 +37,7 @@ def state_direct_grouped_fwd_kernel(V0, Curvature, S0, Final, Starts, Ends, SeqC
                                     SavedS, SavedY, SavedU, SavedR, SavedT, SavedW, SavedZP,
                                     H: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr,
                                     C: tl.constexpr, K: tl.constexpr, BV: tl.constexpr,
-                                    FUSE_GROUP_RHS: tl.constexpr = False, Fallback=None):
+                                    FUSE_GROUP_RHS: tl.constexpr = False, ACTION_SOLVE: tl.constexpr = False, Fallback=None):
     tl.static_assert(C == 64 and K == 128 and GS == 32 and BV == 64 and VD % BV == 0)
     shv = tl.program_id(0).to(tl.int64)
     tile, head, seq = shv % (VD // BV), shv // (VD // BV) % H, shv // ((VD // BV) * H)
@@ -78,11 +80,16 @@ def state_direct_grouped_fwd_kernel(V0, Curvature, S0, Final, Starts, Ends, SeqC
             prefix_h = exclusive_prefix(h, C)
             if FUSE_GROUP_RHS:
                 rhs = diagonal_inverse * nus * (beta - kap * (h + beta * prefix_h))
-                w = pointer_mv(Gp[0], block, rhs, C)
+                w = solve_lower_action(Gp[1], block, rhs, C) if ACTION_SOLVE else pointer_mv(Gp[0], block, rhs, C)
             else:
-                af = load_vector(Gp[5], block, C)
-                rhs = diagonal_inverse * nus * (h + beta * prefix_h)
-                w = af - kap * pointer_mv(Gp[0], block, rhs, C)
+                if ACTION_SOLVE:
+                    af = solve_lower_action(Gp[1], block, diagonal_inverse * nus * beta, C)
+                    auxiliary = solve_lower_action(Gp[1], block, diagonal_inverse * nus * (h + beta * prefix_h), C)
+                    w = af - kap * auxiliary
+                else:
+                    af = load_vector(Gp[5], block, C)
+                    rhs = diagonal_inverse * nus * (h + beta * prefix_h)
+                    w = af - kap * pointer_mv(Gp[0], block, rhs, C)
             r, t, zp = mass_forward_scan(beta, lam, n, w, C)
             store_vector(SavedR, block, r, C)
             store_vector(SavedT, block, t, C)
@@ -153,7 +160,8 @@ def state_direct_grouped_fwd_kernel(V0, Curvature, S0, Final, Starts, Ends, SeqC
 @triton.jit
 def state_direct_grouped_bwd_kernel(V0, Curvature, DS, DS0, Starts, Ends, SeqChunks, P, Gp, SavedS,
                                     Local, Sh, OutputAdj, H: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr,
-                                    NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, BV: tl.constexpr):
+                                    NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, BV: tl.constexpr,
+                                    ACTION_SOLVE: tl.constexpr = False):
     tl.static_assert(C == 64 and K == 128 and GS == 32 and BV == 64 and VD % BV == 0)
     shv = tl.program_id(0).to(tl.int64)
     tile, head, seq = shv % (VD // BV), shv // (VD // BV) % H, shv // ((VD // BV) * H)
@@ -219,7 +227,7 @@ def state_direct_grouped_bwd_kernel(V0, Curvature, DS, DS0, Starts, Ends, SeqChu
             lam = load_vector(Gp[6], block, C)
             gb, gn, gw = mass_reverse_scan(beta, lam, n, w, zp, grs, gts, C)
             gw += tl.sum(tl.where(selected[None, :], gw_value, 0.0), 1)
-            f = load_vector(Gp[8], block, C) * pointer_mv(Gp[0], block, gw, C, True)
+            f = load_vector(Gp[8], block, C) * (solve_upper_transpose_action(Gp[1], block, gw, C) if ACTION_SOLVE else pointer_mv(Gp[0], block, gw, C, True))
             b = mass_system_transpose(f, beta, lam, C)
             source_n, source_beta = mass_system_sources(b, beta, lam, w, zp, C)
             store_vector(OutputAdj[2], block, b, C)

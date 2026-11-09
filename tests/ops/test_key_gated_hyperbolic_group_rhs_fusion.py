@@ -36,7 +36,7 @@ def test_group_rhs_fusion_is_exact_and_has_one_action(size, kappa):
     generator = torch.Generator().manual_seed(1701 + size)
     dtype = torch.float64
     lower = torch.tril(torch.randn(size, size, generator=generator, dtype=dtype) * 0.03)
-    z = lower + torch.eye(size, dtype=dtype)
+    z = (lower + torch.eye(size, dtype=dtype)).requires_grad_()
     diagonal_inverse = (0.8 + 0.4 * torch.rand(size, generator=generator, dtype=dtype)).requires_grad_()
     nu = (0.7 + 0.5 * torch.rand(size, generator=generator, dtype=dtype)).requires_grad_()
     beta = torch.rand(size, generator=generator, dtype=dtype).requires_grad_()
@@ -48,9 +48,9 @@ def test_group_rhs_fusion_is_exact_and_has_one_action(size, kappa):
 
     cotangent = torch.randn(size, generator=generator, dtype=dtype)
     legacy_grads = torch.autograd.grad((legacy * cotangent).sum(),
-                                       (diagonal_inverse, nu, beta, h, kappa), retain_graph=True)
+                                       (z, diagonal_inverse, nu, beta, h, kappa), retain_graph=True)
     fused_grads = torch.autograd.grad((fused * cotangent).sum(),
-                                      (diagonal_inverse, nu, beta, h, kappa))
+                                      (z, diagonal_inverse, nu, beta, h, kappa))
     for actual, expected in zip(fused_grads, legacy_grads):
         torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
 

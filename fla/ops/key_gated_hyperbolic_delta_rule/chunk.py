@@ -452,6 +452,8 @@ def chunk_key_gated_hyperbolic_delta_rule(
         raise ValueError('Unknown KHDN source_vjp.')
     if source_vjp != 'expanded' and precision_policy != 'bf16_selective':
         raise ValueError('Coupled source_vjp requires precision_policy=bf16_selective.')
+    if group_action_solve and precision_policy != 'bf16_selective':
+        raise ValueError('group_action_solve requires precision_policy=bf16_selective.')
     if validation_mode not in ('strict', 'deferred'):
         raise ValueError('Unknown KHDN validation_mode.')
     if (validation_mode != 'strict' or validation_scope is not None) and precision_policy != 'bf16_selective':

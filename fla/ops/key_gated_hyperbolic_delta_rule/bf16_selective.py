@@ -89,6 +89,14 @@ def _all_finite(tensors):
     return ~flags.any()
 
 
+def _validate_finite(tensors, scope, message):
+    finite = _all_finite(tensors)
+    if scope is not None and scope.accepting:
+        scope.add(finite)
+    elif not finite:
+        raise RuntimeError(message)
+
+
 _source_validation_fallbacks = 0
 
 
@@ -182,8 +190,13 @@ class _ChunkBF16(torch.autograd.Function):
         bc, tc = min(c, 32), min(c, 64)
         meta, nc = chunk_metadata(q.device, tuple(opts['bounds']), c)
         nseq = len(opts['bounds'])-1
+        direct = opts['direct_residual']
         cs, gr, _ = shapes(c, kt)
-        p = tuple(torch.empty((0 if i in (0, 14, 15, 22) else nc*h, *shape), dtype=torch.float32,
+        prepared_guard = direct and opts['state_value_tile'] == 32
+        if prepared_guard:
+            cs[14] = (c, c//8)
+        p = tuple(torch.empty((0 if i in (0, 15, 22) or i == 14 and not prepared_guard
+                              or direct and i == 13 else nc*h, *shape), dtype=torch.float32,
                               device=q.device) for i, shape in enumerate(cs))
         diagonal_flags = torch.empty((nc*h, c//bc), dtype=torch.bool, device=q.device)
         gp = tuple(torch.empty((nc*h*ng if (i != 4 or need_curve_grad) and (i != 2 or opts['rho_materialized']) else 0, *shape),
@@ -215,10 +228,18 @@ class _ChunkBF16(torch.autograd.Function):
                    (ell, *meta[:2], p, h, kd, c, kt), telemetry, num_warps=4)
             launch(kernels.common_lower_kernel, (nc*h,), (p, c), telemetry, num_warps=8)
             blocked_inverse_into(p[10], p[11], nc*h, c, telemetry, need_curve_grad)
-            for finish_mode in range(3):
+            if prepared_guard:
+                from fla.ops.key_gated_hyperbolic_delta_rule import bf16_direct_kernels as direct_kernels
+                launch(direct_kernels.common_direct_guard, (nc*h,), (p, c), telemetry, num_warps=4)
+            for finish_mode in ((0,) if direct else range(3)):
                 launch(kernels.common_finish_tiles, (nc*h, kt//64 if finish_mode == 2 else c//tc, kt//64 if finish_mode == 0 else c//tc),
                        (p, *meta[:2], h, c, kt, finish_mode), telemetry, num_warps=4)
-            launch(kernels.common_tail_finish, (nc*h, c//bc), (p, *meta[:2], h, c, kt), telemetry, num_warps=4)
+            if direct:
+                from fla.ops.key_gated_hyperbolic_delta_rule import bf16_direct_kernels as direct_kernels
+                launch(direct_kernels.common_direct_transpose, (nc*h, c//32, kt//64),
+                       (p, c, kt), telemetry, num_warps=4)
+            else:
+                launch(kernels.common_tail_finish, (nc*h, c//bc), (p, *meta[:2], h, c, kt), telemetry, num_warps=4)
             if opts['carry']:
                 launch(kernels.carry_fwd_kernel, (nc*h,), (meta[1], meta[0],
                        meta[4], p, carry, h, c, kt), telemetry, num_warps=8)
@@ -232,22 +253,49 @@ class _ChunkBF16(torch.autograd.Function):
                    (curve, p, gp, gs, ng, c), telemetry, num_warps=4)
         # The group system is only needed to build the inverse; feedback uses its column scales directly.
         gp = (gp[0], gp[1].new_empty((0,)), *gp[2:])
-        launch(kernels.state_fwd_kernel, (nseq*h*ng,),
-               (v, curve, state, output, final, *meta[:3], p, gp, saved_s, saved_y, saved_u, saved_r, saved_t, saved_w, saved_zp, carry,
-                h, kd, vd, gs, ng, c, kt, gt, True, opts['carry'], False), telemetry, BF16_FS6=False, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
+        if direct and opts['state_value_tile'] > 32:
+            from fla.ops.key_gated_hyperbolic_delta_rule import bf16_direct_grouped_kernels as direct_grouped
+            fallback = torch.empty((nc*h*ng,), dtype=torch.int32, device=q.device)
+            launch(direct_grouped.state_direct_grouped_fwd_kernel, (nseq*h*vd//opts['state_value_tile'],),
+                   (v, curve, state, final, *meta[:3], p, gp, saved_s, saved_y, saved_u, saved_r, saved_t, saved_w, saved_zp,
+                    h, vd, gs, ng, c, kt, opts['state_value_tile']), telemetry, num_warps=8, Fallback=fallback)
+        elif direct:
+            from fla.ops.key_gated_hyperbolic_delta_rule import bf16_direct_kernels as direct_kernels
+            fallback = torch.empty((nc*h*ng,), dtype=torch.int32, device=q.device)
+            launch(direct_kernels.state_direct_fwd_kernel, (nseq*h*ng,),
+                   (v, curve, state, output, final, *meta[:3], p, gp, saved_s, saved_y, saved_u, saved_r, saved_t, saved_w, saved_zp, carry,
+                    h, kd, vd, gs, ng, c, kt, gt, True, opts['carry'], False), telemetry,
+                   BF16_FS6=False, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'], Fallback=fallback)
+        elif opts['state_value_tile'] > 32:
+            from fla.ops.key_gated_hyperbolic_delta_rule import bf16_grouped_kernels as grouped_kernels
+            launch(grouped_kernels.state_grouped_fwd_kernel, (nseq*h*vd//opts['state_value_tile'],),
+                   (v, curve, state, final, *meta[:3], p, gp, saved_s, saved_y, saved_u, saved_r, saved_t, saved_w, saved_zp,
+                    h, vd, gs, ng, c, kt, opts['state_value_tile']), telemetry, num_warps=8)
+        else:
+            launch(kernels.state_fwd_kernel, (nseq*h*ng,),
+                   (v, curve, state, output, final, *meta[:3], p, gp, saved_s, saved_y, saved_u, saved_r, saved_t, saved_w, saved_zp, carry,
+                    h, kd, vd, gs, ng, c, kt, gt, True, opts['carry'], False), telemetry, BF16_FS6=False, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'])
         if nc:
-            launch(kernels.output_fwd_kernel, (nc*h*ng,),
-                   (v, output, *meta[:2], p, gp, saved_s, saved_u, saved_r, saved_t, saved_ro,
-                    h, vd, gs, ng, c, kt, gt), telemetry, num_warps=8, RHO_MATERIALIZED=opts['rho_materialized'], NEED_DC=need_curve_grad)
-        if not _all_finite((output, final)):
-            raise RuntimeError('nonfinite candidate forward; FP64 fallback forbidden')
+            if opts['value_tile'] > 32:
+                from fla.ops.key_gated_hyperbolic_delta_rule import bf16_grouped_kernels as grouped_kernels
+                launch(grouped_kernels.output_grouped_fwd_kernel, (nc*h, vd//opts['value_tile']),
+                       (v, output, *meta[:2], p, gp, saved_s, saved_u, saved_r, saved_t, saved_ro,
+                        h, vd, gs, ng, c, kt, opts['value_tile']), telemetry, num_warps=8)
+            else:
+                launch(kernels.output_fwd_kernel, (nc*h*ng,),
+                       (v, output, *meta[:2], p, gp, saved_s, saved_u, saved_r, saved_t, saved_ro,
+                        h, vd, gs, ng, c, kt, gt), telemetry, num_warps=8,
+                       RHO_MATERIALIZED=opts['rho_materialized'], NEED_DC=need_curve_grad, DIRECT=direct)
+        _validate_finite((output, final), opts['validation_scope'],
+                         'nonfinite candidate forward; FP64 fallback forbidden')
         ctx.save_for_backward(*sources, *meta, *p, *gp, saved_s, saved_y, *carry,
                               saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp, diagonal_flags)
         ctx.opts, ctx.telemetry, ctx.nc = opts, telemetry, nc
         ctx.set_materialize_grads(False)
         if telemetry is not None:
             telemetry.update(rho_materialized=opts['rho_materialized'], backend='triton_chunk', precision_route='bf16', precision_eligible=True,
-                             arithmetic='selective_bf16_adjoint_queryless', readout_compensated=need_curve_grad, working_dtype='float32', host_fallback=False,
+                             arithmetic='selective_bf16_direct_residual' if direct else 'selective_bf16_adjoint_queryless',
+                             readout_compensated=need_curve_grad, working_dtype='float32', host_fallback=False,
                              readout_precision='fp32', state_control_precision='fp32',
                              contraction_precision='bf16_operands_fp32_accumulation', fallback_subblocks=0,
                              saved_buffer_bytes=sum(x.numel()*x.element_size() for x in (*p, *gp, saved_s, saved_y, *carry, saved_u, saved_r, saved_t, saved_ro, saved_w, saved_zp, diagonal_flags)))
@@ -280,6 +328,7 @@ class _ChunkBF16(torch.autograd.Function):
         coupled = opts.get('coupled', False)
         coupled_state = opts.get('coupled_state', False)
         source_owner = opts.get('source_owner', False)
+        direct = opts['direct_residual']
         dc = torch.empty((ctx.nc*h*ng if need_curve_grad else 0,), device=q.device, dtype=torch.float32)
         _, _, ss = shapes(c, kt)
         shared = tuple(torch.empty((0 if i in (3, 4) or (coupled and i in (2, 6)) else ctx.nc*h*(1 if i in (0, 1, 2, 3, 5, 6, 7) else ng), *shape),
@@ -290,22 +339,52 @@ class _ChunkBF16(torch.autograd.Function):
         output_adj = buffers(ctx.nc*h*ng, [(kt, gt), (c, gt), (c,), (c,)], q.device)
         edge_y = buffers(ctx.nc*h*ng if opts['carry'] else 0, [(c, gt)], q.device)[0]
         if ctx.nc:
-            launch(kernels.output_bwd_kernel, (ctx.nc*h*ng,),
-                   (v, do, grads[2], *meta[:2], p, gp, saved_s, saved_u, saved_r, saved_t, saved_ro, shared, output_adj,
-                    h, kd, vd, gs, ng, c, kt, gt), ctx.telemetry, num_warps=8, RHO_MATERIALIZED=opts['rho_materialized'])
-        launch(kernels.state_bwd_kernel, (state.shape[0]*h*ng,),
-               (v, curve, ds, grads[2], grads[5], *meta[:3], p, gp, saved_s, local, shared, output_adj, carry, edge_y,
-                h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'], COUPLED_STATE=coupled_state)
+            if opts['value_tile'] > 32:
+                from fla.ops.key_gated_hyperbolic_delta_rule import bf16_grouped_kernels as grouped_kernels
+                launch(grouped_kernels.output_grouped_bwd_kernel, (ctx.nc*h, vd//opts['value_tile']),
+                       (v, do, *meta[:2], p, gp, saved_r, saved_t, saved_ro, shared, output_adj,
+                        h, vd, gs, ng, c, kt, opts['value_tile']), ctx.telemetry, num_warps=8)
+            else:
+                launch(kernels.output_bwd_kernel, (ctx.nc*h*ng,),
+                       (v, do, grads[2], *meta[:2], p, gp, saved_s, saved_u, saved_r, saved_t, saved_ro, shared, output_adj,
+                        h, kd, vd, gs, ng, c, kt, gt), ctx.telemetry, num_warps=8,
+                       RHO_MATERIALIZED=opts['rho_materialized'], DIRECT=direct)
+        if direct and opts['state_value_tile'] > 32:
+            from fla.ops.key_gated_hyperbolic_delta_rule import bf16_direct_grouped_kernels as direct_grouped
+            launch(direct_grouped.state_direct_grouped_bwd_kernel, (state.shape[0]*h*vd//opts['state_value_tile'],),
+                   (v, curve, ds, grads[5], *meta[:3], p, gp, saved_s, local, shared, output_adj,
+                    h, vd, gs, ng, c, kt, opts['state_value_tile']), ctx.telemetry, num_warps=8)
+        elif direct:
+            from fla.ops.key_gated_hyperbolic_delta_rule import bf16_direct_kernels as direct_kernels
+            launch(direct_kernels.state_direct_bwd_kernel, (state.shape[0]*h*ng,),
+                   (v, curve, ds, grads[2], grads[5], *meta[:3], p, gp, saved_s, local, shared, output_adj, carry, edge_y,
+                    h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry,
+                   num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'], COUPLED_STATE=True)
+        elif opts['state_value_tile'] > 32 and coupled_state:
+            from fla.ops.key_gated_hyperbolic_delta_rule import bf16_grouped_kernels as grouped_kernels
+            launch(grouped_kernels.state_grouped_bwd_kernel, (state.shape[0]*h*vd//opts['state_value_tile'],),
+                   (v, curve, ds, grads[5], *meta[:3], p, gp, saved_s, local, shared, output_adj,
+                    h, vd, gs, ng, c, kt, opts['state_value_tile']), ctx.telemetry, num_warps=8)
+        else:
+            launch(kernels.state_bwd_kernel, (state.shape[0]*h*ng,),
+                   (v, curve, ds, grads[2], grads[5], *meta[:3], p, gp, saved_s, local, shared, output_adj, carry, edge_y,
+                    h, kd, vd, gs, ng, c, kt, gt, opts['carry']), ctx.telemetry, num_warps=4, RHO_MATERIALIZED=opts['rho_materialized'], COUPLED_STATE=coupled_state)
         if ctx.nc:
             matrix_work = buffers(ctx.nc*h, [(kt, c), (0, kt) if source_owner else (c, kt),
                                   (kt,) if source_owner else (0, c) if coupled else (c, c), (c, kt)], q.device)
-            coupled_work = buffers(ctx.nc*h*ng if coupled else 0, [(c, gt)], q.device)
+            coupled_work = (saved_u,) if direct else buffers(ctx.nc*h*ng if coupled else 0, [(c, gt)], q.device)
             coupled_work += (output_adj[1],) if coupled_state else buffers(ctx.nc*h*ng if coupled else 0, [(c, gt)], q.device)
             if coupled:
                 from fla.ops.key_gated_hyperbolic_delta_rule import bf16_coupled_kernels as coupled_kernels
-                launch(coupled_kernels.coupled_residual_bwd, (ctx.nc*h*ng,),
-                       (v, *meta[:2], p, gp, curve, saved_u, output_adj, coupled_work,
-                        h, vd, ng, gs, c, gt, opts['rho_materialized']), ctx.telemetry, num_warps=4, PI_READY=coupled_state)
+                if direct:
+                    from fla.ops.key_gated_hyperbolic_delta_rule import bf16_direct_kernels as direct_kernels
+                    launch(direct_kernels.direct_residual_bwd, (ctx.nc*h*ng,),
+                           (p, gp, output_adj[1], coupled_work[1], ng, c, gt, opts['rho_materialized']),
+                           ctx.telemetry, num_warps=4)
+                else:
+                    launch(coupled_kernels.coupled_residual_bwd, (ctx.nc*h*ng,),
+                           (v, *meta[:2], p, gp, curve, saved_u, output_adj, coupled_work,
+                            h, vd, ng, gs, c, gt, opts['rho_materialized']), ctx.telemetry, num_warps=4, PI_READY=coupled_state)
             for coefficient_mode in ((0, 3) if coupled else range(4)):
                 launch(kernels.shared_coefficients_bwd,
                        (ctx.nc*h, kt//64 if coefficient_mode == 3 else c//tc, c//tc if coefficient_mode in (1, 3) else kt//64),
@@ -332,7 +411,7 @@ class _ChunkBF16(torch.autograd.Function):
                    (shared, gauge, ng, c), ctx.telemetry, num_warps=4)
             launch(kernels.common_tail_bwd, (ctx.nc*h,),
                    (*meta[:2], p, shared, matrix_work, grads[1], grads[3], h, kd, ng, c, kt),
-                   ctx.telemetry, num_warps=8, COUPLED=coupled, SOURCE_OWNER=source_owner)
+                   ctx.telemetry, num_warps=8, COUPLED=coupled, SOURCE_OWNER=source_owner, DIRECT=direct)
             if not coupled:
                 launch(kernels.common_ga_bwd, (ctx.nc*h, c//tc, c//tc),
                        (*meta[:2], p, shared, matrix_work, h, ng, c, kt), ctx.telemetry, num_warps=4)
@@ -372,8 +451,8 @@ class _ChunkBF16(torch.autograd.Function):
                    (q, grads[0], grads[1], grads[3], *meta[:2], p, shared, gauge, h, kd, ng, c, kt, opts['scale']),
                    ctx.telemetry, num_warps=4)
         grads[6] = dc.sum() if need_curve_grad else torch.zeros_like(curve, dtype=torch.float32)
-        if not _all_finite(grads):
-            raise RuntimeError('nonfinite candidate backward; FP64 fallback forbidden')
+        _validate_finite(grads, opts['validation_scope'],
+                         'nonfinite candidate backward; FP64 fallback forbidden')
         result = [x.to(source.dtype) if need else None for x, source, need in zip(grads, sources, ctx.needs_input_grad[:7])]
         for group in opts['aliases']:
             owners = [i for i in group if ctx.needs_input_grad[i]]
@@ -392,7 +471,8 @@ class _ChunkBF16(torch.autograd.Function):
 
 def chunk_bf16(q, k, v, beta, log_decay, curvature=1., initial_state=None, output_final_state=False,
                scale=None, cu_seqlens=None, group_size=32, chunk_size=64, carry_mode='no_carry',
-               arithmetic='bf16', telemetry=None, source_vjp='expanded'):
+               arithmetic='bf16', telemetry=None, source_vjp='expanded', value_tile=32, state_value_tile=32,
+               state_residual_mode='stable', validation_mode='strict', validation_scope=None):
     if q.ndim != 4 or v.ndim != 4 or q.shape[-1] != 128 or v.shape[-1] not in (32, 64, 128) or group_size != 32:
         raise ValueError('Blocked BF16 requires K=128, V in {32, 64, 128}, and group_size=32.')
     _require_runtime(q)
@@ -412,6 +492,25 @@ def chunk_bf16(q, k, v, beta, log_decay, curvature=1., initial_state=None, outpu
     if source_vjp != 'expanded' and (chunk_size != 64 or
                                      isinstance(curvature, torch.Tensor) and curvature.requires_grad):
         raise ValueError('coupled source VJP requires C64 and fixed curvature')
+    if any(isinstance(tile, bool) or tile not in (32, 64, 128) for tile in (value_tile, state_value_tile)):
+        raise ValueError('value_tile and state_value_tile must be 32, 64, or 128')
+    if max(value_tile, state_value_tile) > 32 and (chunk_size != 64 or isinstance(curvature, torch.Tensor) and curvature.requires_grad):
+        raise ValueError('wide contractions require C64 and fixed curvature')
+    if state_residual_mode not in ('stable', 'direct'):
+        raise ValueError('state_residual_mode must be stable or direct')
+    if validation_mode not in ('strict', 'deferred'):
+        raise ValueError('validation_mode must be strict or deferred')
+    if validation_mode == 'deferred' and not torch.is_grad_enabled():
+        raise ValueError('deferred validation is a training-only research mode')
+    if validation_mode == 'deferred':
+        from fla.ops.key_gated_hyperbolic_delta_rule.validation import FiniteValidationScope
+        if not isinstance(validation_scope, FiniteValidationScope) or not validation_scope.accepting:
+            raise ValueError('deferred validation requires an open FiniteValidationScope')
+    elif validation_scope is not None:
+        raise ValueError('validation_scope requires validation_mode=deferred')
+    if state_residual_mode == 'direct' and (source_vjp not in ('coupled_state', 'coupled_fused')
+                                            or value_tile != 32 or state_value_tile not in (32, 64)):
+        raise ValueError('direct residual requires a coupled-state C64 path, output tile32 and state tile32/64')
     bounds, scale = _validate(q, k, v, beta, log_decay, curvature, initial_state, scale, cu_seqlens, group_size, False)
     c = curvature_tensor(curvature, q.device)
     state = initial_state if initial_state is not None else torch.zeros(
@@ -425,10 +524,25 @@ def chunk_bf16(q, k, v, beta, log_decay, curvature=1., initial_state=None, outpu
     aliases = {}
     for i, x in enumerate(sources):
         aliases.setdefault(id(x), []).append(i)
-    opts = dict(bounds=bounds, scale=scale, rho_materialized=not rho_bounded, g=group_size, c=chunk_size, carry=carry_mode ==
+    group_batch_eligible = rho_bounded and q.dtype == torch.bfloat16
+    effective_value_tile = min(value_tile, v.shape[-1]) if group_batch_eligible else 32
+    effective_state_tile = min(state_value_tile, v.shape[-1]) if group_batch_eligible else 32
+    direct = state_residual_mode == 'direct' and group_batch_eligible
+    opts = dict(bounds=bounds, scale=scale, rho_materialized=not rho_bounded, value_tile=effective_value_tile,
+                state_value_tile=effective_state_tile, direct_residual=direct,
+                validation_scope=validation_scope, g=group_size, c=chunk_size, carry=carry_mode ==
                 'y_carry', arithmetic=arithmetic, coupled=source_vjp != 'expanded', coupled_state=source_vjp in ('coupled_state', 'coupled_fused'), source_owner=source_vjp == 'coupled_fused', source_vjp=source_vjp, aliases=[a for a in aliases.values() if len(a) > 1])
     if telemetry is not None:
         telemetry.update(source_alias_groups=opts['aliases'], precision_requested='bf16_selective',
-                         readout_compensated=c.requires_grad, source_vjp=source_vjp)
+                         readout_compensated=c.requires_grad, source_vjp=source_vjp,
+                         value_tile_requested=value_tile, value_tile_effective=effective_value_tile,
+                         state_value_tile_requested=state_value_tile, state_value_tile_effective=effective_state_tile,
+                         state_residual_mode_requested=state_residual_mode,
+                         state_residual_mode_effective='direct' if direct else 'stable',
+                         validation_mode=validation_mode,
+                         state_residual_fallback=(('materialized_rho' if not rho_bounded else 'fp32_query')
+                                                  if state_residual_mode == 'direct' and not direct else None),
+                         group_batch_fallback=(('materialized_rho' if not rho_bounded else 'fp32_query')
+                                               if max(value_tile, state_value_tile) > 32 and not group_batch_eligible else None))
     output, final = _ChunkBF16.apply(*(x.contiguous() for x in sources), opts, telemetry)
     return output, final if output_final_state else None

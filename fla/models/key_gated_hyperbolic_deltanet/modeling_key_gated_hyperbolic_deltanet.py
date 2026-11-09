@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
     from fla.models.cache_utils import Cache
+    from fla.ops.key_gated_hyperbolic_delta_rule.validation import FiniteValidationScope
 
 
 class KeyGatedHyperbolicDeltaNetBlock(GradientCheckpointingLayer):
@@ -93,8 +94,14 @@ class KeyGatedHyperbolicDeltaNetBlock(GradientCheckpointingLayer):
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
         attnres_states: list[torch.Tensor] | None = None,
+        validation_scope: FiniteValidationScope | None = None,
         **kwargs: Unpack[dict],
     ):
+        attention_options = dict(kwargs)
+        if validation_scope is not None:
+            if not isinstance(self.attn, KeyGatedHyperbolicDeltaNet):
+                raise ValueError('Deferred KHDN validation does not support hybrid attention blocks.')
+            attention_options['validation_scope'] = validation_scope
         if self.use_attnres:
             prefix_sum = hidden_states
             if attnres_states is None:
@@ -116,7 +123,7 @@ class KeyGatedHyperbolicDeltaNetBlock(GradientCheckpointingLayer):
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states, attention_mask=attention_mask,
             past_key_values=past_key_values, use_cache=use_cache,
-            output_attentions=output_attentions, **kwargs,
+            output_attentions=output_attentions, **attention_options,
         )
         if self.use_attnres:
             prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
@@ -208,8 +215,11 @@ class KeyGatedHyperbolicDeltaNetForCausalLM(
         return_dict: bool | None = None,
         logits_to_keep: int | torch.Tensor | None = 0,
         num_items_in_batch: int | torch.Tensor | None = None,
+        validation_scope: FiniteValidationScope | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple | CausalLMOutputWithPast:
+        if validation_scope is not None:
+            kwargs['validation_scope'] = validation_scope
         cu_seqlens = kwargs.get('cu_seqlens')
         if labels is not None and cu_seqlens is not None:
             ignore_index = self.criterion.ignore_index if self.criterion is not None else -100

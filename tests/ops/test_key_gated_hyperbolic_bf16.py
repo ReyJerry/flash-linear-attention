@@ -444,3 +444,178 @@ def test_bf16_rejects_unqualified_compiler_before_launch(monkeypatch):
         ops.chunk_key_gated_hyperbolic_delta_rule(
             *sources[:5], curvature=sources[6], initial_state=sources[5], precision_policy='bf16', chunk_size=16,
         )
+
+
+@pytest.mark.parametrize('value_tile', [64, 128])
+@pytest.mark.parametrize('case,dtype,packed', [
+    ('random', torch.float32, False), ('random', torch.bfloat16, False),
+    ('random', torch.float32, True), ('random', torch.bfloat16, True),
+    ('fixed_point', torch.float32, False), ('repeated_beta1', torch.float32, False),
+    ('strong_gate', torch.float32, False), ('zero_curvature', torch.float32, False),
+    ('raw_margin', torch.float32, False),
+])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_grouped_output(value_tile, case, dtype, packed, state_value_tile=32, query_bf16=False,
+                                  state_residual_mode='stable', source_vjp='coupled_fused'):
+    from fla.ops.key_gated_hyperbolic_delta_rule.bf16_selective import chunk_bf16
+
+    length = 2 if case == 'strong_gate' else 1 if case == 'raw_margin' else 65 if case in (
+        'fixed_point', 'repeated_beta1') else 129
+    source, cu = make_case(length, 128, 128, 32, dtype=dtype, packed=packed)
+    q, k, v, beta, ell, state, curve = (x.detach() for x in source)
+    k = torch.nn.functional.normalize(k.float(), dim=-1).to(dtype)
+    if case in ('fixed_point', 'repeated_beta1', 'strong_gate', 'raw_margin'):
+        q.zero_()
+        q[..., 0] = 1
+        k = q.clone()
+        v.zero_()
+        v[..., ::32] = .5
+        beta.fill_(1. if case == 'repeated_beta1' else .5)
+        ell.zero_()
+        state.zero_()
+        curve.fill_(1.)
+        if case == 'fixed_point':
+            state[:, :, 0, ::32] = .5
+        if case == 'strong_gate':
+            beta[:, 0], beta[:, 1] = 1, 0
+            ell[:, 0], ell[:, 1] = -1e8, -1.
+        if case == 'raw_margin':
+            v.fill_(.9998779296875)
+    if case == 'zero_curvature':
+        curve.zero_()
+    if query_bf16:
+        q = q.to(torch.bfloat16)
+    source = tuple(x.requires_grad_(i < 6) for i, x in enumerate((q, k, v, beta, ell, state, curve)))
+    reference = tuple(x.detach().double().requires_grad_(i < 6) for i, x in enumerate(source))
+    expected = ops.naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *reference[:5], initial_state=reference[5], curvature=reference[6], group_size=32,
+        cu_seqlens=cu, output_final_state=True,
+    )
+    cot = tuple(torch.sin(torch.arange(x.numel(), device=x.device)).reshape(x.shape).float() for x in expected)
+    truth = torch.autograd.grad(expected, reference[:6], tuple(x.double() for x in cot))
+    info = {}
+    with NoFP64():
+        actual = chunk_bf16(
+            *source[:5], curvature=curve, initial_state=state, cu_seqlens=cu, output_final_state=True,
+            chunk_size=64, source_vjp=source_vjp, value_tile=value_tile,
+            state_value_tile=state_value_tile, state_residual_mode=state_residual_mode, telemetry=info,
+        )
+        gradients = torch.autograd.grad(actual, source[:6], cot, retain_graph=True)
+        repeated = torch.autograd.grad(actual, source[:6], cot)
+    assert info['value_tile_requested'] == value_tile
+    eligible = q.dtype == torch.bfloat16 and case != 'raw_margin'
+    assert info['value_tile_effective'] == (value_tile if eligible else 32)
+    assert info['state_value_tile_effective'] == (state_value_tile if eligible else 32)
+    batch_requested = max(value_tile, state_value_tile) > 32
+    assert info['group_batch_fallback'] == (
+        None if eligible or not batch_requested else 'materialized_rho' if case == 'raw_margin' else 'fp32_query')
+    assert info['state_residual_mode_effective'] == ('direct' if state_residual_mode == 'direct' and eligible else 'stable')
+    assert all(torch.equal(a, b) for a, b in zip(gradients, repeated))
+    for index, (a, b) in enumerate(zip((*actual, *gradients), (*expected, *truth))):
+        compare_bf16(a, b, backward=index >= 2)
+
+
+@pytest.mark.parametrize('value_tile', [64, 128])
+@pytest.mark.parametrize('case,dtype,packed', [
+    ('random', torch.float32, False), ('random', torch.bfloat16, True),
+    ('fixed_point', torch.float32, False), ('repeated_beta1', torch.float32, False),
+    ('strong_gate', torch.float32, False), ('zero_curvature', torch.float32, False),
+    ('raw_margin', torch.float32, False),
+])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_grouped_state(value_tile, case, dtype, packed):
+    test_selective_grouped_output(value_tile, case, dtype, packed, state_value_tile=value_tile)
+
+
+@pytest.mark.parametrize('value_tile', [64, 128])
+@pytest.mark.parametrize('state_wide', [False, True])
+@pytest.mark.parametrize('case,packed', [
+    ('random', False), ('random', True), ('fixed_point', False), ('repeated_beta1', False),
+    ('strong_gate', False), ('zero_curvature', False), ('raw_margin', False),
+])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_grouped_bf16_production(value_tile, state_wide, case, packed):
+    test_selective_grouped_output(
+        value_tile, case, torch.float32, packed,
+        state_value_tile=value_tile if state_wide else 32, query_bf16=True,
+    )
+
+
+@pytest.mark.parametrize('source_vjp', ['coupled_state', 'coupled_fused'])
+@pytest.mark.parametrize('case,packed', [
+    ('random', False), ('random', True), ('fixed_point', False), ('repeated_beta1', False),
+    ('strong_gate', False), ('zero_curvature', False), ('raw_margin', False),
+])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_direct_state_residual(source_vjp, case, packed):
+    test_selective_grouped_output(
+        32, case, torch.float32, packed, query_bf16=True,
+        state_residual_mode='direct', source_vjp=source_vjp,
+    )
+
+
+@pytest.mark.parametrize('source_vjp', ['coupled_state', 'coupled_fused'])
+@pytest.mark.parametrize('case,packed', [
+    ('random', False), ('random', True), ('fixed_point', False), ('repeated_beta1', False),
+    ('strong_gate', False), ('zero_curvature', False), ('raw_margin', False),
+])
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_direct_grouped_state_residual(source_vjp, case, packed):
+    test_selective_grouped_output(
+        32, case, torch.float32, packed, state_value_tile=64, query_bf16=True,
+        state_residual_mode='direct', source_vjp=source_vjp,
+    )
+
+
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_validation_mode_requires_explicit_training_scope():
+    source, cu = make_case(65, 128, 128, 32, dtype=torch.bfloat16)
+    with torch.no_grad(), pytest.raises(ValueError, match='training-only research mode'):
+        ops.chunk_key_gated_hyperbolic_delta_rule(
+            *source[:5], curvature=source[6].detach(), initial_state=source[5], cu_seqlens=cu,
+            chunk_size=64, source_vjp='coupled_fused', precision_policy='bf16_selective',
+            validation_mode='deferred', telemetry={},
+        )
+
+
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_deferred_validation_matches_strict_and_repeat_outside_scope():
+    from fla.ops.key_gated_hyperbolic_delta_rule.validation import FiniteValidationScope
+
+    source, cu = make_case(65, 128, 128, 32, dtype=torch.bfloat16, packed=True)
+    source = tuple(x.detach().requires_grad_(i < 6) for i, x in enumerate(source))
+    common = dict(curvature=source[6], initial_state=source[5], cu_seqlens=cu, chunk_size=64,
+                  source_vjp='coupled_fused', precision_policy='bf16_selective', output_final_state=True)
+    with NoFP64():
+        strict = ops.chunk_key_gated_hyperbolic_delta_rule(*source[:5], **common)
+        cot = tuple(torch.sin(torch.arange(x.numel(), device=x.device)).reshape(x.shape).float() for x in strict)
+        expected = torch.autograd.grad(strict, source[:6], cot)
+        with FiniteValidationScope() as checks:
+            actual = ops.chunk_key_gated_hyperbolic_delta_rule(
+                *source[:5], **common, validation_mode='deferred', validation_scope=checks,
+            )
+            gradients = torch.autograd.grad(actual, source[:6], cot, retain_graph=True)
+            assert checks.checks == 2
+        repeated = torch.autograd.grad(actual, source[:6], cot)
+    assert checks.committed and not checks.open
+    assert all(torch.equal(a, b) for a, b in zip((*actual, *gradients), (*strict, *expected)))
+    assert all(torch.equal(a, b) for a, b in zip(gradients, repeated))
+
+
+@pytest.mark.usefixtures('qualified_bf16')
+def test_selective_deferred_validation_blocks_nonfinite_update():
+    from fla.ops.key_gated_hyperbolic_delta_rule.validation import FiniteValidationScope
+
+    source, cu = make_case(1, 128, 128, 32, dtype=torch.bfloat16)
+    source = tuple(x.detach().requires_grad_(i < 6) for i, x in enumerate(source))
+    optimizer = torch.optim.SGD(source[:6], lr=.001, momentum=.9)
+    snapshots = [x.detach().clone() for x in source[:6]]
+    with pytest.raises(RuntimeError, match='nonfinite KHDN training'), NoFP64(), FiniteValidationScope(optimizer) as checks:
+        output, _ = ops.chunk_key_gated_hyperbolic_delta_rule(
+            *source[:5], curvature=source[6], initial_state=source[5], cu_seqlens=cu, chunk_size=64,
+            source_vjp='coupled_fused', precision_policy='bf16_selective',
+            validation_mode='deferred', validation_scope=checks,
+        )
+        (output.float() * float('nan')).sum().backward()
+        optimizer.step()
+    assert not optimizer.state and all(torch.equal(x, y) for x, y in zip(source[:6], snapshots))

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
     from fla.models.cache_utils import Cache
+    from fla.ops.key_gated_hyperbolic_delta_rule.validation import FiniteValidationScope
 
 
 class KeyGatedHyperbolicDeltaNet(nn.Module):
@@ -244,8 +245,16 @@ class KeyGatedHyperbolicDeltaNet(nn.Module):
         past_key_values: Cache | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
+        validation_scope: FiniteValidationScope | None = None,
         **kwargs: Unpack[dict],
     ):
+        if validation_scope is not None:
+            from fla.ops.key_gated_hyperbolic_delta_rule.validation import FiniteValidationScope
+            if (not self.training or not torch.is_grad_enabled() or self.mode != 'chunk'
+                    or self.precision_policy != 'bf16_selective'):
+                raise ValueError('A validation scope requires gradient-enabled bf16_selective chunk training.')
+            if not isinstance(validation_scope, FiniteValidationScope) or not validation_scope.accepting:
+                raise ValueError('KHDN training requires an open FiniteValidationScope.')
         batch_size, q_len, _ = hidden_states.shape
         if attention_mask is not None:
             if attention_mask.ndim != 2 or attention_mask.shape[0] != batch_size or attention_mask.shape[1] < q_len:
@@ -317,6 +326,8 @@ class KeyGatedHyperbolicDeltaNet(nn.Module):
                 extra['source_vjp'] = self.source_vjp
             if self.precision_policy != 'strict':
                 extra['precision_policy'] = self.precision_policy
+            if validation_scope is not None:
+                extra.update(validation_mode='deferred', validation_scope=validation_scope)
         else:
             from fla.ops.key_gated_hyperbolic_delta_rule import fused_recurrent_key_gated_hyperbolic_delta_rule as op
             extra = dict(checkpoint_size=self.chunk_size)

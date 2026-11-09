@@ -435,6 +435,8 @@ def chunk_key_gated_hyperbolic_delta_rule(
     telemetry: dict | None = None,
     precision_policy: str = 'strict',
     source_vjp: str = 'expanded',
+    validation_mode: str = 'strict',
+    validation_scope=None,
 ):
     """Evaluate the explicitly selected KHDN arithmetic policy.
 
@@ -448,6 +450,10 @@ def chunk_key_gated_hyperbolic_delta_rule(
         raise ValueError('Unknown KHDN source_vjp.')
     if source_vjp != 'expanded' and precision_policy != 'bf16_selective':
         raise ValueError('Coupled source_vjp requires precision_policy=bf16_selective.')
+    if validation_mode not in ('strict', 'deferred'):
+        raise ValueError('Unknown KHDN validation_mode.')
+    if (validation_mode != 'strict' or validation_scope is not None) and precision_policy != 'bf16_selective':
+        raise ValueError('Deferred validation requires precision_policy=bf16_selective.')
     if precision_policy in ('bf16', 'bf16_selective'):
         if precision_policy == 'bf16_selective':
             from fla.ops.key_gated_hyperbolic_delta_rule.bf16_selective import chunk_bf16
@@ -455,7 +461,8 @@ def chunk_key_gated_hyperbolic_delta_rule(
             from fla.ops.key_gated_hyperbolic_delta_rule.chunk128 import chunk_bf16
         else:
             from fla.ops.key_gated_hyperbolic_delta_rule.bf16 import chunk_bf16
-        source_options = {'source_vjp': source_vjp} if precision_policy == 'bf16_selective' else {}
+        source_options = ({'source_vjp': source_vjp, 'validation_mode': validation_mode, 'validation_scope': validation_scope}
+                          if precision_policy == 'bf16_selective' else {})
         return chunk_bf16(
             q=q, k=k, v=v, beta=beta, log_decay=log_decay, curvature=curvature,
             initial_state=initial_state, output_final_state=output_final_state, scale=scale,

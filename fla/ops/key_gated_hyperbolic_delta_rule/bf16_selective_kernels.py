@@ -426,7 +426,7 @@ def state_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, 
 
 
 @triton.jit
-def output_fwd_kernel(V0, Out, Starts, Ends, P, Gp, SavedS, SavedU, SavedR, SavedT, SavedRO, H: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True, NEED_DC: tl.constexpr = False):
+def output_fwd_kernel(V0, Out, Starts, Ends, P, Gp, SavedS, SavedU, SavedR, SavedT, SavedRO, H: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True, NEED_DC: tl.constexpr = False, DIRECT: tl.constexpr = False):
     block = tl.program_id(0).to(tl.int64)
     (group, ch) = (block % NG, block // NG)
     (head, chunk) = (ch % H, ch // H)
@@ -439,7 +439,7 @@ def output_fwd_kernel(V0, Out, Starts, Ends, P, Gp, SavedS, SavedU, SavedR, Save
     u = load_matrix(SavedU, block, C, G)
     (r, t) = (load_vector(SavedR, block, C), load_vector(SavedT, block, C))
     qer = load_matrix(P[7], ch, C, K)
-    to = load_matrix(P[13], ch, C, C)
+    to = load_matrix(P[12] if DIRECT else P[13], ch, C, C)
     aq = load_vector(P[20], ch, C)
     rho = read_rho_matrix(Gp, block, i, i, C, RHO_MATERIALIZED)
     nu = load_vector(Gp[7], block, C)
@@ -455,7 +455,7 @@ def output_fwd_kernel(V0, Out, Starts, Ends, P, Gp, SavedS, SavedU, SavedR, Save
 
 
 @triton.jit
-def output_bwd_kernel(V0, DO, DV, Starts, Ends, P, Gp, SavedS, SavedU, SavedR, SavedT, SavedRO, Sh, OutputAdj, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True):
+def output_bwd_kernel(V0, DO, DV, Starts, Ends, P, Gp, SavedS, SavedU, SavedR, SavedT, SavedRO, Sh, OutputAdj, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, RHO_MATERIALIZED: tl.constexpr = True, DIRECT: tl.constexpr = False):
     block = tl.program_id(0).to(tl.int64)
     (group, ch) = (block % NG, block // NG)
     (head, chunk) = (ch % H, ch // H)
@@ -483,7 +483,7 @@ def output_bwd_kernel(V0, DO, DV, Starts, Ends, P, Gp, SavedS, SavedU, SavedR, S
     nu = load_vector(Gp[7], block, C)
     gs = mm_backward(tl.trans(qer), nu[:, None] * gro, K, G, C)
     store_matrix(OutputAdj[0], block, gs, K, G)
-    to = load_matrix(P[13], ch, C, C)
+    to = load_matrix(P[12] if DIRECT else P[13], ch, C, C)
     rho = read_rho_matrix(Gp, block, i, i, C, RHO_MATERIALIZED)
     gu = mm_backward(tl.trans(to * rho), gro, C, G, C)
     store_matrix(OutputAdj[1], block, gu, C, G)
@@ -1066,7 +1066,7 @@ def common_input_bwd(Q0, DQ, DK, DB, Starts, Ends, P, Sh, Gauge, H: tl.constexpr
 
 
 @triton.jit
-def common_tail_bwd(Starts, Ends, P, Sh, Work, DK, DB, H: tl.constexpr, KD: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, COUPLED: tl.constexpr = False, SOURCE_OWNER: tl.constexpr = False):
+def common_tail_bwd(Starts, Ends, P, Sh, Work, DK, DB, H: tl.constexpr, KD: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, COUPLED: tl.constexpr = False, SOURCE_OWNER: tl.constexpr = False, DIRECT: tl.constexpr = False):
     ch = tl.program_id(0).to(tl.int64)
     (i, a) = (tl.arange(0, C).to(tl.int64), tl.arange(0, K).to(tl.int64))
     (start, end) = (tl.load(Starts + ch // H), tl.load(Ends + ch // H))

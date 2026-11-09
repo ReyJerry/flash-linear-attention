@@ -1,0 +1,96 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+import pytest
+import torch
+
+pytest.importorskip('triton')
+
+from test_key_gated_hyperbolic_bf16 import NoFP64, compare_bf16  # noqa: E402
+
+from fla.ops.key_gated_hyperbolic_delta_rule import bf16_selective, sherman_morrison  # noqa: E402
+from fla.ops.key_gated_hyperbolic_delta_rule.naive import (  # noqa: E402
+    naive_recurrent_key_gated_hyperbolic_delta_rule,
+)
+
+
+def sources(case, dtype, packed):
+    torch.manual_seed(42)
+    length = 2 if case == 'strong_gate' else 1 if case == 'near_d' else 129
+    q = torch.randn(1, length, 2, 128, dtype=torch.float32, device='cuda').to(dtype) * .1
+    k = torch.nn.functional.normalize(torch.randn(1, length, 2, 128, device='cuda'), dim=-1)
+    v = torch.randn(1, length, 2, 128, dtype=torch.float32, device='cuda') * .1
+    beta = .2 + torch.rand(1, length, 2, device='cuda') * .6
+    ell = -.02 - torch.rand(1, length, 2, 128, device='cuda') * .1
+    c = torch.tensor(0. if case == 'zero_curvature' else 1., device='cuda')
+    cu = torch.tensor([0, 0, 65, length, length], dtype=torch.int64, device='cuda') if packed else None
+    state = torch.randn(4 if packed else 1, 2, 128, 128, device='cuda') * .01
+    if case in ('fixed_point', 'repeated_beta1', 'strong_gate', 'near_d'):
+        q.zero_()
+        q[..., 0] = 1
+        k = q.float().clone()
+        v.zero_()
+        v[..., ::32] = .5
+        ell.zero_()
+        beta.fill_(.5)
+        state.zero_()
+        if case == 'fixed_point':
+            state[:, :, 0, ::32] = .5
+        if case == 'repeated_beta1':
+            beta.fill_(1.)
+        if case == 'strong_gate':
+            beta[:, 0], beta[:, 1] = 1., 0.
+            ell[:, 0], ell[:, 1] = -1e8, -1.
+        if case == 'near_d':
+            v.fill_(.9998779296875)
+    q, k, v, beta, ell, state, c = tuple(x.detach().requires_grad_() for x in (q, k, v, beta, ell, state, c))
+    if case == 'alias':
+        q = torch.nn.functional.normalize(q.detach().float(), dim=-1).to(dtype).requires_grad_()
+        k = q
+    return (q, k, v, beta, ell, state, c), cu
+
+
+@pytest.mark.parametrize('case,dtype,packed', [
+    ('random', torch.float32, False), ('random', torch.bfloat16, True),
+    ('fixed_point', torch.bfloat16, False), ('repeated_beta1', torch.bfloat16, False),
+    ('strong_gate', torch.bfloat16, False), ('zero_curvature', torch.bfloat16, False),
+    ('alias', torch.bfloat16, False),
+])
+def test_sm_cuda_seven_sources_and_repeat(case, dtype, packed):
+    xs, cu = sources(case, dtype, packed)
+    truth = tuple(x.detach().double().requires_grad_() for x in xs)
+    if case == 'alias':
+        truth = (truth[0], truth[0], *truth[2:])
+    expected = naive_recurrent_key_gated_hyperbolic_delta_rule(
+        *truth[:5], curvature=truth[6], initial_state=truth[5], output_final_state=True, cu_seqlens=cu, group_size=32,
+    )
+    cot = tuple(torch.sin(torch.arange(x.numel(), device=x.device)).reshape(x.shape).float()*.1 for x in expected)
+    gradients = torch.autograd.grad(expected, truth, tuple(x.double() for x in cot))
+    info = {}
+    with NoFP64():
+        actual = sherman_morrison.chunk_bf16(*xs[:5], curvature=xs[6], initial_state=xs[5],
+                                             output_final_state=True, cu_seqlens=cu, chunk_size=64, telemetry=info)
+        result = torch.autograd.grad(actual, xs, cot, retain_graph=True)
+        repeated = torch.autograd.grad(actual, xs, cot)
+    assert info['sm_active'] and info['source_vjp'] == 'sm_rank_one_manual'
+    assert all(torch.equal(a, b) for a, b in zip(result, repeated))
+    for i, (a, b) in enumerate(zip((*actual, *result), (*expected, *gradients))):
+        compare_bf16(a, b, backward=i >= 2)
+
+
+def test_sm_cuda_near_d_preserves_block_fallback():
+    xs, cu = sources('near_d', torch.bfloat16, False)
+    info = {}
+    kw = dict(curvature=xs[6], initial_state=xs[5], output_final_state=True, chunk_size=64, cu_seqlens=cu)
+    with NoFP64():
+        actual = sherman_morrison.chunk_bf16(*xs[:5], **kw, telemetry=info)
+        expected = bf16_selective.chunk_bf16(*xs[:5], **kw)
+        cot = tuple(torch.ones_like(x) for x in actual)
+        result = torch.autograd.grad(actual, xs, cot)
+        gradients = torch.autograd.grad(expected, xs, cot)
+    assert not info['sm_active'] and info['sm_fallback'] == 'unsafe_fp32_quality_or_normalization'
+    assert all(torch.equal(a, b) for a, b in zip((*actual, *result), (*expected, *gradients)))

@@ -1,0 +1,10 @@
+{
+  "status": "MAIN_SM_CPU_GPU_REFERENCE_GATE_VERIFIED",
+  "source": "ae35de862dd6837be805e9836de59ca644e659cb614256bf39078ad0a9c89cc1",
+  "cpu_fp64_cases": 10,
+  "gpu_cases": 8,
+  "actual_tiny_optimizer_updates": 1,
+  "compiler_images": 11,
+  "fp64_training_arithmetic": false,
+  "scope": "Main K128/g32 C64 operator seven-source cases inclcurvature/init/alias/repeat/near-d original block parity; fullstep/quality/DDP pending."
+}

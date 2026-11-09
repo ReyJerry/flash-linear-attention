@@ -1,0 +1,156 @@
+{
+  "status": "MAIN_SM_TWO_ENDPOINT_RAW_VERIFIED_NO_WIN",
+  "source": "ae35de862dd6837be805e9836de59ca644e659cb614256bf39078ad0a9c89cc1",
+  "observations": 168,
+  "physical_optimizer_updates": 42,
+  "arms": {
+    "short": {
+      "block": {
+        "medians_ms": {
+          "fwd": 521.1219787597656,
+          "bwd": 1301.892027258873,
+          "fb": 1821.0106641054153,
+          "step": 1849.9288484454155
+        },
+        "tokens_per_second": 8856.55684204734,
+        "peak_allocated": 47016131584,
+        "peak_reserved": 51157925888,
+        "source_vjp_actual": "coupled_fused",
+        "fallback_calls": 0,
+        "resources": {},
+        "step_stdev_ms": 0.9439275830594683
+      },
+      "sm": {
+        "medians_ms": {
+          "fwd": 573.0206146836281,
+          "bwd": 2051.346965134144,
+          "fb": 2621.6838732361794,
+          "step": 2650.3245756030083
+        },
+        "tokens_per_second": 6181.88434383448,
+        "peak_allocated": 47024258048,
+        "peak_reserved": 50384076800,
+        "source_vjp_actual": "sm_rank_one_manual",
+        "fallback_calls": 0,
+        "resources": {
+          "sm_fwd_kernel": {
+            "registers": 95,
+            "spills": 0,
+            "grid": [
+              512
+            ]
+          },
+          "sm_bwd_kernel": {
+            "registers": 254,
+            "spills": 0,
+            "grid": [
+              512
+            ]
+          },
+          "sm_reduce_kernel": {
+            "registers": 77,
+            "spills": 0,
+            "grid": [
+              16384
+            ]
+          }
+        },
+        "step_stdev_ms": 2.994430321812172
+      },
+      "kda_matched": {
+        "medians_ms": {
+          "fwd": 392.49569177627563,
+          "bwd": 1005.0973147153854,
+          "fb": 1396.5736031532288,
+          "step": 1420.8936542272568
+        },
+        "tokens_per_second": 11530.771462914532,
+        "peak_allocated": 47009556480,
+        "peak_reserved": 50734301184,
+        "source_vjp_actual": "kda_native",
+        "fallback_calls": 0,
+        "resources": {},
+        "step_stdev_ms": 0.7038793643276858
+      },
+      "sm_time_change_percent": 43.266297935199184,
+      "sm_throughput_vs_kda_percent": 53.61206198316187,
+      "block_throughput_vs_kda_percent": 76.80801645000035,
+      "initial_same_batch_loss_difference": -0.000431060791015625
+    },
+    "long": {
+      "block": {
+        "medians_ms": {
+          "fwd": 551.1882603168488,
+          "bwd": 1406.7516326904297,
+          "fb": 1955.560177564621,
+          "step": 1969.7680324316025
+        },
+        "tokens_per_second": 8317.73068211214,
+        "peak_allocated": 47016131584,
+        "peak_reserved": 51139051520,
+        "source_vjp_actual": "coupled_fused",
+        "fallback_calls": 0,
+        "resources": {},
+        "step_stdev_ms": 0.2831155014395402
+      },
+      "sm": {
+        "medians_ms": {
+          "fwd": 969.5264771580696,
+          "bwd": 3143.321633338928,
+          "fb": 4112.337000668049,
+          "step": 4137.871876358986
+        },
+        "tokens_per_second": 3959.523274175584,
+        "peak_allocated": 47024258048,
+        "peak_reserved": 50386173952,
+        "source_vjp_actual": "sm_rank_one_manual",
+        "fallback_calls": 0,
+        "resources": {
+          "sm_fwd_kernel": {
+            "registers": 95,
+            "spills": 0,
+            "grid": [
+              64
+            ]
+          },
+          "sm_bwd_kernel": {
+            "registers": 254,
+            "spills": 0,
+            "grid": [
+              64
+            ]
+          },
+          "sm_reduce_kernel": {
+            "registers": 77,
+            "spills": 0,
+            "grid": [
+              16384
+            ]
+          }
+        },
+        "step_stdev_ms": 1.4236859490945777
+      },
+      "kda_matched": {
+        "medians_ms": {
+          "fwd": 407.17311203479767,
+          "bwd": 1036.5734100341797,
+          "fb": 1438.9802515506744,
+          "step": 1456.728234887123
+        },
+        "tokens_per_second": 11247.121877382668,
+        "peak_allocated": 47009556480,
+        "peak_reserved": 50734301184,
+        "source_vjp_actual": "kda_native",
+        "fallback_calls": 0,
+        "resources": {},
+        "step_stdev_ms": 0.1784622025123246
+      },
+      "sm_time_change_percent": 110.06899331445355,
+      "sm_throughput_vs_kda_percent": 35.20476898305836,
+      "block_throughput_vs_kda_percent": 73.95430380138967,
+      "initial_same_batch_loss_difference": -0.0005893707275390625
+    }
+  },
+  "decision": "Rollback SM training candidate, preserve original block path; do not proceed to stage2/3 on this candidate.",
+  "scope": "Research same-card 2warm5steady; consecutive frozen-source baseline149 and corrected observer151. Not formal throughput, unseen quality or DDP qualification."
+}

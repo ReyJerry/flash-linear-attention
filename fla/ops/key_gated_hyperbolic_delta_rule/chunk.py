@@ -437,6 +437,7 @@ def chunk_key_gated_hyperbolic_delta_rule(
     source_vjp: str = 'expanded',
     validation_mode: str = 'strict',
     validation_scope=None,
+    group_rhs_fusion: bool = True,
 ):
     """Evaluate the explicitly selected KHDN arithmetic policy.
 
@@ -461,7 +462,8 @@ def chunk_key_gated_hyperbolic_delta_rule(
             from fla.ops.key_gated_hyperbolic_delta_rule.chunk128 import chunk_bf16
         else:
             from fla.ops.key_gated_hyperbolic_delta_rule.bf16 import chunk_bf16
-        source_options = ({'source_vjp': source_vjp, 'validation_mode': validation_mode, 'validation_scope': validation_scope}
+        source_options = ({'source_vjp': source_vjp, 'validation_mode': validation_mode, 'validation_scope': validation_scope,
+                           'group_rhs_fusion': group_rhs_fusion}
                           if precision_policy == 'bf16_selective' else {})
         return chunk_bf16(
             q=q, k=k, v=v, beta=beta, log_decay=log_decay, curvature=curvature,

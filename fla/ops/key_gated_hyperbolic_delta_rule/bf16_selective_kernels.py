@@ -336,17 +336,27 @@ def mass_reverse_scan(beta, lam, n, w, zp, gr, gt, C: tl.constexpr):
 
 
 @triton.jit
-def local_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, MIXED: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True):
+def local_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr,
+                      MIXED: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True,
+                      FUSE_GROUP_RHS: tl.constexpr = False):
     i = tl.arange(0, C)
     n = load_vector(P[18], ch, C)
     gamma = load_vector(P[19], ch, C)
     beta = load_vector(P[21], ch, C)
-    af = load_vector(Gp[5], block, C)
     lam = load_vector(Gp[6], block, C)
     nu = load_vector(Gp[7], block, C)
     h = tl.sum(v * y, 1)
     prefix_h = exclusive_prefix(h, C)
-    w = af - kap * pointer_mv(Gp[0], block, load_vector(Gp[8], block, C) * nu * (h + beta * prefix_h), C)
+    diagonal_inverse = load_vector(Gp[8], block, C)
+    if FUSE_GROUP_RHS:
+        # Exact linearity: Z^{-1}(d nu beta) - kap Z^{-1}(d nu (h + beta prefix(h)))
+        # is Z^{-1}[d nu (beta - kap (h + beta prefix(h)))].  This removes the
+        # materialized feedback vector and its separate matrix-vector product.
+        rhs = diagonal_inverse * nu * (beta - kap * (h + beta * prefix_h))
+        w = pointer_mv(Gp[0], block, rhs, C)
+    else:
+        af = load_vector(Gp[5], block, C)
+        w = af - kap * pointer_mv(Gp[0], block, diagonal_inverse * nu * (h + beta * prefix_h), C)
     u = w[:, None] * v - nu[:, None] * pointer_mm(P[10], ch, y, C, G, C)
     if C >= 16:
         (r, t, zp) = mass_forward_scan(beta, lam, n, w, C)
@@ -378,7 +388,7 @@ def local_state_graph(P, Gp, ch, block, v, s, y, length, kap, C: tl.constexpr, K
 
 
 @triton.jit
-def state_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, SavedU, SavedR, SavedT, SavedW, SavedZP, Carry, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr, MIXED: tl.constexpr = False, BF16_FS6: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True):
+def state_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, Gp, SavedS, SavedY, SavedU, SavedR, SavedT, SavedW, SavedZP, Carry, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, K: tl.constexpr, G: tl.constexpr, FINAL: tl.constexpr, CARRY: tl.constexpr, MIXED: tl.constexpr = False, BF16_FS6: tl.constexpr = False, RHO_MATERIALIZED: tl.constexpr = True, FUSE_GROUP_RHS: tl.constexpr = False):
     kap = tl.load(Curvature).to(tl.float32) / GS
     shg = tl.program_id(0).to(tl.int64)
     (group, head, seq) = (shg % NG, shg // NG % H, shg // (NG * H))
@@ -405,7 +415,8 @@ def state_fwd_kernel(V0, Curvature, S0, Out, Final, Starts, Ends, SeqChunks, P, 
         store_matrix(SavedY, block, y, C, G)
         v = tl.load(V0 + vo, vmask, 0).to(tl.float32)
         (s, u, r, t, ss, us, w, zp) = local_state_graph(P, Gp, ch, block,
-                                                        v, s, y, end - start, kap, C, K, G, MIXED, RHO_MATERIALIZED)
+                                                        v, s, y, end - start, kap, C, K, G, MIXED, RHO_MATERIALIZED,
+                                                        FUSE_GROUP_RHS)
         if CARRY and chunk + 1 < last:
             e = load_matrix(Carry[0], ch, C, K)
             hc = load_matrix(Carry[1], ch, C, C)

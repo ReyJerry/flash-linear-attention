@@ -108,7 +108,8 @@ def output_grouped_bwd_kernel(V0, DO, Starts, Ends, P, Gp, SavedR, SavedT, Saved
 def state_grouped_fwd_kernel(V0, Curvature, S0, Final, Starts, Ends, SeqChunks, P, Gp,
                              SavedS, SavedY, SavedU, SavedR, SavedT, SavedW, SavedZP,
                              H: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr, NG: tl.constexpr,
-                             C: tl.constexpr, K: tl.constexpr, BV: tl.constexpr):
+                             C: tl.constexpr, K: tl.constexpr, BV: tl.constexpr,
+                             FUSE_GROUP_RHS: tl.constexpr = False):
     tl.static_assert(C == 64 and K == 128 and GS == 32 and VD % BV == 0)
     shv = tl.program_id(0).to(tl.int64)
     tile, head, seq = shv % (VD // BV), shv // (VD // BV) % H, shv // ((VD // BV) * H)
@@ -146,10 +147,16 @@ def state_grouped_fwd_kernel(V0, Curvature, S0, Final, Starts, Ends, SeqChunks, 
             selected = groups == group
             h = tl.sum(tl.where(selected[None, :], value * y, 0.0), 1)
             nus = load_vector(Gp[7], block, C)
-            af = load_vector(Gp[5], block, C)
             lam = load_vector(Gp[6], block, C)
-            rhs = load_vector(Gp[8], block, C) * nus * (h + beta * exclusive_prefix(h, C))
-            w = af - kap * pointer_mv(Gp[0], block, rhs, C)
+            diagonal_inverse = load_vector(Gp[8], block, C)
+            prefix_h = exclusive_prefix(h, C)
+            if FUSE_GROUP_RHS:
+                rhs = diagonal_inverse * nus * (beta - kap * (h + beta * prefix_h))
+                w = pointer_mv(Gp[0], block, rhs, C)
+            else:
+                af = load_vector(Gp[5], block, C)
+                rhs = diagonal_inverse * nus * (h + beta * prefix_h)
+                w = af - kap * pointer_mv(Gp[0], block, rhs, C)
             r, t, zp = mass_forward_scan(beta, lam, n, w, C)
             store_vector(SavedR, block, r, C)
             store_vector(SavedT, block, t, C)

@@ -32,15 +32,15 @@ def make_inputs(batch, length, heads, value_dim, device):
     return tuple(x.detach().requires_grad_() for x in (q, k, v, beta, ell, state))
 
 
-def run_once(inputs, action, chunk_size):
+def run_once(inputs, action, chunk_size, options):
     q, k, v, beta, ell, state = inputs
     telemetry = {}
     out, final = chunk_key_gated_hyperbolic_delta_rule(
         q, k, v, beta, ell, curvature=0.5, initial_state=state,
         output_final_state=True, group_size=32, chunk_size=chunk_size,
-        precision_policy='bf16_selective', source_vjp=args.source_vjp,
-        value_tile=args.value_tile, state_value_tile=args.state_value_tile,
-        state_residual_mode=args.state_residual_mode,
+        precision_policy='bf16_selective', source_vjp=options.source_vjp,
+        value_tile=options.value_tile, state_value_tile=options.state_value_tile,
+        state_residual_mode=options.state_residual_mode,
         group_rhs_fusion=True, group_action_solve=action, telemetry=telemetry,
     )
     loss = out.float().square().mean() + final.float().square().mean()
@@ -52,14 +52,14 @@ def max_error(a, b):
     return max(float((x.float() - y.float()).abs().max().item()) for x, y in zip(a, b))
 
 
-def timed(inputs, action, warmup, repeat, chunk_size):
+def timed(inputs, action, warmup, repeat, chunk_size, options):
     for _ in range(warmup):
-        run_once(inputs, action, chunk_size)
+        run_once(inputs, action, chunk_size, options)
     torch.cuda.synchronize()
     samples, last = [], None
     for _ in range(repeat):
         start = time.perf_counter()
-        last = run_once(inputs, action, chunk_size)
+        last = run_once(inputs, action, chunk_size, options)
         torch.cuda.synchronize()
         samples.append((time.perf_counter() - start) * 1000.0)
     ordered = sorted(samples)
@@ -99,8 +99,8 @@ def main():
         return 0
 
     inputs = make_inputs(args.batch, args.length, args.heads, args.value_dim, device)
-    inverse, inverse_timing = timed(inputs, False, args.warmup, args.repeat, args.chunk_size)
-    action, action_timing = timed(inputs, True, args.warmup, args.repeat, args.chunk_size)
+    inverse, inverse_timing = timed(inputs, False, args.warmup, args.repeat, args.chunk_size, args)
+    action, action_timing = timed(inputs, True, args.warmup, args.repeat, args.chunk_size, args)
     inverse_out, inverse_final, inverse_grads, inverse_meta = inverse
     action_out, action_final, action_grads, action_meta = action
     output_error = max_error((inverse_out, inverse_final), (action_out, action_final))

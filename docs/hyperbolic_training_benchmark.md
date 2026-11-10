@@ -5,9 +5,9 @@ compares complete dense causal-LM training steps with FP32 parameters, an explic
 and a fused AdamW optimizer. It measures the unprotected TC/staged routes, the protected baseline/shared-inverse/staged
 routes, and GatedDeltaNet (GDN). GDN is a performance reference with a different update rule, not a numerical oracle for HDN.
 
-**GPU NOT RUN:** the implementation environment has no CUDA device. The host tests, real CPU model-construction checks,
-CLI checks, and static checks described below do not validate GPU kernels, GPU timings, or a performance improvement.
-The commands in this document are the reproducible GPU verification procedure, not reported GPU results.
+The initial legacy-route implementation was validated in a CPU-only environment; those historical checks below do not
+establish GPU performance. Subsequent native GDN W1/W8/W16 tiny checks and strict KHDN validation are described in
+[the distributed harness](hyperbolic_ddp_harness.md) and the KHDN section below. Example commands are not execution evidence.
 
 ## Default configuration and comparison contract
 
@@ -370,3 +370,50 @@ GPU acceptance still requires successful operator/reference checks, the actual s
 full-size measurements on the same hardware/software, and longer training evidence appropriate to the intended use.
 The current host evidence supports running that verification workflow; it does not establish readiness of the new
 GPU paths for production training.
+
+## Experimental strict KHDN integration
+
+`khdn_no_carry` remains the comparison baseline. Both optimized KHDN methods require `--khdn-strict`; this selects the existing FP64 SIMT device implementation, with FP32 parameters and the requested public/autocast dtype. It makes no internally FP32 or Tensor Core claim. C64 is permitted for KHDN only; the legacy HDN routes retain C16/C32. KHDN has no protected inner-checkpoint policy, so `--inner-checkpoint` is rejected. Missing compiled IR/PTX, stage launches, backward, C/g/carry metadata, domain diagnostics, or an exceptional route rejects the gate.
+
+The untimed trace wraps the real exported operator and all loaded FLA aliases, captures executed autograd options and seven source descriptors, retains the injected telemetry dictionary until original-context backward completes, and records each real JIT launch. Per-layer backward coverage is required. Nonreentrant recomputation may create additional forward-only dictionaries; these are retained without inventing backward telemetry. Replay must actually be observed for every trained layer when outer checkpointing is requested. Each stage records bound positional/keyword launch arguments, pointer/buffer dtypes, compiled IR/PTX hashes and inspected Tensor Core opcodes. The IR parser strips comments/location metadata and parses supported same-type scalar/tensor/vector arith.mulf/addf and math.fma type clauses; unknown or multiline operation syntax fails closed. The independent PTX check rejects non-FP64 floating add/sub/mul/fma/mad/div/sqrt/rcp opcodes. This does not certify every instruction, conversion or library call. Source contraction sites are identified as source sites, not runtime counts or profiler attribution. Real preparation buffers supply denominator, positive mass and normalizer summaries. An additional bounded FP64 projection checks saved Y against the actual F and saved canonical S; terminal carry buffers must contain exact zeros, including when zero carry edges are expected.
+
+Before model timing, dense and packed small g32 KHDN models compare loss and every parameter gradient with the explicit independent dense Oracle. This supplemental witness enables learned positive curvature and requires f_proj, A_log, dt_bias and curvature_raw gradients. It preserves the existing loss and parameter-gradient budgets. A separate operator witness compares output, final state and all seven source gradients against unrounded dense FP64 truth, using the existing operator elementwise and relative-RMS budgets. DDP serial-update, valid-label weighting, zero-label handling, checkpoint generation and recovery contracts remain separate gates. A full-size untimed route pass uses the actual configured model and batch before any measured sample. Every original and recompute record must match the actual dense B/T or the exact packed/unpadded token count and sequence boundaries. Explicit cu_seqlens takes precedence over a padding mask, matching the layer; mask-derived boundaries retain empty documents.
+
+Normal timed execution has no diagnostic/projection hooks or launch wrappers. Before each sample, the harness replaces only exceptional host forward/backward and reference/recurrent entry aliases with raising sentinels. An unexpected route fails before fallback work; failure journals retain the event. The production core's original range/finiteness checks remain inside the measured operator. This is an exception monitor, not a proof that arbitrary future tensors remain in a normal numerical domain. Reserved-memory accounting retains the existing process-allocator scope.
+
+A first true W1 NCCL/DDP check, after independent review and source packaging, can use the following launch. Strong mode requires CLI batch8/seq2048, while check-only still runs tiny gate models/batches. The executor must deploy the matching canonical manifest and place all writable outputs, logs, optional profiles and compiler caches outside the immutable source tree. This example assumes source deployment under /tmp/khdn-training-fixed/source and external run storage:
+
+```bash
+FLA_SOURCE_MANIFEST=/tmp/khdn-training-fixed/snapshot.json \
+TRITON_CACHE_DIR=/tmp/khdn-training-fixed/cache/triton \
+TORCHINDUCTOR_CACHE_DIR=/tmp/khdn-training-fixed/cache/inductor \
+CUDA_CACHE_PATH=/tmp/khdn-training-fixed/cache/cuda \
+TORCH_EXTENSIONS_DIR=/tmp/khdn-training-fixed/cache/extensions \
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=1 --max-restarts=0 \
+  --log-dir /mnt/cephfs/akseli/hyperbolic-validation/khdn-training-fixed/torchrun \
+  /tmp/khdn-training-fixed/source/benchmarks/benchmark_hyperbolic_training.py \
+  --methods khdn_no_carry --khdn-strict --check-only --dtype fp32 --scaling strong \
+  --layers 2 --hidden-size 64 --heads 2 --head-dim 32 --intermediate-size 128 --vocab-size 97 \
+  --batch 8 --seq-len 2048 --chunk-size 16 --group-size 32 --learnable-curvature \
+  --loss-backend plain --ddp-timeout 90 --task-timeout 900 \
+  --output /mnt/cephfs/akseli/hyperbolic-validation/khdn-training-fixed/khdn-w1.json
+```
+
+### Operator pilot and actual long shapes
+
+The operator sweep is a separate bounded single-device path in the same script; it does not initialize DDP. B=H=1 and K=V=`--head-dim`; every JSON/profile row records the actual T. It uses fresh graphs for backward-only and F+B, raw samples, separate warmup and a separate optional profiler sample. It does not stand in for full-model profiling. Default lengths 17/33/65 form the first pilot:
+
+```bash
+python benchmarks/benchmark_hyperbolic_training.py \
+  --methods khdn_no_carry khdn_y_carry --khdn-strict --operator-sweep --dtype fp32 \
+  --hidden-size 32 --heads 1 --head-dim 32 \
+  --modes fwd_bwd --chunk-size 16 --group-size 32 --operator-lengths 17 33 65 \
+  --warmup 1 --steps 2 \
+  --output /mnt/cephfs/akseli/hyperbolic-validation/khdn-training-fixed/operator-pilot.json
+```
+
+Long/full-model expansion requires a separately reviewed run scope. The CLI accepts explicit `--operator-lengths 2048 8192 16384` for actual long inputs, and `--modes fwd`, `bwd`, or `fwd_bwd` in separate invocations. `--check-only` performs correctness without timing. `--profile DIR` exports an additional real-shape Chrome trace. The scope remains B=H=1; full-model B8/H16 and all-layer coverage must come from the model path. A first long pilot can request T2048 alone before proceeding to T8192/T16384; no automatic shape reduction occurs on failure.
+
+Long correctness uses nonreentrant checkpointing around independent dense-Oracle temporal chunks (`--oracle-chunk-size`, default16). Canonical S connects adjacent chunks, retaining the complete q/k/v/beta/log_decay/S0/c gradient chain. Each case first compares this harness against the uncheckpointed independent dense Oracle on a bounded witness. It then evaluates actual long FP64 truth without retaining every token's dense-solve graph. The truth never calls production chunk kernels. This reduces retained AD activation memory; it does not remove the dense Oracle's compute cost or claim long-shape feasibility without GPU measurement. High-precision exceptional routes remain outside strict timing acceptance.
+
+The fixed integration has passed 217 CPU cases and targeted independent review of compiled-type parsing and actual token-domain binding. Actual H20 FP32/BF16 tiny W1 checks passed for both carry modes, including same-model Oracle parity, all-parameter gradients, checkpoint replay and zero fallback. Two unchanged 24-layer BF16/plain-CE B8x2048 pilots each completed five finite updates and checkpoint reload with the actual 1,412,912,536-parameter learned-curvature model. Their two measured step samples per method are feasibility evidence, not the required 10-warmup/30-sample/three-repeat performance acceptance. Multi-rank full KHDN training, broader precision coverage and formal performance remain pending. Separately discovered extreme-query and c0/large-state numerical limits are under repair; normal model checks do not certify that whole input domain.

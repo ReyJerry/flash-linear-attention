@@ -546,3 +546,72 @@ def test_recurrent_invalid_packed_boundaries(bad, check_inputs):
     }
     with pytest.raises(ValueError):
         run(xs, cu_seqlens=variants.get(bad, cu), check_inputs=check_inputs)
+
+
+@pytest.mark.parametrize('layout', ['dense', 'packed', 'packed_empty'])
+@pytest.mark.parametrize('dtype,fp64_source', [
+    pytest.param(torch.float32, None, id='fp32'),
+    pytest.param(torch.bfloat16, None, id='bf16'),
+    pytest.param(torch.float16, None, id='fp16'),
+    pytest.param(torch.float64, None, id='fp64'),
+    *(pytest.param(torch.float32, name, id=f'fp64_{name}') for name in NAMES),
+])
+def test_recurrent_cpu_autocast_values_and_seven_gradients(layout, dtype, fp64_source):
+    packed = layout != 'dense'
+    xs = make_case(B=1 if packed else 2, T=0 if layout == 'packed_empty' else 7, K=32, V=64, g=32)
+    cu = None
+    if packed:
+        cu = torch.tensor([0, 0, 0, 0, 0] if layout == 'packed_empty' else [0, 0, 3, 7, 7])
+        xs = (*xs[:5], make_case(B=4, K=32, V=64, g=32)[5], xs[6])
+    xs = tuple(x.detach().to(torch.float64 if name == fp64_source else dtype).requires_grad_() for name, x in zip(NAMES, xs))
+    amp_xs = leaves(xs)
+    math_dtype = torch.float64 if any(x.dtype == torch.float64 for x in xs) else torch.float32
+    promoted = tuple(x.detach().to(math_dtype).requires_grad_() for x in xs)
+    expected = run(xs, g=32, cu_seqlens=cu)
+    explicit = run(promoted, g=32, cu_seqlens=cu)
+    with torch.autocast('cpu', dtype=torch.bfloat16):
+        actual = run(amp_xs, g=32, cu_seqlens=cu)
+        assert torch.is_autocast_enabled('cpu')
+    assert actual[0].dtype == xs[0].dtype
+    assert actual[1].dtype == math_dtype
+    for a, e, p in zip(actual, expected, explicit):
+        torch.testing.assert_close(a, e, atol=0, rtol=0)
+        torch.testing.assert_close(e, p.to(e.dtype), atol=0, rtol=0)
+    cotangents = tuple(torch.randn_like(x) for x in expected)
+    expected_grads = torch.autograd.grad(expected, xs, cotangents)
+    actual_grads = torch.autograd.grad(actual, amp_xs, cotangents)
+    explicit_grads = torch.autograd.grad(explicit, promoted, tuple(x.to(math_dtype) for x in cotangents))
+    for name, a, e, p in zip(NAMES, actual_grads, expected_grads, explicit_grads):
+        assert torch.isfinite(a).all(), name
+        torch.testing.assert_close(a, e, atol=0, rtol=0)
+        torch.testing.assert_close(e, p.to(e.dtype), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize('fail', [False, True], ids=['return', 'exception'])
+def test_recurrent_cpu_autocast_restoration(monkeypatch, fail):
+    xs = tuple(x.detach().float().requires_grad_() for x in make_case(B=1))
+    einsum = torch.einsum
+    calls = []
+
+    def checked_einsum(equation, *operands):
+        calls.append(equation)
+        assert not torch.is_autocast_enabled('cpu')
+        assert all(x.dtype == torch.float32 for x in operands)
+        if fail:
+            raise RuntimeError('autocast restoration probe')
+        return einsum(equation, *operands)
+
+    monkeypatch.setattr(torch, 'einsum', checked_einsum)
+    before = torch.is_autocast_enabled('cpu'), torch.get_autocast_dtype('cpu'), torch.is_autocast_cache_enabled()
+    with torch.autocast('cpu', dtype=torch.bfloat16, cache_enabled=False):
+        if fail:
+            with pytest.raises(RuntimeError, match='autocast restoration probe'):
+                run(xs)
+        else:
+            run(xs)
+        assert torch.is_autocast_enabled('cpu')
+        assert torch.get_autocast_dtype('cpu') == torch.bfloat16
+        assert not torch.is_autocast_cache_enabled()
+        assert torch.mm(torch.ones(2, 2), torch.ones(2, 2)).dtype == torch.bfloat16
+    assert calls
+    assert before == (torch.is_autocast_enabled('cpu'), torch.get_autocast_dtype('cpu'), torch.is_autocast_cache_enabled())

@@ -1,0 +1,11 @@
+{
+  "files": {
+    "README.md": "83ad22fab4136ed6673a09ed3fc7dbc98e03d0fa8e3c9d5576cff3e84bd9efa0",
+    "evidence.json.gz": "25c5b75704893adeb88feae01653708c46cf70b8ddc7a8c9f5eb959bb4dbcc70",
+    "model-sources.tar.gz": "25b748af73a3c803f2e5ad40d0226eebb05fd970a5974957735dcffe91d60088",
+    "operator-sources.tar.gz": "9a06d8a5b14097aef5dabbc3866515bf615ecf34c093c1a78b9fa35f329215a6",
+    "source-binding.json": "1e6ffd03469a7bf9454806fc7a079e53e2bcc604988d02d7127f7712459f752f",
+    "summarize.py": "9a2bbeb583208ed0fce3564a542c112b8de8d94d83a860d152425cb77f9e13b1"
+  },
+  "scope": "Archived experimental sources and records, not production qualification"
+}

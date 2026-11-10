@@ -1,0 +1,35 @@
+ACTIVE PROSPECTIVE BF16 CONTRACT v1 — approved by the user on 2026-11-05; recorded at 13:49:16 UTC.
+
+Purpose: qualify a practical BF16/FP32 training policy without pretending it reproduces every FP64-model parameter gradient or Adam delta. Preserve original failures and strict-reference tests; do not relabel past failed runs.
+
+Unchanged requirements:
+- Canonical grouped Lorentz model, nonconstant trainable key-channel gate, g32, positive curvature, all seven first-order physical source derivatives, causal/packed/empty semantics and canonical cache identity.
+- No FP64 tensors/arithmetic or hidden FP64 fallback in the candidate training path; FP32 permitted where needed. Untimed explicit strict/dense reference remains separate.
+- Same-kernel/same-precision W1/W8/W16 gradient and update equivalence keeps original .002/.02 gradient and 2e-6/.02 update budgets. Keep communication, unequal-label weighting, real optimizer calls, failure cleanup and fresh-process resume requirements.
+- Four full-model shapes, finite training, save/resume, original same-card timing/repetitions and honest unsupported/failed/skipped records remain mandatory. No goal completion based on this proposal.
+
+Approved BF16-policy arithmetic budget (separate from legacy strict/FP32 budgets):
+- Output/canonical state: elementwise atol=.002, rtol=.02; RMS(error) <= .01 * max(RMS(reference), .002).
+- Each of q/k/v/beta/log_decay/S0/c VJPs: atol=.005, rtol=.03; RMS(error) <= .015 * max(RMS(reference), .005).
+- These values reuse the repository's existing BF16 tensor comparison levels. Applying them to FP32 public control/state tensors whose computations contain BF16 products is an explicit contract change, not evidence that the original FP32 budget passed.
+- Keep analytic/semantic tests (e.g. beta0 still forgets, c0 retains derivative, future gradients zero, empty identity, domain validation) unchanged where their checks test the model identity rather than the old strict execution precision.
+
+Approved cross-precision full-model criteria:
+- Log all old per-element gradient/update failures as diagnostics.
+- Require finite loss, all gradients, parameters, optimizer states, positive curvature and valid gates; no hidden route changes.
+- For matched initial states/batches, global gradient cosine >=.99 and gradient norm ratio in[.9,1.1]. These are user-approved engineering thresholds, not a general numerical theorem.
+- On a fixed unseen validation set, evaluate CE from explicitly FP32 logits with autocast disabled. Require abs(mean_CE_candidate - mean_CE_reference) <= log(1.001), corresponding to at most0.1% relative perplexity difference in either direction.
+- Check this over finite matched training, not just the initial forward. Check per-layer/parameter drift and actual Adam states; gradient cosine alone is insufficient.
+- Synthetic validation can establish only the stated engineering experiment; it cannot certify real-corpus quality or superiority to another architecture.
+
+Prospective qualification:
+- Freeze the contract before new validation runs; current seed42/data43 studies are pilot evidence, not the new qualification set.
+- Use new model seeds101/211/307 and data seeds1009/2003/3001, predeclare train/validation sample IDs and finite step budgets, and retain the original full shapes and required distributed/recovery coverage.
+- Publish both original and proposed-budget results, exact source/runtime and raw data. A faster policy is promoted only after the agreed contract and remaining engineering requirements actually pass.
+
+Current evidence motivating the decision:
+- Full24 B8T2048: direct BF16 global gradient relative L2=.11147/cos=.993787; six-product compensated=.05864/.998281; extra state residual=.05852/.998288. All fail original cross-precision per-element gates.
+- Same-card actual Layer0 six-kernel replay:67.593/93.835/136.271ms. The extra state residual costs45.225% over six-product compensation, with no meaningful ordinary-payload accuracy gain.
+- Tiny64step studies are finite; reevaluated heldout CE differences are approximately .000397/.000107/.000423. These do not prove full-model or real-data quality.
+
+Approval: the user selected “采用新 BF16 合同，继续完整模型验证（推荐）”. Apply this separate contract prospectively after freezing the validation manifest. Prior seed42/data43 results and old failures are not retroactively reclassified. Existing same-precision DDP and semantic tests retain their original standards. This user approval is not maintainer approval or a completed qualification.

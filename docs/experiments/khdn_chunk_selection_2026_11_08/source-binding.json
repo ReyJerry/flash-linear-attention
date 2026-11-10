@@ -1,0 +1,570 @@
+{
+  "base_commit": "0c667850d8e5aed44637099d2c671753e472f29d",
+  "experiments": {
+    "26-chunk-selection": {
+      "archive": "b10ac16e0ca9de8b709d990dcee7edc490e0cbe3d85bba2cedb80b7ba1ac9593",
+      "supervisor": {
+        "job": "khdn-chunks26-cost-b10ac16e0ca9",
+        "archive": "b10ac16e0ca9de8b709d990dcee7edc490e0cbe3d85bba2cedb80b7ba1ac9593",
+        "gpu": "GPU-1bc44dca-5b09-b0d3-33d8-8c50a1592166",
+        "boot": "63939c96-51eb-4650-8a9d-1c995192cc88",
+        "uid": "ce3ee8a2-b4df-4a7a-bcf4-64efe7895f0d",
+        "state_warps": 4,
+        "source": "samegeneration_C64_C128_fullmodel",
+        "status": "passed",
+        "reaped": true,
+        "group_drained": true,
+        "timeout_seconds": 4000,
+        "grant": true,
+        "grant_attempted": true,
+        "group_signals": [],
+        "adopted_reaped": [],
+        "errors": [],
+        "timed_out": false,
+        "child_exit": 0,
+        "exit": 0,
+        "pid": 265596,
+        "birth": "4942433624",
+        "pgid": 265596,
+        "sid": 265596,
+        "live_at_cleanup": [],
+        "apps_after": "",
+        "stop_signal": null,
+        "result_sha256": "6a1abbdc49f562c3074fd505feb01d03b2d586e25b38c2f0a77fda139e1ef8ea",
+        "terminal": true
+      },
+      "result_sha256": "6a1abbdc49f562c3074fd505feb01d03b2d586e25b38c2f0a77fda139e1ef8ea",
+      "overlay": [
+        "fla/layers/key_gated_hyperbolic_deltanet.py",
+        "tests/models/test_key_gated_hyperbolic_precision.py"
+      ],
+      "verification": {
+        "status": "MAIN_SHORT_SCREEN_VERIFIED",
+        "metrics": {
+          "c64": {
+            "medians_ms": {
+              "fb": 2013.8916671276093,
+              "step": 2036.4312455058098
+            },
+            "tokens_per_second": 8045.447169482284,
+            "peak_allocated_bytes": 27616996352,
+            "peak_reserved_bytes": 33361494016
+          },
+          "c128": {
+            "medians_ms": {
+              "fb": 2094.468802213669,
+              "step": 2117.449142038822
+            },
+            "tokens_per_second": 7737.612051557651,
+            "peak_allocated_bytes": 28071025664,
+            "peak_reserved_bytes": 33361494016
+          },
+          "kda": {
+            "medians_ms": {
+              "fb": 1710.3724405169487,
+              "step": 1733.5052266716957
+            },
+            "tokens_per_second": 9451.370407147278,
+            "peak_allocated_bytes": 27470129152,
+            "peak_reserved_bytes": 32382124032
+          }
+        },
+        "c64_throughput_gain_over_c128": 0.039784253316585305,
+        "c64_throughput_fraction_of_kda": 0.8512466259282556,
+        "c64_peak_saving_bytes": 454029312,
+        "evidence_files": {
+          "result.json": "6a1abbdc49f562c3074fd505feb01d03b2d586e25b38c2f0a77fda139e1ef8ea",
+          "supervisor.json": "c869b2b0ded7811b38dfe07825b2a54227af0809f18ba4eaba33c52f10ba8323",
+          "process.log": "fcc42a0885687942ac47e5425bc813cc193040b3aea5ba57e174ba784b80364c",
+          "retained-gates.json": "7c1798067fdfba912740345c66e348892a567d026d70a8be9cf3e279e75e0130",
+          "execution.json": "db6c6735f98aae24285f2b97f1cdc65d5d84bf7f31d773e010414e4461bad536",
+          "kda/qualification.json": "3753707fb007ec875cafee05fd5712e8386fc6870049e989a7e6a9038497f8d9",
+          "kda/result.json": "c29633f027ceb180e61e2a1c8df95163733f5646f8055ccdd3c9788af6dce43c",
+          "kda/events.json": "4c8e1532bb8b8e0552835eb736a5d0b860b8b986f6b5d194c581fc9c6fd6bf2f",
+          "kda/process.log": "c0d71fcb3ccb50395c789b2c8966feee2a19738d595c9153486ce871041efde1",
+          "kda/samples.json": "e248a2d39ecd086d71d9372159942a993597eb62c26e616cd26843fb5d9505a1",
+          "kda/optimizer-images.json": "932ca8a7aa0cd6f918e7bf171c98faede82f186436f6780284b289140f67d76f",
+          "c64/qualification.json": "51e0dcb8e490faa0782e5dbcc2b2a606be7a534189ecf76922659b14ee4357e0",
+          "c64/result.json": "4fece8d4aea5d6ad88b1c964dda341f12c28ea9de6d88200f62927776a5c1a36",
+          "c64/events.json": "53adc8af29d4f6f350980a1cfc0b29894e57129b82593e64da6613930e999c62",
+          "c64/process.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "c64/samples.json": "81f41c701666456ab700ce850c9719cc53ebb666964fbd9985ff4ff49120f790",
+          "c64/optimizer-images.json": "932ca8a7aa0cd6f918e7bf171c98faede82f186436f6780284b289140f67d76f",
+          "c128/qualification.json": "ff631bea19049ee700b536f7b217b42e22b520ea385123ec0ffbed0fc58c30cf",
+          "c128/result.json": "6ffd0ce44bb43946012b84559d6a158325b60858aeaba0e57bc338e29ea72e49",
+          "c128/events.json": "c35c5f4346d6ba760bc08baf5a096cc030ec05e6db648ebe89e86fb7ad319a4e",
+          "c128/process.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "c128/samples.json": "88327bd3e8606117cb041e5c1eca121244c6328dfac618008a68c8f717a0da67",
+          "c128/optimizer-images.json": "932ca8a7aa0cd6f918e7bf171c98faede82f186436f6780284b289140f67d76f"
+        },
+        "limits": [
+          "One 2-warm/3-steady short-shape screening round; not final performance qualification.",
+          "Original public 12-case numerical failures remain unresolved.",
+          "C64 interval_execution_tile=64 binding is a stale label; actual C64 cross-forward uses32.",
+          "source_validation_fallbacks=null is uninstrumented, not an observed zero.",
+          "Long endpoint and current-source numerical/model/distributed acceptance remain incomplete."
+        ]
+      }
+    },
+    "27-chunk-long-endpoint": {
+      "archive": "99b1ea8c390bb6e9e858e2e36e2e7ae3627f77754e8dcee5d1fd67f2caaf3d18",
+      "supervisor": {
+        "job": "khdn-chunks27-cost-99b1ea8c390b",
+        "archive": "99b1ea8c390bb6e9e858e2e36e2e7ae3627f77754e8dcee5d1fd67f2caaf3d18",
+        "gpu": "GPU-1bc44dca-5b09-b0d3-33d8-8c50a1592166",
+        "boot": "63939c96-51eb-4650-8a9d-1c995192cc88",
+        "uid": "ce3ee8a2-b4df-4a7a-bcf4-64efe7895f0d",
+        "state_warps": 4,
+        "source": "samegeneration_C64_C128_longendpoint",
+        "status": "passed",
+        "reaped": true,
+        "group_drained": true,
+        "timeout_seconds": 4000,
+        "grant": true,
+        "grant_attempted": true,
+        "group_signals": [],
+        "adopted_reaped": [],
+        "errors": [],
+        "timed_out": false,
+        "child_exit": 0,
+        "exit": 0,
+        "pid": 267837,
+        "birth": "4942506711",
+        "pgid": 267837,
+        "sid": 267837,
+        "live_at_cleanup": [],
+        "apps_after": "",
+        "stop_signal": null,
+        "result_sha256": "066bc3754f2206059aac427a1db5c98d47e5454976eee02fd62ca6a37c0dd347",
+        "terminal": true
+      },
+      "result_sha256": "066bc3754f2206059aac427a1db5c98d47e5454976eee02fd62ca6a37c0dd347",
+      "overlay": [
+        "fla/layers/key_gated_hyperbolic_deltanet.py",
+        "tests/models/test_key_gated_hyperbolic_precision.py"
+      ],
+      "verification": {
+        "status": "MAIN_LONG_ENDPOINT_SCREEN_VERIFIED",
+        "metrics": {
+          "c64": {
+            "medians_ms": {
+              "fb": 2097.36155718565,
+              "step": 2119.217589497566
+            },
+            "tokens_per_second": 7731.155158958639,
+            "peak_allocated_bytes": 27591044096,
+            "peak_reserved_bytes": 33527169024
+          },
+          "c128": {
+            "medians_ms": {
+              "fb": 2180.2531331777573,
+              "step": 2199.662111699581
+            },
+            "tokens_per_second": 7448.416696753853,
+            "peak_allocated_bytes": 28049005568,
+            "peak_reserved_bytes": 33604763648
+          },
+          "kda": {
+            "medians_ms": {
+              "fb": 1746.5380877256393,
+              "step": 1770.1928243041039
+            },
+            "tokens_per_second": 9255.488879546701,
+            "peak_allocated_bytes": 27470129152,
+            "peak_reserved_bytes": 32382124032
+          }
+        },
+        "c64_throughput_gain_over_c128": 0.037959538747074584,
+        "c64_throughput_fraction_of_kda": 0.8353048941632224,
+        "c64_peak_saving_bytes": 457961472,
+        "evidence_files": {
+          "result.json": "066bc3754f2206059aac427a1db5c98d47e5454976eee02fd62ca6a37c0dd347",
+          "supervisor.json": "cd61a9189c8f859c5227ce76d33266d0d343022faf4ebc0e2742a665e29f43a1",
+          "process.log": "b951cff4a7e95b958505a262dd7504146bb576582e56d8772ac8c87e02d18504",
+          "retained-gates.json": "7c1798067fdfba912740345c66e348892a567d026d70a8be9cf3e279e75e0130",
+          "execution.json": "e0c475be402031fa0a2a13094bf6c5f992db148b80cf7db33966d42717757b72",
+          "kda/qualification.json": "4cb8f059ad7a86fd0fc5b2459d00796fe15d472662fe428796d9530d6e849c51",
+          "kda/result.json": "1dcbaed89438d6e7e4f39fc87362af7531d874b6caf03af4c3bc12e8e20c8a6b",
+          "kda/events.json": "6ab9be3480d442cbdcc9b1e332ec3f2ba5a26aa3f01cbf767cdb536e30039fb1",
+          "kda/process.log": "42c0e0c29ba16559b0b6d76210833b9cd1b6fcf2e20775c6b467b45dd516d9ea",
+          "kda/samples.json": "ef66bf15d76008718925a8dcea52f9abff4c56054e6700ae43a43119981ee767",
+          "kda/optimizer-images.json": "104dbb6e6bffa694318be121b35b71b8ded83a08f881f349d21a878476f72988",
+          "c64/qualification.json": "f4dee2f46ab256b1c4628f79796d7f62c4812d17fb92de1bf36544f9a1ffd992",
+          "c64/result.json": "455eadc8d86617489e0b8d6175eeff28309815892fea17d738e9a69b7bbfd33f",
+          "c64/events.json": "92c40a95613bfb24e2071f4a04698e80d5bfe933d908a07e9d489b9e696207a1",
+          "c64/process.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "c64/samples.json": "596eec4dc9721112a228a0b76b94bbdadef5af3b655310a70edab6394a9d7675",
+          "c64/optimizer-images.json": "104dbb6e6bffa694318be121b35b71b8ded83a08f881f349d21a878476f72988",
+          "c128/qualification.json": "4a1d15435a19d59d6373365de0073b2d9790e008331717a6dd235f8484b0b4b1",
+          "c128/result.json": "301a7daf6d99b761f4d626b0a0923c1c235438770da129df14dccff12f3bf794",
+          "c128/events.json": "b27d776b1e5445196f5ccfa8562a5a0a880462c4a7a933b90b45a793144000e9",
+          "c128/process.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "c128/samples.json": "d014f62531bbad1e46782fc230611a4234ecf646677eac20ca02863826a11e01",
+          "c128/optimizer-images.json": "104dbb6e6bffa694318be121b35b71b8ded83a08f881f349d21a878476f72988"
+        },
+        "limits": [
+          "One 2-warm/3-steady long-shape screening round; not final performance qualification.",
+          "Original public 12-case numerical failures remain unresolved.",
+          "C64 cross-forward32 / C128 cross-forward64 explicitly recorded.",
+          "source_validation_fallbacks=null is uninstrumented, not an observed zero.",
+          "Current-source numerical/model/distributed acceptance and formal repeated timing remain incomplete."
+        ]
+      }
+    },
+    "28-original-numeric-ablations": {
+      "archive": "b2be7592e459e32646a7ad9ca3a8d901e4df942f322dbe59db689640070e0dbd",
+      "supervisor": {
+        "job": "khdn-numeric28-cost-b2be7592e459",
+        "archive": "b2be7592e459e32646a7ad9ca3a8d901e4df942f322dbe59db689640070e0dbd",
+        "gpu": "GPU-4a9c0a48-bcfc-354f-47cb-19ca0ff4b4d7",
+        "boot": "0b9f4d5c-6e11-4355-9fa7-e9cc5d330d28",
+        "uid": "47e736fe-0687-433b-9bc8-fefbb0fdf9a1",
+        "state_warps": 4,
+        "source": "original12_fixed_source_cotangent_precision_ablations",
+        "status": "passed",
+        "reaped": true,
+        "group_drained": true,
+        "timeout_seconds": 4000,
+        "grant": true,
+        "grant_attempted": true,
+        "group_signals": [],
+        "adopted_reaped": [],
+        "errors": [],
+        "timed_out": false,
+        "child_exit": 0,
+        "exit": 0,
+        "pid": 202593,
+        "birth": "4530729540",
+        "pgid": 202593,
+        "sid": 202593,
+        "live_at_cleanup": [],
+        "apps_after": "",
+        "stop_signal": null,
+        "result_sha256": "ecdaa4005e4c0d6167826ad6c58e9131d52224914314e27411ff270d16dd964e",
+        "terminal": true
+      },
+      "result_sha256": "ecdaa4005e4c0d6167826ad6c58e9131d52224914314e27411ff270d16dd964e",
+      "overlay": [
+        "fla/layers/key_gated_hyperbolic_deltanet.py",
+        "tests/models/test_key_gated_hyperbolic_precision.py"
+      ],
+      "verification": {
+        "status": "MAIN_ORIGINAL12_ABLATIONS_VERIFIED",
+        "summary": {
+          "published128": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1533,
+            "rms_failures": 5
+          },
+          "base64": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1178,
+            "rms_failures": 7
+          },
+          "base128": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1533,
+            "rms_failures": 5
+          },
+          "precast64": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1177,
+            "rms_failures": 7
+          },
+          "precast128": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1536,
+            "rms_failures": 5
+          },
+          "ro3264": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1157,
+            "rms_failures": 7
+          },
+          "ro32128": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1523,
+            "rms_failures": 5
+          },
+          "s3264": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1176,
+            "rms_failures": 7
+          },
+          "s32128": {
+            "cases": 12,
+            "passed": 0,
+            "elementwise_bad": 1532,
+            "rms_failures": 5
+          }
+        },
+        "cases": 108,
+        "metrics": 972,
+        "all_finite": true,
+        "all_repeat_exact": true,
+        "shared_fixtures": 12,
+        "compiled_images": 201,
+        "published_and_private_C128_metrics_identical": true,
+        "decision": "None of precast/RO32/S32 resolves original failures; no production promotion or full-model precision-cost run justified yet",
+        "scope": "MAIN validates archived receipts, fixture hashes, all metrics and compiled f64 exclusion; CPUFP64 oracle was run explicitly untimed on worker. Not general-domain qualification."
+      }
+    },
+    "29-raw-boundary": {
+      "archive": "f126b32631345486568e07a1fe9af2d48d1ee53ab6dc6dc104bff339931f3950",
+      "supervisor": {
+        "job": "khdn-boundary29-cost-f126b3263134",
+        "archive": "f126b32631345486568e07a1fe9af2d48d1ee53ab6dc6dc104bff339931f3950",
+        "gpu": "GPU-1bc44dca-5b09-b0d3-33d8-8c50a1592166",
+        "boot": "63939c96-51eb-4650-8a9d-1c995192cc88",
+        "uid": "ce3ee8a2-b4df-4a7a-bcf4-64efe7895f0d",
+        "state_warps": 4,
+        "source": "legalraw_boundary_diagonal_diagnostic",
+        "status": "passed",
+        "reaped": true,
+        "group_drained": true,
+        "timeout_seconds": 4000,
+        "grant": true,
+        "grant_attempted": true,
+        "group_signals": [],
+        "adopted_reaped": [],
+        "errors": [],
+        "timed_out": false,
+        "child_exit": 0,
+        "exit": 0,
+        "pid": 270067,
+        "birth": "4942578742",
+        "pgid": 270067,
+        "sid": 270067,
+        "live_at_cleanup": [],
+        "apps_after": "",
+        "stop_signal": null,
+        "result_sha256": "a2a9d30387c9d38e6c1886dd699ef6ef38314e8b6310157d551cef9710cdb384",
+        "terminal": true
+      },
+      "result_sha256": "a2a9d30387c9d38e6c1886dd699ef6ef38314e8b6310157d551cef9710cdb384",
+      "overlay": [
+        "fla/layers/key_gated_hyperbolic_deltanet.py",
+        "tests/models/test_key_gated_hyperbolic_precision.py"
+      ],
+      "verification": {
+        "status": "MAIN_RAW_BOUNDARY_MECHANISM_AND_LOCAL_CANDIDATE_VERIFIED",
+        "baseline": "PublishedC128 and privateC64/C128 fail finite forward after accepted source",
+        "mechanism": "BF16 dot gives Gramdiag32, lambdaInf, systemdiag0; FP32 exact-source diagonal and Gramstorage gives31.9921875,lambda2048.5,systemdiag.000244140625",
+        "candidate": "BothC64/C128 all9metrics pass for exactB3 input",
+        "scope": "Specific legalrawcounterexample only, no general-domain or original12/modelroot-cause claim; broad FP32Gramstorage cost not measured or promoted"
+      }
+    },
+    "30-preparation-storage-diagnosis": {
+      "archive": "feae048dc278902129cf0ca60634eaabe0ae1ae7ea3c10ae859944130a8c0f5d",
+      "supervisor": {
+        "job": "khdn-storage30-cost-feae048dc278",
+        "archive": "feae048dc278902129cf0ca60634eaabe0ae1ae7ea3c10ae859944130a8c0f5d",
+        "gpu": "GPU-4a9c0a48-bcfc-354f-47cb-19ca0ff4b4d7",
+        "boot": "0b9f4d5c-6e11-4355-9fa7-e9cc5d330d28",
+        "uid": "47e736fe-0687-433b-9bc8-fefbb0fdf9a1",
+        "state_warps": 4,
+        "source": "original12_C64_preparation_storage_domains",
+        "status": "passed",
+        "reaped": true,
+        "group_drained": true,
+        "timeout_seconds": 4000,
+        "grant": true,
+        "grant_attempted": true,
+        "group_signals": [],
+        "adopted_reaped": [],
+        "errors": [],
+        "timed_out": false,
+        "child_exit": 0,
+        "exit": 0,
+        "pid": 205871,
+        "birth": "4530796957",
+        "pgid": 205871,
+        "sid": 205871,
+        "live_at_cleanup": [],
+        "apps_after": "",
+        "stop_signal": null,
+        "result_sha256": "8f2d9038f68e33fde871ae41cba0f91464fe5d15898ae7bbb9e673ff550b95f1",
+        "terminal": true
+      },
+      "result_sha256": "8f2d9038f68e33fde871ae41cba0f91464fe5d15898ae7bbb9e673ff550b95f1",
+      "overlay": [
+        "fla/layers/key_gated_hyperbolic_deltanet.py",
+        "tests/models/test_key_gated_hyperbolic_precision.py"
+      ],
+      "verification": {
+        "status": "MAIN_PREPARATION_DOMAIN_DIAGNOSTICS_VERIFIED_FAILURES_RETAINED",
+        "cases": 36,
+        "metrics": 324,
+        "summary": {
+          "key_transforms": {
+            "output_bad": 0,
+            "output_rmsfail": 0,
+            "final_bad": 0,
+            "final_rmsfail": 0,
+            "dq_bad": 0,
+            "dq_rmsfail": 0,
+            "dk_bad": 714,
+            "dk_rmsfail": 0,
+            "dv_bad": 2,
+            "dv_rmsfail": 0,
+            "dbeta_bad": 357,
+            "dbeta_rmsfail": 0,
+            "dell_bad": 1,
+            "dell_rmsfail": 0,
+            "dS0_bad": 0,
+            "dS0_rmsfail": 0,
+            "dc_bad": 6,
+            "dc_rmsfail": 8
+          },
+          "key_system": {
+            "output_bad": 0,
+            "output_rmsfail": 0,
+            "final_bad": 0,
+            "final_rmsfail": 0,
+            "dq_bad": 0,
+            "dq_rmsfail": 0,
+            "dk_bad": 28194,
+            "dk_rmsfail": 6,
+            "dv_bad": 5,
+            "dv_rmsfail": 0,
+            "dbeta_bad": 552,
+            "dbeta_rmsfail": 6,
+            "dell_bad": 1621,
+            "dell_rmsfail": 6,
+            "dS0_bad": 0,
+            "dS0_rmsfail": 0,
+            "dc_bad": 3,
+            "dc_rmsfail": 8
+          },
+          "group_system": {
+            "output_bad": 0,
+            "output_rmsfail": 0,
+            "final_bad": 0,
+            "final_rmsfail": 0,
+            "dq_bad": 0,
+            "dq_rmsfail": 0,
+            "dk_bad": 375,
+            "dk_rmsfail": 0,
+            "dv_bad": 4,
+            "dv_rmsfail": 0,
+            "dbeta_bad": 36,
+            "dbeta_rmsfail": 0,
+            "dell_bad": 0,
+            "dell_rmsfail": 0,
+            "dS0_bad": 0,
+            "dS0_rmsfail": 0,
+            "dc_bad": 3,
+            "dc_rmsfail": 6
+          }
+        },
+        "repeat_failures": [
+          [
+            "joint-0-float32",
+            "key_system"
+          ]
+        ],
+        "decision": "Group-system storage changes1178to418bad but stillfails. key_system30375bad andone repeatfailure requires implementationdiagnosis, not simpleprecisionconclusion. None promoted."
+      }
+    },
+    "31-dead-input-stores": {
+      "archive": "7b19ae4ea5640046822f1a843239f3079e837aee5e41adb4ebcf846482949a82",
+      "supervisor": {
+        "job": "khdn-dead31-cost-7b19ae4ea564",
+        "archive": "7b19ae4ea5640046822f1a843239f3079e837aee5e41adb4ebcf846482949a82",
+        "gpu": "GPU-1bc44dca-5b09-b0d3-33d8-8c50a1592166",
+        "boot": "63939c96-51eb-4650-8a9d-1c995192cc88",
+        "uid": "ce3ee8a2-b4df-4a7a-bcf4-64efe7895f0d",
+        "state_warps": 4,
+        "source": "dead_input_stores_exact_and_cost",
+        "status": "passed",
+        "reaped": true,
+        "group_drained": true,
+        "timeout_seconds": 4000,
+        "grant": true,
+        "grant_attempted": true,
+        "group_signals": [],
+        "adopted_reaped": [],
+        "errors": [],
+        "timed_out": false,
+        "child_exit": 0,
+        "exit": 0,
+        "pid": 271935,
+        "birth": "4942610088",
+        "pgid": 271935,
+        "sid": 271935,
+        "live_at_cleanup": [],
+        "apps_after": "",
+        "stop_signal": null,
+        "result_sha256": "227b114b24b2963383f477997a0d0e1d6e885c0d9459a3cb4114daa3568f4875",
+        "terminal": true
+      },
+      "result_sha256": "227b114b24b2963383f477997a0d0e1d6e885c0d9459a3cb4114daa3568f4875",
+      "overlay": [
+        "fla/layers/key_gated_hyperbolic_deltanet.py",
+        "tests/models/test_key_gated_hyperbolic_precision.py"
+      ],
+      "verification": {
+        "status": "MAIN_DEAD_STORE_GATE_AND_NEUTRAL_COST_VERIFIED",
+        "exact_cases": 8,
+        "poison_checks": 24,
+        "step_base_ms": 2035.2852493524551,
+        "step_candidate_ms": 2037.4155193567276,
+        "scope": "SamecardC64 researchcost only; no step speedup claim, generalnumeric failures unchanged."
+      }
+    },
+    "32-public-dead-store-gate": {
+      "archive": "e64bfc236fcbcc2fb9c7f48e5515a0a52e0b91620115a7e0af135009a3fec12a",
+      "supervisor": {
+        "job": "khdn-public32-cost-e64bfc236fcb",
+        "archive": "e64bfc236fcbcc2fb9c7f48e5515a0a52e0b91620115a7e0af135009a3fec12a",
+        "gpu": "GPU-4a9c0a48-bcfc-354f-47cb-19ca0ff4b4d7",
+        "boot": "0b9f4d5c-6e11-4355-9fa7-e9cc5d330d28",
+        "uid": "47e736fe-0687-433b-9bc8-fefbb0fdf9a1",
+        "state_warps": 4,
+        "source": "public_C128_deadstore_integration",
+        "status": "passed",
+        "reaped": true,
+        "group_drained": true,
+        "timeout_seconds": 4000,
+        "grant": true,
+        "grant_attempted": true,
+        "group_signals": [],
+        "adopted_reaped": [],
+        "errors": [],
+        "timed_out": false,
+        "child_exit": 0,
+        "exit": 0,
+        "pid": 207885,
+        "birth": "4530842864",
+        "pgid": 207885,
+        "sid": 207885,
+        "live_at_cleanup": [],
+        "apps_after": "",
+        "stop_signal": null,
+        "result_sha256": "ca9f21db95114490b38548ef53ef7b36825a8fdc9049ec09900089a003644f46",
+        "terminal": true
+      },
+      "result_sha256": "ca9f21db95114490b38548ef53ef7b36825a8fdc9049ec09900089a003644f46",
+      "overlay": [
+        "fla/ops/key_gated_hyperbolic_delta_rule/chunk128_kernels.py",
+        "tests/models/test_key_gated_hyperbolic_precision.py",
+        "tests/ops/test_key_gated_hyperbolic_bf16.py"
+      ],
+      "verification": {
+        "status": "MAIN_PUBLIC_C128_REGRESSIONS_VERIFIED",
+        "passed": 2,
+        "failed": 0,
+        "scope": "Newpublicdense/packedtail source tests only, original12 failuresnotrerun/notwaived."
+      }
+    }
+  },
+  "scope": "Reconstruct each isolated snapshot from base_commit plus its repo-overlay; candidate modules remain explicit research overrides. No default C64 promotion."
+}

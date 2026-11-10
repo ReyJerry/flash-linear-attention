@@ -1,0 +1,704 @@
+{
+  "native_gpu": {
+    "passed": true,
+    "operator": 33,
+    "native": 19,
+    "source": "24af396192ca5ed16b7e4b4fb77d53286659927e114f0cd387a7462a07e1756e",
+    "archive_sha256": "0355edc7a88eb5e3a6e1bbf01afd787b317b76009650f64299a68056be71829c",
+    "independent_trace_reparse": "pending"
+  },
+  "independent_trace_audit": {
+    "passed": true,
+    "traces": [
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a0/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a1/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a10/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a11/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a12/trace.json.gz",
+        "source_vjp": "coupled",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a13/trace.json.gz",
+        "source_vjp": "coupled",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a14/trace.json.gz",
+        "source_vjp": "coupled_state",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a15/trace.json.gz",
+        "source_vjp": "coupled_state",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a16/trace.json.gz",
+        "source_vjp": "coupled_fused",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a17/trace.json.gz",
+        "source_vjp": "coupled_fused",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a18/trace.json.gz",
+        "source_vjp": "coupled_fused",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a2/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a3/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a4/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a5/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a6/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a7/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a8/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16_selective",
+        "passed": true
+      },
+      {
+        "case": "native/pytest-tmp/test_bf16_native_model_trace_a9/trace.json.gz",
+        "source_vjp": "expanded",
+        "precision": "bf16_selective",
+        "passed": true
+      }
+    ],
+    "update_guard_records": 19,
+    "scope": "Local CPU reread/reparse of actual GPU raw assembly/source/schedule/negative guards; no GPU rerun."
+  },
+  "native_cli": {
+    "status": "NATIVE_CLI_COUPLED_MM_CHECK_ONLY",
+    "source_snapshot": "24af396192ca5ed16b7e4b4fb77d53286659927e114f0cd387a7462a07e1756e",
+    "gradient_errors": {
+      "model.embeddings.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.A_log": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.dt_bias": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.q_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.k_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.v_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.b_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.f_proj.0.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.f_proj.1.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.q_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.k_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.v_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.g_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.o_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.o_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.gate_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.up_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.down_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.A_log": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.dt_bias": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.q_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.k_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.v_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.b_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.f_proj.0.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.f_proj.1.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.q_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.k_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.v_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.g_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.o_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.o_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.gate_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.up_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.down_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "lm_head.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      }
+    },
+    "update_errors": {
+      "model.embeddings.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.A_log": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.dt_bias": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.q_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.k_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.v_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.b_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.f_proj.0.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.f_proj.1.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.q_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.k_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.v_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.g_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.o_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.o_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.gate_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.up_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.down_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.A_log": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.dt_bias": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.q_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.k_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.v_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.b_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.f_proj.0.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.f_proj.1.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.q_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.k_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.v_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.g_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.o_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.o_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.gate_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.up_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.down_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "lm_head.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      }
+    },
+    "resume_parameter_errors": {
+      "model.embeddings.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.A_log": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.dt_bias": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.q_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.k_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.v_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.b_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.f_proj.0.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.f_proj.1.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.q_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.k_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.v_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.g_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.o_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.attn.o_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.gate_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.up_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.0.mlp.down_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.A_log": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.dt_bias": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.q_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.k_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.v_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.b_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.f_proj.0.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.f_proj.1.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.q_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.k_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.v_conv1d.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.g_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.o_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.attn.o_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp_norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.gate_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.up_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.layers.1.mlp.down_proj.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "model.norm.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      },
+      "lm_head.weight": {
+        "max_abs": 0.0,
+        "relative_rms": 0.0
+      }
+    },
+    "resume_scope": "small real model next-update replay; full-model finite save still required",
+    "model": {
+      "initial_weights_sha256": "344e6aa4605e22eff5a2bddd458496e908e8991f494e613886e1464e13e8345e",
+      "parameter_count": 1631748,
+      "parameter_dtype": "torch.float32",
+      "configuration": {
+        "source_vjp": "coupled_fused",
+        "precision_policy": "bf16_selective",
+        "group_size": 32,
+        "carry_mode": "no_carry",
+        "decay_mode": "key_channel",
+        "decay_rank": 128,
+        "decay_function": "negative_exp_softplus",
+        "readout": "inclusive",
+        "attn_mode": "chunk",
+        "hidden_size": 256,
+        "expand_v": 1.0,
+        "head_dim": 128,
+        "num_heads": 2,
+        "num_v_heads": null,
+        "curvature": 1.0,
+        "learnable_curvature": false,
+        "value_margin": 0.5,
+        "chunk_size": 64,
+        "use_gate": true,
+        "use_short_conv": true,
+        "conv_size": 4,
+        "conv_bias": false,
+        "max_position_embeddings": 2048,
+        "hidden_ratio": 4,
+        "intermediate_size": 512,
+        "hidden_act": "swish",
+        "num_hidden_layers": 2,
+        "norm_eps": 1e-06,
+        "attn": null,
+        "use_cache": false,
+        "initializer_range": 0.02,
+        "fuse_norm": true,
+        "fuse_swiglu": true,
+        "fuse_cross_entropy": false,
+        "fuse_linear_cross_entropy": false,
+        "use_l2warp": false,
+        "vocab_size": 97,
+        "attnres_block_size": null,
+        "transformers_version": "5.6.2",
+        "architectures": null,
+        "output_hidden_states": false,
+        "return_dict": true,
+        "dtype": null,
+        "chunk_size_feed_forward": 0,
+        "is_encoder_decoder": false,
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "label2id": {
+          "LABEL_0": 0,
+          "LABEL_1": 1
+        },
+        "problem_type": null,
+        "_name_or_path": "",
+        "pad_token_id": null,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "tie_word_embeddings": false,
+        "model_type": "key_gated_hyperbolic_deltanet",
+        "output_attentions": false
+      }
+    },
+    "zero_label_last_microbatch": 15
+  },
+  "scope": "Public52GPU/CPU216+actualW1tinyCLI, no fullmodel quality/performance/distributed claim. Privateinference95/97 payloads excluded."
+}

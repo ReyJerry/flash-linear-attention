@@ -1,0 +1,8 @@
+{
+  "README.md": "9eba568eec75406ba88ded7c2087056ba9a1d261f64e6abf4a04b50ed0d260fd",
+  "measured-sources.tar.gz": "14ac8a3d629e540e39a82a4c274fa26f9c58e29cd784192ada130abbdf895bed",
+  "observations.json.gz": "63312b5f55defd0653fb75d76440988d5f905f74657364ad4c1e5d76dce34501",
+  "result-receipts.tar.gz": "79ff81ad49f5ca26bf48d2b38e2ef733635f47056664739f6800db8604b08ba8",
+  "source-binding.json": "4fe15755fedd2f445c12cf353a7e9d85ddb5e8cbca1e41ccb860f37de8edde5c",
+  "summarize.py": "89bb8d8cce728fec1f21503de525f631a9332a3ec23b9883269f3a0e7a606e5a"
+}

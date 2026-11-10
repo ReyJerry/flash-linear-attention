@@ -1,0 +1,559 @@
+{
+  "status": "UNTIMED_CPU_FP64_ERROR_MEASUREMENTS_PASS",
+  "cases": 10,
+  "comparisons": 78,
+  "max_abs": 6.661338147750939e-16,
+  "records": [
+    {
+      "case": "dense_c0.0",
+      "quantity": "output",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 3.688907630690772e-18,
+      "relative_rms": 2.1308041775675574e-16
+    },
+    {
+      "case": "dense_c0.0",
+      "quantity": "final_state",
+      "max_abs": 2.0816681711721685e-17,
+      "rms_abs": 3.7351198805686435e-18,
+      "relative_rms": 1.910778135946864e-16
+    },
+    {
+      "case": "dense_c0.0",
+      "quantity": "dq",
+      "max_abs": 1.3877787807814457e-17,
+      "rms_abs": 3.0737080224276765e-18,
+      "relative_rms": 2.3901207645446036e-16
+    },
+    {
+      "case": "dense_c0.0",
+      "quantity": "dk",
+      "max_abs": 5.551115123125783e-17,
+      "rms_abs": 1.0027455589707553e-17,
+      "relative_rms": 2.9260132159420355e-16
+    },
+    {
+      "case": "dense_c0.0",
+      "quantity": "dv",
+      "max_abs": 2.220446049250313e-16,
+      "rms_abs": 4.476395821706322e-17,
+      "relative_rms": 2.030889976118486e-16
+    },
+    {
+      "case": "dense_c0.0",
+      "quantity": "dbeta",
+      "max_abs": 1.1449174941446927e-16,
+      "rms_abs": 3.954691251742523e-17,
+      "relative_rms": 3.193696682961053e-16
+    },
+    {
+      "case": "dense_c0.0",
+      "quantity": "dell",
+      "max_abs": 5.898059818321144e-17,
+      "rms_abs": 7.800266973011356e-18,
+      "relative_rms": 2.5409381441385604e-16
+    },
+    {
+      "case": "dense_c0.0",
+      "quantity": "dstate",
+      "max_abs": 4.440892098500626e-16,
+      "rms_abs": 9.186655746672308e-17,
+      "relative_rms": 1.230646771310132e-16
+    },
+    {
+      "case": "dense_c0.0",
+      "quantity": "dcurvature",
+      "max_abs": 4.336808689942018e-19,
+      "rms_abs": 4.336808689942018e-19,
+      "relative_rms": 2.1971171892898326e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "output",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 3.9899066749828786e-18,
+      "relative_rms": 2.304518313762484e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "final_state",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 4.522157154012612e-18,
+      "relative_rms": 2.3144791631111796e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "dq",
+      "max_abs": 2.0816681711721685e-17,
+      "rms_abs": 3.3661179148598686e-18,
+      "relative_rms": 2.618999288452676e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "dk",
+      "max_abs": 1.1102230246251565e-16,
+      "rms_abs": 1.2557134450956972e-17,
+      "relative_rms": 3.661531898115964e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "dv",
+      "max_abs": 4.440892098500626e-16,
+      "rms_abs": 6.005904820671603e-17,
+      "relative_rms": 2.7247283462078367e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "dbeta",
+      "max_abs": 8.326672684688674e-17,
+      "rms_abs": 3.3707754125320994e-17,
+      "relative_rms": 2.7260488484666505e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "dell",
+      "max_abs": 4.5102810375396984e-17,
+      "rms_abs": 8.053199207586256e-18,
+      "relative_rms": 2.629268877785436e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "dstate",
+      "max_abs": 4.440892098500626e-16,
+      "rms_abs": 1.1160272464227015e-16,
+      "relative_rms": 1.500059195034755e-16
+    },
+    {
+      "case": "dense_c0.7",
+      "quantity": "dcurvature",
+      "max_abs": 4.336808689942018e-19,
+      "rms_abs": 4.336808689942018e-19,
+      "relative_rms": 2.191127727141283e-16
+    },
+    {
+      "case": "packed",
+      "quantity": "output",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 3.994620721563076e-18,
+      "relative_rms": 2.7870014232490487e-16
+    },
+    {
+      "case": "packed",
+      "quantity": "final_state",
+      "max_abs": 2.0816681711721685e-17,
+      "rms_abs": 2.1730527498360155e-18,
+      "relative_rms": 1.784582032424802e-16
+    },
+    {
+      "case": "packed",
+      "quantity": "dq",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 4.9846278642317025e-18,
+      "relative_rms": 2.4413929062111795e-16
+    },
+    {
+      "case": "packed",
+      "quantity": "dk",
+      "max_abs": 8.326672684688674e-17,
+      "rms_abs": 1.5790443155191054e-17,
+      "relative_rms": 3.2385755520271916e-16
+    },
+    {
+      "case": "packed",
+      "quantity": "dv",
+      "max_abs": 6.661338147750939e-16,
+      "rms_abs": 8.481965254187337e-17,
+      "relative_rms": 3.109837255666232e-16
+    },
+    {
+      "case": "packed",
+      "quantity": "dbeta",
+      "max_abs": 1.6653345369377348e-16,
+      "rms_abs": 5.309662808623129e-17,
+      "relative_rms": 3.144019297633398e-16
+    },
+    {
+      "case": "packed",
+      "quantity": "dell",
+      "max_abs": 5.551115123125783e-17,
+      "rms_abs": 1.0343624952838456e-17,
+      "relative_rms": 2.730437178221632e-16
+    },
+    {
+      "case": "packed",
+      "quantity": "dstate",
+      "max_abs": 4.440892098500626e-16,
+      "rms_abs": 7.435040657101057e-17,
+      "relative_rms": 8.128485990100215e-17
+    },
+    {
+      "case": "packed",
+      "quantity": "dcurvature",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "output",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "final_state",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "dq",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "dk",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "dv",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "dbeta",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "dell",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": null
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "dstate",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "near_d_dense_fallback",
+      "quantity": "dcurvature",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "manual_c0.0_beta0.0",
+      "quantity": "dq",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 2.828292604619555e-18,
+      "relative_rms": 1.2660776383333362e-16
+    },
+    {
+      "case": "manual_c0.0_beta0.0",
+      "quantity": "dk",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": null
+    },
+    {
+      "case": "manual_c0.0_beta0.0",
+      "quantity": "dv",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": null
+    },
+    {
+      "case": "manual_c0.0_beta0.0",
+      "quantity": "dbeta",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 2.7755575615628914e-17,
+      "relative_rms": 3.4726471066654273e-16
+    },
+    {
+      "case": "manual_c0.0_beta0.0",
+      "quantity": "dell",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 3.730663897181825e-18,
+      "relative_rms": 1.3784845882985116e-16
+    },
+    {
+      "case": "manual_c0.0_beta0.0",
+      "quantity": "dstate",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "manual_c0.0_beta0.0",
+      "quantity": "dcurvature",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": null
+    },
+    {
+      "case": "manual_c0.0_beta0.5",
+      "quantity": "dq",
+      "max_abs": 8.673617379884035e-19,
+      "rms_abs": 3.741872903500396e-19,
+      "relative_rms": 1.578832658451464e-17
+    },
+    {
+      "case": "manual_c0.0_beta0.5",
+      "quantity": "dk",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 4.7630915350085546e-18,
+      "relative_rms": 2.726666778943148e-16
+    },
+    {
+      "case": "manual_c0.0_beta0.5",
+      "quantity": "dv",
+      "max_abs": 1.1102230246251565e-16,
+      "rms_abs": 6.245004513516506e-17,
+      "relative_rms": 2.2372406570497913e-16
+    },
+    {
+      "case": "manual_c0.0_beta0.5",
+      "quantity": "dbeta",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 2.7755575615628914e-17,
+      "relative_rms": 3.4726471066654273e-16
+    },
+    {
+      "case": "manual_c0.0_beta0.5",
+      "quantity": "dell",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 3.6799042000400975e-18,
+      "relative_rms": 1.7247395416686918e-16
+    },
+    {
+      "case": "manual_c0.0_beta0.5",
+      "quantity": "dstate",
+      "max_abs": 2.220446049250313e-16,
+      "rms_abs": 6.655553224256149e-17,
+      "relative_rms": 5.536152515688234e-17
+    },
+    {
+      "case": "manual_c0.0_beta0.5",
+      "quantity": "dcurvature",
+      "max_abs": 1.3552527156068805e-20,
+      "rms_abs": 1.3552527156068805e-20,
+      "relative_rms": 3.6877221855022494e-16
+    },
+    {
+      "case": "manual_c0.0_beta1.0",
+      "quantity": "dq",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 2.562252124468331e-18,
+      "relative_rms": 1.0130434012436942e-16
+    },
+    {
+      "case": "manual_c0.0_beta1.0",
+      "quantity": "dk",
+      "max_abs": 1.3877787807814457e-17,
+      "rms_abs": 9.526183070017109e-18,
+      "relative_rms": 2.726666778943148e-16
+    },
+    {
+      "case": "manual_c0.0_beta1.0",
+      "quantity": "dv",
+      "max_abs": 2.220446049250313e-16,
+      "rms_abs": 1.249000902703301e-16,
+      "relative_rms": 2.2372406570497913e-16
+    },
+    {
+      "case": "manual_c0.0_beta1.0",
+      "quantity": "dbeta",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 2.7755575615628914e-17,
+      "relative_rms": 3.4726471066654273e-16
+    },
+    {
+      "case": "manual_c0.0_beta1.0",
+      "quantity": "dell",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 3.730663897181825e-18,
+      "relative_rms": 2.1776012433181348e-16
+    },
+    {
+      "case": "manual_c0.0_beta1.0",
+      "quantity": "dstate",
+      "max_abs": 4.440892098500626e-16,
+      "rms_abs": 1.4052330931573373e-16,
+      "relative_rms": 1.1941165710668177e-16
+    },
+    {
+      "case": "manual_c0.0_beta1.0",
+      "quantity": "dcurvature",
+      "max_abs": 4.0657581468206416e-20,
+      "rms_abs": 4.0657581468206416e-20,
+      "relative_rms": 1.4391419047508598e-15
+    },
+    {
+      "case": "manual_c0.7_beta0.0",
+      "quantity": "dq",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 2.828292604619555e-18,
+      "relative_rms": 1.2660776383333362e-16
+    },
+    {
+      "case": "manual_c0.7_beta0.0",
+      "quantity": "dk",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": null
+    },
+    {
+      "case": "manual_c0.7_beta0.0",
+      "quantity": "dv",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": null
+    },
+    {
+      "case": "manual_c0.7_beta0.0",
+      "quantity": "dbeta",
+      "max_abs": 2.7755575615628914e-17,
+      "rms_abs": 2.7755575615628914e-17,
+      "relative_rms": 3.4690361008522416e-16
+    },
+    {
+      "case": "manual_c0.7_beta0.0",
+      "quantity": "dell",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 3.730663897181825e-18,
+      "relative_rms": 1.3784845882985116e-16
+    },
+    {
+      "case": "manual_c0.7_beta0.0",
+      "quantity": "dstate",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "manual_c0.7_beta0.0",
+      "quantity": "dcurvature",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": null
+    },
+    {
+      "case": "manual_c0.7_beta0.5",
+      "quantity": "dq",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 2.482166715138907e-18,
+      "relative_rms": 1.0475867662645091e-16
+    },
+    {
+      "case": "manual_c0.7_beta0.5",
+      "quantity": "dk",
+      "max_abs": 3.469446951953614e-18,
+      "rms_abs": 1.788112030672749e-18,
+      "relative_rms": 1.0232382023855365e-16
+    },
+    {
+      "case": "manual_c0.7_beta0.5",
+      "quantity": "dv",
+      "max_abs": 5.551115123125783e-17,
+      "rms_abs": 2.943923360032078e-17,
+      "relative_rms": 1.0540180749129528e-16
+    },
+    {
+      "case": "manual_c0.7_beta0.5",
+      "quantity": "dbeta",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "manual_c0.7_beta0.5",
+      "quantity": "dell",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 3.1273172206927508e-18,
+      "relative_rms": 1.4663621349398956e-16
+    },
+    {
+      "case": "manual_c0.7_beta0.5",
+      "quantity": "dstate",
+      "max_abs": 1.1102230246251565e-16,
+      "rms_abs": 3.1031676915590914e-17,
+      "relative_rms": 2.582274363502999e-17
+    },
+    {
+      "case": "manual_c0.7_beta0.5",
+      "quantity": "dcurvature",
+      "max_abs": 6.776263578034403e-21,
+      "rms_abs": 6.776263578034403e-21,
+      "relative_rms": 1.842131151587587e-16
+    },
+    {
+      "case": "manual_c0.7_beta1.0",
+      "quantity": "dq",
+      "max_abs": 1.734723475976807e-18,
+      "rms_abs": 8.70743278056383e-19,
+      "relative_rms": 3.4443862195578786e-17
+    },
+    {
+      "case": "manual_c0.7_beta1.0",
+      "quantity": "dk",
+      "max_abs": 1.3877787807814457e-17,
+      "rms_abs": 7.178695726944351e-18,
+      "relative_rms": 2.0549842709598922e-16
+    },
+    {
+      "case": "manual_c0.7_beta1.0",
+      "quantity": "dv",
+      "max_abs": 1.1102230246251565e-16,
+      "rms_abs": 8.326672684688674e-17,
+      "relative_rms": 1.4913800265346982e-16
+    },
+    {
+      "case": "manual_c0.7_beta1.0",
+      "quantity": "dbeta",
+      "max_abs": 0.0,
+      "rms_abs": 0.0,
+      "relative_rms": 0.0
+    },
+    {
+      "case": "manual_c0.7_beta1.0",
+      "quantity": "dell",
+      "max_abs": 6.938893903907228e-18,
+      "rms_abs": 3.142316430104902e-18,
+      "relative_rms": 1.8356535810487307e-16
+    },
+    {
+      "case": "manual_c0.7_beta1.0",
+      "quantity": "dstate",
+      "max_abs": 2.220446049250313e-16,
+      "rms_abs": 1.1188630228279524e-16,
+      "relative_rms": 9.515222817413456e-17
+    },
+    {
+      "case": "manual_c0.7_beta1.0",
+      "quantity": "dcurvature",
+      "max_abs": 4.743384504624082e-20,
+      "rms_abs": 4.743384504624082e-20,
+      "relative_rms": 1.6787540334286668e-15
+    }
+  ],
+  "source_sha256": {
+    "tests/ops/test_key_gated_hyperbolic_sherman_morrison.py": "0a53a40eedc6a8925db70e25980819917103f36d0caba7073daf8b929f0f62ff",
+    "fla/ops/key_gated_hyperbolic_delta_rule/sherman_morrison_reference.py": "7a8f01853573cc7f331080a8d40505cf5b03e90ece6f772baa327a945af7649f"
+  },
+  "scope": "Same frozen fixtures and thresholds, CPU FP64 oracle/statistics only, no training."
+}

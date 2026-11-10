@@ -1,0 +1,163 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+"""FP32 rank-one token recurrence with C64 state checkpoints."""
+
+import triton
+import triton.language as tl
+from triton.language.extra.cuda import libdevice
+
+
+@triton.jit
+def token_update(key, value, beta, ell, state, kap):
+    decay = libdevice.exp(ell)
+    x = decay[:, None] * state
+    residual = value - tl.sum(key[:, None] * x, 0)
+    n = tl.sum(key * key, 0)
+    d = n - kap * tl.sum(value * value, 0)
+    inner = tl.sum(value * residual, 0)
+    solved = residual / n + kap * value * inner / (n * d)
+    update = beta * solved
+    correction = kap * beta * inner / d
+    z = 1.0 + correction
+    safe = (n >= .51) & (n <= 1.99) & (d > 0.0009765625 * n)
+    safe &= z > 64 * 1.1920928955078125e-7 * (1.0 + tl.abs(correction))
+    result = (x + key[:, None] * update[None, :]) / tl.where(safe, z, 1.0)
+    return result, x, solved, update, z, n, d, decay, safe
+
+
+@triton.jit
+def sm_fwd_kernel(Q, Key, Value, Beta, Ell, Curve, S0, Out, Final, Starts, Ends, SeqChunks, Saved, Risk,
+                  H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr, GS: tl.constexpr,
+                  NG: tl.constexpr, C: tl.constexpr, SCALE: tl.constexpr):
+    shg = tl.program_id(0).to(tl.int64)
+    group, head, seq = shg % NG, shg // NG % H, shg // (NG * H)
+    a = tl.arange(0, KD).to(tl.int64)
+    j = tl.arange(0, GS).to(tl.int64)
+    off_s = ((seq * H + head) * KD + a[:, None]) * VD + group * GS + j[None, :]
+    state = tl.load(S0 + off_s).to(tl.float32)
+    kap = tl.load(Curve).to(tl.float32) / GS
+    first, last = tl.load(SeqChunks + seq), tl.load(SeqChunks + seq + 1)
+    risk = tl.full((), 0, tl.int32)
+    for chunk in range(first, last):
+        block = (chunk * H + head) * NG + group
+        saved_off = block * KD * GS + a[:, None] * GS + j[None, :]
+        tl.store(Saved + saved_off, state)
+        start, end = tl.load(Starts + chunk), tl.load(Ends + chunk)
+        for token in range(start, end):
+            key_off = (token * H + head) * KD + a
+            value_off = (token * H + head) * VD + group * GS + j
+            key = tl.load(Key + key_off).to(tl.float32)
+            value = tl.load(Value + value_off).to(tl.float32)
+            beta = tl.load(Beta + token * H + head).to(tl.float32)
+            ell = tl.load(Ell + key_off).to(tl.float32)
+            state, _, _, _, _, _, _, _, safe = token_update(key, value, beta, ell, state, kap)
+            query = tl.load(Q + key_off).to(tl.float32)
+            output = SCALE * tl.sum(query[:, None] * state, 0)
+            tl.store(Out + value_off, output)
+            risk |= tl.where(safe, 0, 1)
+    tl.store(Final + off_s, state)
+    tl.store(Risk + shg, risk)
+
+
+@triton.jit
+def sm_bwd_kernel(Q, Key, Value, Beta, Ell, Curve, DO, DS, DS0, DV, DC, Starts, Ends, SeqChunks,
+                  Saved, Replay, Partials, H: tl.constexpr, KD: tl.constexpr, VD: tl.constexpr,
+                  GS: tl.constexpr, NG: tl.constexpr, C: tl.constexpr, SCALE: tl.constexpr, NEED_DC: tl.constexpr):
+    shg = tl.program_id(0).to(tl.int64)
+    group, head, seq = shg % NG, shg // NG % H, shg // (NG * H)
+    a = tl.arange(0, KD).to(tl.int64)
+    j = tl.arange(0, GS).to(tl.int64)
+    off_s = ((seq * H + head) * KD + a[:, None]) * VD + group * GS + j[None, :]
+    adjoint = tl.load(DS + off_s).to(tl.float32)
+    kap = tl.load(Curve).to(tl.float32) / GS
+    first, last = tl.load(SeqChunks + seq), tl.load(SeqChunks + seq + 1)
+    dc = tl.full((), 0.0, tl.float32)
+    for reverse_chunk in range(last - first):
+        chunk = last - 1 - reverse_chunk
+        block = (chunk * H + head) * NG + group
+        state = tl.load(Saved + block * KD * GS + a[:, None] * GS + j[None, :]).to(tl.float32)
+        start, end = tl.load(Starts + chunk), tl.load(Ends + chunk)
+        for position in range(end - start):
+            token = start + position
+            replay_off = (shg * C + position) * KD * GS + a[:, None] * GS + j[None, :]
+            tl.store(Replay + replay_off, state)
+            key_off = (token * H + head) * KD + a
+            value_off = (token * H + head) * VD + group * GS + j
+            key = tl.load(Key + key_off).to(tl.float32)
+            value = tl.load(Value + value_off).to(tl.float32)
+            beta = tl.load(Beta + token * H + head).to(tl.float32)
+            ell = tl.load(Ell + key_off).to(tl.float32)
+            state, _, _, _, _, _, _, _, _ = token_update(key, value, beta, ell, state, kap)
+        tl.debug_barrier()
+        for reverse_token in range(end - start):
+            token = end - 1 - reverse_token
+            position = token - start
+            replay_off = (shg * C + position) * KD * GS + a[:, None] * GS + j[None, :]
+            previous_state = tl.load(Replay + replay_off, volatile=True).to(tl.float32)
+            key_off = (token * H + head) * KD + a
+            value_off = (token * H + head) * VD + group * GS + j
+            key = tl.load(Key + key_off).to(tl.float32)
+            value = tl.load(Value + value_off).to(tl.float32)
+            beta = tl.load(Beta + token * H + head).to(tl.float32)
+            ell = tl.load(Ell + key_off).to(tl.float32)
+            updated, x, solved, update, z, n, d, decay, _ = token_update(key, value, beta, ell, previous_state, kap)
+            query = tl.load(Q + key_off).to(tl.float32)
+            go = tl.load(DO + value_off).to(tl.float32)
+            total = adjoint + SCALE * query[:, None] * go[None, :]
+            dq = SCALE * tl.sum(updated * go[None, :], 1)
+            gx = total / z
+            gz = -tl.sum(tl.sum(total * updated, 1), 0) / z
+            gu = tl.sum(key[:, None] * gx, 0) + kap * gz * value
+            dv = kap * gz * update
+            dbeta = tl.sum(gu * solved, 0)
+            value_gu = tl.sum(value * gu, 0)
+            gr = beta * (gu / n + kap * value * value_gu / (n * d))
+            dn = -tl.sum(gr * solved, 0)
+            value_gr = tl.sum(value * gr, 0)
+            value_solved = tl.sum(value * solved, 0)
+            if NEED_DC:
+                dc += (gz * tl.sum(value * update, 0) + value_gr * value_solved) / GS
+            dv += gr + kap * (value_solved * gr + value_gr * solved)
+            dk = tl.sum(gx * update[None, :], 1) - tl.sum(x * gr[None, :], 1) + 2.0 * dn * key
+            gx -= key[:, None] * gr[None, :]
+            dell = tl.sum(gx * x, 1)
+            adjoint = decay[:, None] * gx
+            row = token * H + head
+            partial_off = (row * NG + group) * KD + a
+            tl.store(Partials[0] + partial_off, dq)
+            tl.store(Partials[1] + partial_off, dk)
+            tl.store(Partials[2] + partial_off, dell)
+            tl.store(Partials[3] + row * NG + group, dbeta)
+            tl.store(DV + value_off, dv)
+        tl.debug_barrier()
+    tl.store(DS0 + off_s, adjoint)
+    if NEED_DC:
+        tl.store(DC + shg, dc)
+
+
+@triton.jit
+def sm_reduce_kernel(Partials, DQ, DK, DE, DB, ROWS: tl.constexpr, K: tl.constexpr,
+                     NG: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+    a = tl.arange(0, K).to(tl.int64)
+    valid = row < ROWS
+    dq = tl.full((BLOCK, K), 0.0, tl.float32)
+    dk = tl.full((BLOCK, K), 0.0, tl.float32)
+    de = tl.full((BLOCK, K), 0.0, tl.float32)
+    db = tl.full((BLOCK,), 0.0, tl.float32)
+    for group in range(NG):
+        off = (row[:, None] * NG + group) * K + a[None, :]
+        dq += tl.load(Partials[0] + off, valid[:, None], 0.0)
+        dk += tl.load(Partials[1] + off, valid[:, None], 0.0)
+        de += tl.load(Partials[2] + off, valid[:, None], 0.0)
+        db += tl.load(Partials[3] + row * NG + group, valid, 0.0)
+    off = row[:, None] * K + a[None, :]
+    tl.store(DQ + off, dq, valid[:, None])
+    tl.store(DK + off, dk, valid[:, None])
+    tl.store(DE + off, de, valid[:, None])
+    tl.store(DB + row, db, valid)

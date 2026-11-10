@@ -24,6 +24,7 @@ from .hgrn import HGRNAttention
 from .hgrn2 import HGRN2Attention
 from .hyperbolic_deltanet import HyperbolicDeltaNet
 from .kda import KimiDeltaAttention
+from .key_gated_hyperbolic_deltanet import KeyGatedHyperbolicDeltaNet
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
 from .log_linear_mamba2 import LogLinearMamba2
@@ -69,6 +70,7 @@ __all__ = [
     'HGRN2Attention',
     'HGRNAttention',
     'HyperbolicDeltaNet',
+    'KeyGatedHyperbolicDeltaNet',
     'KimiDeltaAttention',
     'LightNetAttention',
     'LinearAttention',

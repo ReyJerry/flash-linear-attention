@@ -1,0 +1,43 @@
+{
+  "passed": true,
+  "cases": 7,
+  "max_abs": 1.199040866595169e-14,
+  "rows": [
+    {
+      "length": 2,
+      "strong": false,
+      "max_abs": 6.661338147750939e-16
+    },
+    {
+      "length": 31,
+      "strong": false,
+      "max_abs": 5.329070518200751e-15
+    },
+    {
+      "length": 32,
+      "strong": false,
+      "max_abs": 7.105427357601002e-15
+    },
+    {
+      "length": 33,
+      "strong": false,
+      "max_abs": 5.773159728050814e-15
+    },
+    {
+      "length": 63,
+      "strong": false,
+      "max_abs": 1.199040866595169e-14
+    },
+    {
+      "length": 64,
+      "strong": false,
+      "max_abs": 1.199040866595169e-14
+    },
+    {
+      "length": 2,
+      "strong": true,
+      "max_abs": 1.1102230246251565e-16
+    }
+  ],
+  "scope": "Untimed CPU FP64 layout proof, not GPU qualification."
+}

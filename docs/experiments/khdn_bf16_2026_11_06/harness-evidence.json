@@ -1,0 +1,477 @@
+{
+  "scope": "Public BF16 correctness-only CLI and positive update/source/compiler trace follow-up. Full-model CLI timing and formal distributed acceptance remain pending.",
+  "native_trace": {
+    "status": "PUBLIC_BF16_NATIVE_TRACE_MAIN_VERIFIED",
+    "snapshot": "289ca4648297c89f40729b2799de6aa887a6aa8d37b02a675653ec9955378f2e",
+    "source_archive": "20cf564755ceab411ee2368ec6f08ad5becb21a01a633fe53b3260c6109e3605",
+    "export_sha256": "4a5023e91a6f9af8fac30f521f7dbe00f5973701aba24e2748bc2a6b875f31f5",
+    "gpu_tests": 2,
+    "tensor_guard_cpu_test": 1,
+    "traces": [
+      {
+        "path": "pytest/test_bf16_native_model_trace_a0/trace.json.gz",
+        "sha256": "5b2c3df3ded595a2d6ed620c6730f786504fd55f05e95b7f4c2cf7b6ea1e4fc3",
+        "checkpoint": false,
+        "calls": 2,
+        "backward_calls": 2,
+        "launches": 12
+      },
+      {
+        "path": "pytest/test_bf16_native_model_trace_a1/trace.json.gz",
+        "sha256": "29e5c86f2f4d1d441c11fd0fb1d51d6eca1c2db7503068614d2a31e4ec073e26",
+        "checkpoint": true,
+        "calls": 4,
+        "backward_calls": 2,
+        "launches": 20
+      }
+    ],
+    "local_cpu": {
+      "initial_passed": 285,
+      "initial_failed": 1,
+      "failed_test_repaired_and_passed": 1,
+      "distinct_cases": 286,
+      "baseline_reproduced": "published-baseline-failure.log",
+      "scope": "CPU pure benchmark tests used --confcutdir=tests/benchmarks because local environment lacks Triton; GPU root fixture left active in actual native tests."
+    },
+    "scope": "Actual two-layer K128/g32/C16 public BF16 trace, checkpointoff/on,22 serialized tamper attempts rejected. Underlying production arithmetic unchanged; CLI and positive per-update observer still pending. Earlier6model-logit failures unchanged."
+  },
+  "cli_w1": {
+    "status": "PUBLIC_BF16_ACTUAL_CLI_NCCL_W1_SMALL_GATE_MAIN_VERIFIED",
+    "snapshot": "dfafab11f798051e4c8c5fee635d61e0b5abbf674975e981d3b67c74f4799e36",
+    "export_sha256": "c7c9242cc076f33fdf0858984726b96502fbd7d84ba4c377e6d4a1cc00cb1954",
+    "parameter_count": 1631750,
+    "global_input_slots": 224,
+    "global_valid_labels": 125,
+    "metrics": {
+      "all_parameter_gradient_errors": {
+        "tensors": 43,
+        "max_abs": 0
+      },
+      "all_parameter_update_errors": {
+        "tensors": 43,
+        "max_abs": 0
+      },
+      "resume_parameter_errors": {
+        "tensors": 43,
+        "max_abs": 0
+      }
+    },
+    "parities": {
+      "dense": {
+        "global_gradient_cosine": 0.9999713150188105,
+        "global_gradient_norm_ratio": 0.9999175392007975,
+        "validation_mean_ce_delta": -4.2848289012908936e-05,
+        "validation_ppl_relative_delta": -4.284737103808453e-05,
+        "legacy_elementwise_failures": 5
+      },
+      "packed": {
+        "global_gradient_cosine": 0.9999718356899678,
+        "global_gradient_norm_ratio": 1.000052649033884,
+        "validation_mean_ce_delta": -4.949877339033293e-05,
+        "validation_ppl_relative_delta": -4.9497548346262166e-05,
+        "legacy_elementwise_failures": 3
+      }
+    },
+    "actual_traces_reparsed": 4,
+    "updates": [
+      {
+        "stage": "accumulated_update",
+        "arm": "ddp",
+        "microbatches": 16,
+        "original_graphs": 32,
+        "recompute_graphs": 32
+      },
+      {
+        "stage": "accumulated_update",
+        "arm": "serial",
+        "microbatches": 16,
+        "original_graphs": 32,
+        "recompute_graphs": 32
+      },
+      {
+        "stage": "uninterrupted_recovery",
+        "arm": "ddp",
+        "microbatches": 1,
+        "original_graphs": 2,
+        "recompute_graphs": 2
+      },
+      {
+        "stage": "resumed_recovery",
+        "arm": "ddp",
+        "microbatches": 1,
+        "original_graphs": 2,
+        "recompute_graphs": 2
+      }
+    ],
+    "scope": "Actual publicCLI and NCCL W1 tiny gate only;43 reported gradient/update/resume errors zero, actualsample/domain/source/compiledtrace independently rechecked. Raw gradient and optimizer tensors not retained by this CLI; no independent tensor-byte claim. Recovery occurs in same process, not fresh-process qualification. Full24 and W8/W16 remain open. Missing optionalrunidentity fields are supplemented by pinned supervisorPod/boot/GPU evidence; not retroactively filled."
+  },
+  "update_guard": {
+    "status": "PUBLIC_BF16_UPDATE_GUARD_MAIN_VERIFIED",
+    "snapshot": "d5448326fafcd29be2bff31a2a0a65fff5a70c716dad5e8e4e69e26bea4575d2",
+    "export_sha256": "5e60e0edbd4bfe4271e8d24bc3d16cc06042da439d57cc8be1462c9a26f6af54",
+    "tests": 25,
+    "failures": 0,
+    "skipped": 0,
+    "native_cases": 2,
+    "physical_positive_updates": 2,
+    "live_corruption_rejections": 6,
+    "serialized_rejections": 22,
+    "records": [
+      {
+        "path": "pytest/test_bf16_native_model_trace_a0/update-guards.json.gz",
+        "sha256": "8d2891485f5219c990eb3e52cc2e69f1f26b95e9723a3294054909bba3c77fa9",
+        "positive_graphs": 2,
+        "recompute_graphs": 0,
+        "rejections": [
+          "AssertionError('KHDN layer precision policy differs from request')",
+          "AssertionError('KHDN update actual batch tensor identity/order differs')",
+          "AssertionError('KHDN update positive batch/layer/backward/checkpoint counts differ')"
+        ]
+      },
+      {
+        "path": "pytest/test_bf16_native_model_trace_a1/update-guards.json.gz",
+        "sha256": "a244f45c389391f710bc6e49b7c98da27f28234801c6be2167dc9aea735670bc",
+        "positive_graphs": 2,
+        "recompute_graphs": 2,
+        "rejections": [
+          "AssertionError('KHDN layer precision policy differs from request')",
+          "AssertionError('KHDN update actual batch tensor identity/order differs')",
+          "AssertionError('KHDN update positive batch/layer/backward/checkpoint counts differ')"
+        ]
+      }
+    ],
+    "scope": "Checkpointoff/on native positive optimizer step; wrong policy/batch identity/missing layer rejected before step, parameters and optimizer state digests asserted unchanged.23 host contract cases also pass on worker. No fullmodel/scaling acceptance."
+  },
+  "model_failures": {
+    "status": "PUBLIC_MODEL_FIRST_GATE_MAIN_VERIFIED_FAILURE_RETAINED",
+    "tests": 8,
+    "passed": 2,
+    "failed": 6,
+    "skipped": 0,
+    "cases": [
+      {
+        "name": "test_native_bf16_cache_prefill_decode_reorder[no_carry-False]",
+        "status": "failed",
+        "message": "AssertionError: Tensor-likes are not close!\n\nMismatched elements: 1 / 13386 (0.0%)\nGreatest absolute difference: 0.0025634765625 at index (0, 66, 46) (up to 0.002 allowed)\nGreatest relative difference: 0.1962616890668869 at index (0, 66, 46) (up to 0.02 allowed)"
+      },
+      {
+        "name": "test_native_bf16_cache_prefill_decode_reorder[no_carry-True]",
+        "status": "failed",
+        "message": "AssertionError: Tensor-likes are not close!\n\nMismatched elements: 2 / 13386 (0.0%)\nGreatest absolute difference: 0.002655029296875 at index (1, 68, 18) (up to 0.002 allowed)\nGreatest relative difference: 2.460869550704956 at index (1, 67, 19) (up to 0.02 allowed)"
+      },
+      {
+        "name": "test_native_bf16_cache_prefill_decode_reorder[y_carry-False]",
+        "status": "failed",
+        "message": "AssertionError: Tensor-likes are not close!\n\nMismatched elements: 1 / 13386 (0.0%)\nGreatest absolute difference: 0.0032958984375 at index (0, 66, 46) (up to 0.002 allowed)\nGreatest relative difference: 0.27551019191741943 at index (0, 66, 46) (up to 0.02 allowed)"
+      },
+      {
+        "name": "test_native_bf16_cache_prefill_decode_reorder[y_carry-True]",
+        "status": "failed",
+        "message": "AssertionError: Tensor-likes are not close!\n\nMismatched elements: 7 / 13386 (0.1%)\nGreatest absolute difference: 0.00445556640625 at index (0, 66, 3) (up to 0.002 allowed)\nGreatest relative difference: 4.880000114440918 at index (0, 66, 5) (up to 0.02 allowed)"
+      },
+      {
+        "name": "test_native_bf16_packed_empty_and_labels[False]",
+        "status": "failed",
+        "message": "AssertionError: Tensor-likes are not close!\n\nMismatched elements: 27 / 6790 (0.4%)\nGreatest absolute difference: 0.004638671875 at index (0, 50, 44) (up to 0.002 allowed)\nGreatest relative difference: 1.3603603839874268 at index (0, 67, 40) (up to 0.02 allowed)"
+      },
+      {
+        "name": "test_native_bf16_packed_empty_and_labels[True]",
+        "status": "failed",
+        "message": "AssertionError: Tensor-likes are not close!\n\nMismatched elements: 36 / 6790 (0.5%)\nGreatest absolute difference: 0.004150390625 at index (0, 4, 26) (up to 0.002 allowed)\nGreatest relative difference: 10.536723136901855 at index (0, 52, 68) (up to 0.02 allowed)"
+      },
+      {
+        "name": "test_native_bf16_save_load_next_update[False]",
+        "status": "passed",
+        "message": null
+      },
+      {
+        "name": "test_native_bf16_save_load_next_update[True]",
+        "status": "passed",
+        "message": null
+      }
+    ],
+    "source_snapshot": "d8c95f9e483fe387ed460fe0eae223cb676b59c166abfadf511052493dbf3bfe",
+    "export_sha256": "2bb1924012c69594920b318cb114ec93430122392352c91fdb3df8d4a599c1db",
+    "scope": "2 exact next-update model/Adam/gradient reload cases pass;6 whole-model logit checks fail before later semantic assertions. No tolerance change; untimed strict-control diagnosis separately submitted."
+  },
+  "streaming_diagnostic": {
+    "status": "STREAMING_DIAGNOSTIC_MAIN_LOGIT_REAUDIT_COMPLETE",
+    "source": "ac616ce55a70eb9a5340f34dc23054e0107bab6286cc529e4bbc8d4ae3768cc7",
+    "export_sha256": "64fbf5fbe38b0c8548e16c66842fdd97eb0b697508a83d650e5943856ba6de7a",
+    "rows": [
+      {
+        "label": "conv0-bf16-amp1",
+        "logits": {
+          "max_abs": 0.0078125,
+          "rms": 0.00024150316312443465,
+          "ref_rms": 0.3170475363731384,
+          "operator_element_bad": 1,
+          "numel": 13386,
+          "finite": true,
+          "relative_rms": 0.0007617254052408268
+        },
+        "reordered_next": {
+          "max_abs": 0.00390625,
+          "rms": 0.0009839769918471575,
+          "ref_rms": 0.31393900513648987,
+          "operator_element_bad": 0,
+          "numel": 194,
+          "finite": true,
+          "relative_rms": 0.0031342935275575526
+        },
+        "packed_logits": {
+          "max_abs": 0.005859375,
+          "rms": 0.0012306078569963574,
+          "ref_rms": 0.31026118993759155,
+          "operator_element_bad": 27,
+          "numel": 6790,
+          "finite": true,
+          "relative_rms": 0.00396636091431188
+        },
+        "ce_all": {
+          "expected": 4.597579171069812,
+          "actual": 4.597577914834453,
+          "delta": -1.2562353592926456e-06,
+          "ppl_percent": -0.0001256234570229337
+        },
+        "ce_after_prefix": {
+          "expected": 4.556999027520042,
+          "actual": 4.556970552851877,
+          "delta": -2.8474668164690797e-05,
+          "ppl_percent": -0.0028474262765175134
+        }
+      },
+      {
+        "label": "conv0-strict-amp1",
+        "logits": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "ref_rms": 0.31707310676574707,
+          "operator_element_bad": 0,
+          "numel": 13386,
+          "finite": true,
+          "relative_rms": 0.0
+        },
+        "reordered_next": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "ref_rms": 0.3139505982398987,
+          "operator_element_bad": 0,
+          "numel": 194,
+          "finite": true,
+          "relative_rms": 0.0
+        },
+        "packed_logits": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "ref_rms": 0.3102565109729767,
+          "operator_element_bad": 0,
+          "numel": 6790,
+          "finite": true,
+          "relative_rms": 0.0
+        },
+        "ce_all": {
+          "expected": 4.59754097266089,
+          "actual": 4.59754097266089,
+          "delta": 0.0,
+          "ppl_percent": 0.0
+        },
+        "ce_after_prefix": {
+          "expected": 4.556374933264881,
+          "actual": 4.556374933264881,
+          "delta": 0.0,
+          "ppl_percent": 0.0
+        }
+      },
+      {
+        "label": "conv0-bf16-amp0",
+        "logits": {
+          "max_abs": 6.0051679611206055e-06,
+          "rms": 4.0623493191560556e-07,
+          "ref_rms": 0.3170647621154785,
+          "operator_element_bad": 0,
+          "numel": 13386,
+          "finite": true,
+          "relative_rms": 1.28123645530704e-06
+        },
+        "reordered_next": {
+          "max_abs": 5.386769771575928e-06,
+          "rms": 1.533653062324447e-06,
+          "ref_rms": 0.31385886669158936,
+          "operator_element_bad": 0,
+          "numel": 194,
+          "finite": true,
+          "relative_rms": 4.8864417261516395e-06
+        },
+        "packed_logits": {
+          "max_abs": 1.1026859283447266e-05,
+          "rms": 2.309037427039584e-06,
+          "ref_rms": 0.3102584183216095,
+          "operator_element_bad": 0,
+          "numel": 6790,
+          "finite": true,
+          "relative_rms": 7.442303868918937e-06
+        },
+        "ce_all": {
+          "expected": 4.597573988314536,
+          "actual": 4.597574035451293,
+          "delta": 4.7136757608257085e-08,
+          "ppl_percent": 4.713675871919406e-06
+        },
+        "ce_after_prefix": {
+          "expected": 4.55894604568041,
+          "actual": 4.558947114113576,
+          "delta": 1.0684331659405188e-06,
+          "ppl_percent": 0.00010684337367154373
+        }
+      },
+      {
+        "label": "conv1-bf16-amp1",
+        "logits": {
+          "max_abs": 0.00390625,
+          "rms": 0.00022124125098343939,
+          "ref_rms": 0.31798306107521057,
+          "operator_element_bad": 2,
+          "numel": 13386,
+          "finite": true,
+          "relative_rms": 0.0006957642656666877
+        },
+        "reordered_next": {
+          "max_abs": 0.00390625,
+          "rms": 0.0009912550449371338,
+          "ref_rms": 0.3261842429637909,
+          "operator_element_bad": 0,
+          "numel": 194,
+          "finite": true,
+          "relative_rms": 0.003038942151007494
+        },
+        "packed_logits": {
+          "max_abs": 0.0078125,
+          "rms": 0.001285828067921102,
+          "ref_rms": 0.3165081739425659,
+          "operator_element_bad": 36,
+          "numel": 6790,
+          "finite": true,
+          "relative_rms": 0.004062543004511569
+        },
+        "ce_all": {
+          "expected": 4.607908169564554,
+          "actual": 4.6078928868276545,
+          "delta": -1.5282736899102645e-05,
+          "ppl_percent": -0.001528262011867399
+        },
+        "ce_after_prefix": {
+          "expected": 4.560546925640954,
+          "actual": 4.560200516937914,
+          "delta": -0.0003464087030398133,
+          "ppl_percent": -0.03463487104725582
+        }
+      },
+      {
+        "label": "conv1-strict-amp1",
+        "logits": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "ref_rms": 0.31800490617752075,
+          "operator_element_bad": 0,
+          "numel": 13386,
+          "finite": true,
+          "relative_rms": 0.0
+        },
+        "reordered_next": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "ref_rms": 0.3261907696723938,
+          "operator_element_bad": 0,
+          "numel": 194,
+          "finite": true,
+          "relative_rms": 0.0
+        },
+        "packed_logits": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "ref_rms": 0.316498726606369,
+          "operator_element_bad": 0,
+          "numel": 6790,
+          "finite": true,
+          "relative_rms": 0.0
+        },
+        "ce_all": {
+          "expected": 4.608013892242646,
+          "actual": 4.608013892242646,
+          "delta": 0.0,
+          "ppl_percent": 0.0
+        },
+        "ce_after_prefix": {
+          "expected": 4.561162101063307,
+          "actual": 4.561162101063307,
+          "delta": 0.0,
+          "ppl_percent": 0.0
+        }
+      },
+      {
+        "label": "conv1-bf16-amp0",
+        "logits": {
+          "max_abs": 6.318092346191406e-06,
+          "rms": 4.1485267843199836e-07,
+          "ref_rms": 0.3179720640182495,
+          "operator_element_bad": 0,
+          "numel": 13386,
+          "finite": true,
+          "relative_rms": 1.3046827862468716e-06
+        },
+        "reordered_next": {
+          "max_abs": 6.288290023803711e-06,
+          "rms": 1.919989699672442e-06,
+          "ref_rms": 0.32603058218955994,
+          "operator_element_bad": 0,
+          "numel": 194,
+          "finite": true,
+          "relative_rms": 5.888986507885711e-06
+        },
+        "packed_logits": {
+          "max_abs": 1.0699033737182617e-05,
+          "rms": 2.258482254546834e-06,
+          "ref_rms": 0.3165397644042969,
+          "operator_element_bad": 0,
+          "numel": 6790,
+          "finite": true,
+          "relative_rms": 7.13490849655847e-06
+        },
+        "ce_all": {
+          "expected": 4.607822755802711,
+          "actual": 4.607822788295507,
+          "delta": 3.249279600936461e-08,
+          "ppl_percent": 3.2492796537255516e-06
+        },
+        "ce_after_prefix": {
+          "expected": 4.56097503245222,
+          "actual": 4.560975768955597,
+          "delta": 7.365033773965024e-07,
+          "ppl_percent": 7.365036486151814e-05
+        }
+      }
+    ],
+    "interpretation": "Strict core+BF16 outer is bitwise equal on these two fixtures; BF16 core+FP32 outer has small nonzero errors. BF16 core+BF16 outer has sparse downstream logit failures. Compatible with amplification across low-precision boundaries, not proof of a specific defective kernel.",
+    "scope": "No optimizer/no timing. Only nocarry diagnostic, two short fixtures. Original6 failing tests remain failed; RMS/ppl observations are not new tolerance approval or full-model quality acceptance. GPU state metrics are logged but state tensors were not retained for independent local recomputation."
+  },
+  "cpu_regression": {
+    "command": "python -m pytest --confcutdir=tests/benchmarks -p no:cacheprovider -o addopts= -q tests/benchmarks/test_khdn_bf16_harness.py tests/benchmarks/test_khdn_model_oracle.py tests/benchmarks/test_khdn_bf16_fs6_harness.py tests/benchmarks/test_khdn_update_guard.py tests/benchmarks/test_khdn_training_integration.py -k \"not native_model\"",
+    "passed": 272,
+    "deselected": 2,
+    "warning": "Existing requires-grad Tensor-to-scalar diagnostic conversion; not a numerical comparison warning."
+  },
+  "files": {
+    "benchmarks/benchmark_hyperbolic_training.py": "54c4925f17a0586c9740b9d3219aa1e98865ff153895f91dd6bcfd5336acddf6",
+    "benchmarks/hyperbolic_training_distributed.py": "80a441332a4cef6e94dd9a86cc851e8718cc9ca8fc5e21b4a4814dd2865f5bc5",
+    "benchmarks/hyperbolic_benchmark_utils.py": "0f59cdf1e6a33129ab8a05368be5d5ae3cd5f693b768d7547a4a4192c6d95695",
+    "benchmarks/khdn_compiler_precision.py": "196990be2789b85d35748358a9ea604fb94a27be5b7f8e44e5cde6101e720594",
+    "tests/benchmarks/test_khdn_bf16_harness.py": "dc27f971c1e05b563e5f0640becd45be4c0031e1718e1fc96c281714942fe9c8",
+    "tests/benchmarks/test_khdn_compiler_precision.py": "01a7e22d71f0b0f12995185099fc9f636e26be16175c645b5410c9c95174d547",
+    "tests/benchmarks/test_khdn_update_guard.py": "30d7a3cbeed5ce739f1a3d1462ec73de9893cb7d1a49ccf4fef96e2e2ff1acbb",
+    "tests/benchmarks/fixtures/khdn-public-fs6-source-binding.json": "e1d963ed67b56a159df496709ccdcfb6b062fed3c6ef65c27de068104a697f03"
+  },
+  "post_native_change": "Only top-level BF16 numerical_gate_scope reporting text changed after native run; computation and validation gates unchanged.",
+  "raw_archive_location": "Original job evidence archives remain in /mnt/cephfs/akseli/hyperbolic-validation; archive SHA256 values above bind raw logs/JSON/assembly. This repository record contains aggregate facts, not all raw tensors.",
+  "publication_exclusions": "Exploratory model-regression test edits remain separate pending resolution of six retained downstream-logit failures."
+}

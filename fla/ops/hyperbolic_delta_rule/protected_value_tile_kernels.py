@@ -149,6 +149,7 @@ def protected_value_tile_bwd_kernel(
         den = 1.0 + c * vp * weight
         state = (state + kp * weight) / den
 
+    tl.debug_barrier()
     ds = tl.load(DHT + state_offset, ik < K, 0).to(tl.float32)
     dpk = tl.full((BR, BK), 0., tl.float32)
     dy = tl.full((BR,), 0., tl.float32)

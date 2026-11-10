@@ -1,0 +1,50 @@
+{
+  "base_commit": "53edf1a4f31af476076a3247df170f6d33eed24c",
+  "measured_files": {
+    "benchmarks/benchmark_hyperbolic_training.py": "247674f12e5ac2c7df62583b221547342a8cc16ca07e0980ee4679965e5d68c8",
+    "benchmarks/fp32_adamw.py": "60e48956ac9f75676601b1d1ace3a064e43fea4047b75c15df11e5f2d2bd05f2",
+    "benchmarks/hyperbolic_benchmark_utils.py": "e18d985893b8c771bd7b99b5b0681d594ba50161bf2dbc93e60e9ee498f71b82",
+    "benchmarks/hyperbolic_training_distributed.py": "b0780f64d94eebd8fefbe589ffe604a8d63886e8e6f0983c697895b55abf2832",
+    "benchmarks/khdn_c128_trace.py": "430abef1e45eee5026890931f0649d3421939fcba69a5603d4f7a8049e5177f1",
+    "benchmarks/khdn_compiler_precision.py": "937c98536162d7a53e45c3cd372125ca9f306514614d9d74b5f221dd50042ac8",
+    "fla/layers/key_gated_hyperbolic_deltanet.py": "f9245bcfaf9de2dec928934cce9c8fc21ef00e58d626ea7fc90c8113b16b2259",
+    "fla/models/key_gated_hyperbolic_deltanet/configuration_key_gated_hyperbolic_deltanet.py": "54be89ffa7a96ff71a5a0c77eb4e18931f2f386537de7fe086eb9cec305f4ff5",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk.py": "2c31142c1db7245583587af98d264a712f0fb9af10f83906cd80792a259fc5a7",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk128.py": "5bb5c6a009e285ccd20b876f92ac84e9d847f53e7c3408661f1627a12945edfc",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk128_kernels.py": "aa1385c3b46b57eeb4cb146d9365d61094bcd46b56eba1bb22b39f41c3186bec",
+    "fla/ops/key_gated_hyperbolic_delta_rule/fused_prepare.py": "48029031a4af23a751c92b4568aaed56e9137a7f2e049de1e3f77a6cc8f26aae",
+    "fla/ops/key_gated_hyperbolic_delta_rule/fused_prepare_kernels.py": "cbc3db058d0b54a3b8b45c0a42d42cea6ee4eb2e39aa97b297ed6639b5e51e4a",
+    "tests/benchmarks/fixtures/khdn-public-fs6-source-binding.json": "f63ac89ecf2046f6385bf2e04c876389d8c9f5b532b9ac737d605007193f6755",
+    "tests/benchmarks/test_khdn_bf16_harness.py": "bd3a98a57fed2d382bfad2f358b3ea2743a4da3e20890b66a05f519c0ccb2327",
+    "tests/benchmarks/test_khdn_compiler_precision.py": "c5200b146f8bbe739475d84360e04355486f98a2884d0b576839d6db66d0f8ec",
+    "tests/benchmarks/test_khdn_update_guard.py": "e96bfc188b5dbec7f73bcedacc5b88efc2fcc60069dd9f82da26f6e34a737e55",
+    "tests/models/test_key_gated_hyperbolic_deltanet.py": "2df5ac85ea59569ff5bdca56833c1ba6e65d48c3b37ffe08ac8611d6d4cbc1ac",
+    "tests/ops/test_key_gated_hyperbolic_bf16.py": "e99f69d8f6ee190d4a37e289a536dc25c039dce8c1ef0ad20a7d44e5715c7ba8",
+    "experiment/model_screen.py": "b4b81338af560386fa940e0829a8fa201b89b5119f3b6f87e4472a6fc3f85565",
+    "experiment/cache_bootstrap.py": "58d35d672a64f3832bbf4839a696646cb372087a2a2671faf7a2d92d2fc9aa22",
+    "experiment/control_model.py": "2d46b0c5d3ff0038cf0f865ef6310c930f96b7c942b3fd33d99f976862a59a38",
+    "experiment/model-plan.json": "2b8a57bc1c1a46ab71454f88c70da698435dbec8e8e7ee96f698b4af787919c5",
+    "experiment/gate.py": "d6392d71a60137ac6af7b104ee6340f2aebbe7a1d3b652cdc57bfd1b3568ce3c",
+    "experiment/pipeline.py": "4dd7878cf2249183d356058e4c1cf921bd8053edf8bbb517d22b568e6c7c1dcf",
+    "experiment/candidate/host.py": "664320b1e62ece1e939a33770c394461a8ec2da6b9eef6c5a0a981cd55485182",
+    "experiment/candidate/kernels_m64.py": "aa1385c3b46b57eeb4cb146d9365d61094bcd46b56eba1bb22b39f41c3186bec",
+    "experiment/acceptance-contract.txt": "049e4b24262504ebddfd164e2ff0fc10a1e3924a8a0174fc54812dc04785e3cd",
+    "experiment/performance-priority-addendum.json": "03c277a26cb80617a4d0191c1010069ccd24ef166f87064d53829f64f32941b1"
+  },
+  "production_AST_equal_paths": [
+    "fla/layers/key_gated_hyperbolic_deltanet.py",
+    "fla/models/key_gated_hyperbolic_deltanet/configuration_key_gated_hyperbolic_deltanet.py",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk.py",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk128.py",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk128_kernels.py",
+    "fla/ops/key_gated_hyperbolic_delta_rule/fused_prepare.py",
+    "fla/ops/key_gated_hyperbolic_delta_rule/fused_prepare_kernels.py",
+    "benchmarks/fp32_adamw.py"
+  ],
+  "excluded_unrelated_files": [
+    "tests/models/test_key_gated_hyperbolic_precision.py",
+    "fla/ops/key_gated_hyperbolic_delta_rule/chunk_parallel_bwd.py",
+    "tests/ops/test_key_gated_hyperbolic_delta_rule_parallel.py"
+  ],
+  "scope": "Owned measured source overlay, not a reconstruction of every snapshot file. Protected parallel/exploratory files are omitted. Production/model/optimizer executable ASTs match publication; harness has a legacy strict-trace compatibility fix and formatting only after measurement. The checkpoint contract now tags the FP32 optimizer; this is host metadata only."
+}

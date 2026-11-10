@@ -1,0 +1,2614 @@
+{
+  "schema": "khdn.w1.timing.v1",
+  "columns": [
+    "run",
+    "mode",
+    "index",
+    "phase",
+    "sample_id",
+    "input_slots",
+    "nonpadding_tokens",
+    "valid_labels",
+    "loss",
+    "wall_ms",
+    "cuda_ms",
+    "peak_allocated_bytes",
+    "peak_reserved_bytes"
+  ],
+  "records": 8000,
+  "sample_sha256": [
+    "1ac2a69b8e1c6fdf14e0832cc5acf16af2c996fecf36657de5a1b89b925cb4c1",
+    "6daf1023f42bb91fafe574472d3f6851a2db60f58193c5993573993e44b08fdc",
+    "0e8b80b46174d8a259b2627236dc3cd409cc8b0692da29b9d055955be9a923ff",
+    "773645579329683cce24d86552efdbafba3a6027eb7480389986b6a807f29f9d",
+    "7a1e18776c89ef17861299f3c8f64212003cb602815f185ce28d6460308bb1b1",
+    "ba26391b1dbfdc066f894c3fa08c7a0d9acea603063a54fc46ed569caae07f0f",
+    "8df209878564c5ef78e09b51d51997cf3e0b3e7b595966fd60e05997e4a401d6",
+    "f99d0d42967b522fc02da4fad5575bfd41f2875f998df4f472e2936ceec17dd4",
+    "d50c8e100e469297c280771a16e2a12106665998937b598c22eeac6853f31179",
+    "8f2d8584b6b86f4c16ce62825a99bc983e47409a80c5a02b995b6e8e425c7692",
+    "b351366f7b7201b0d1bff15ea0a741603b0572a85a1d6bc9e238eb98aa523a3d",
+    "fea1f63e4bf02c1c449d629f4084b7465a107c61a2ba9711c6883334815c31cf",
+    "22ab7dbda7803c1ccdd81ea0592143cf8c400aa64a6d1d8fe15751a378120086",
+    "891229c0fc6968d573a371fe4bdb7c1f084d12b7adb2f68583ed74090caaabd0",
+    "da373a2294eddf0bd26bcb2b962027de7ca254924f53ca7962d933c18f05ebd6",
+    "faec84b05843fab82b9bf09dda44cc70efa89fb8fd39631635047c93b447e0a9",
+    "e23214f115fac80436a777aad72a8b32ba4eb553415280bda894618a8ee47ce4",
+    "358819998f7d6a308bc995ceac26e0d4936b604d33cf3e1feb4e20ad31f3bf82",
+    "a625b62e09e5379ce47a6230f5f1dbeb3b93de16ee7c0560df2b1484d065c19a",
+    "1dac54f95a08793426f07602966bd72086e105a7c19ee17ccbb949e6126f9ab8",
+    "6e3c9a4ac969c24ec331f9f31fb600e4566ae2279ffded8487a7395162c5ac6e",
+    "1a0b52d8f56a32466ea579bfd94d8b1e1b58491d4e29a6410fa100194d09e546",
+    "ba1457969c48a4db629e9feeb1766074b91ddf7be1e372e7f0f67d25d5b0de26",
+    "178e752187a0c00cffc157f780f44855966f4c1e836bb7bc4510bc8ef06749ed",
+    "f7b6017753102a60da0fdea3bea536521fe8eabedece2316c84a2f7adf7eba3c",
+    "c00b6a3592a761b8ac36bb33fd1e0edc08e80cb839224dbcb25a1c635f2e8b8b",
+    "e0ba70e7199ffcde741ee12e82e342526a5ea7c5f2bda41838a63863f1321639",
+    "156229c96b09293df59926b80b7ea93c4aa0ca5327426ce3e0b062b5a86217ce",
+    "98a4653c650f8061659ef3c6dbca7f1d0289f6836dd5afca7faa475cbd70ab2c",
+    "aade86fcc2816b8a2ca3ddb6d0a6441814933055c7ed5902783709476b11cc81",
+    "37febdc9178683657da36268cd3e4e2bdb5ad3e43fa4d51c868e0e3110cb6e1d",
+    "1a348eab5aad7857bceba525ff99259bfe5846a7ce8f71b459ec38e6b5e0c7ea",
+    "cc462520aa88c0644b461de78c07dc10e386ecb55edd0c7374d54a7906efb3be",
+    "a73d3ed8723638d97d5db6a8073b1e6603d8949813cbc2ecea6d4ee00b927280",
+    "02d29072f1d2ffa66cb6e80bdc52df90c9ecc909396f721d8bf5930ed99c233d",
+    "b288d75f4f642287aed6deb1bb4f96cb51c847dccebd242aff0c45569230205a",
+    "16d209af1fd27701ff82b3452fdc0f73e1e9a89b28e06097db3114a0ba4f491e",
+    "f8ebfb5c653a4a54a835a8fdff9c9d87cffcf98da28f7723126d5b22db0d4d69",
+    "9e0456cf889e282d1259eb5313713c4794f0eab1178818cb4728bfe71d6401eb",
+    "37da63e9fcd792405dbfa2d6bcfe9a548e7c8169352f3f0ffd4783f2c94d4e54"
+  ],
+  "uncompressed_sha256": "4ca306f7028cdcf81f0947976478c710123925f1dbb81e651f9d4a009d6042e0",
+  "runs": [
+    {
+      "id": 0,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "kda",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fwd": "40bd0b322c696cffd90b46f2a493379451ce879a8749d3cf3fb3df3fe57b74d3",
+        "bwd": "9dbfce669b28568f5a7d557ac064d9076cb30924b799b964233f6256b716717b",
+        "fb": "6c2f0518bfc44344ff502f6421c1567a1c0ac413bedf2e9ddfc405fe91b3382b",
+        "step": "bb9a7387608fe1d33bd5c44829ceba6485005e4778cbc8a6710708eb79722cb9"
+      },
+      "raw_sha256": {
+        "fwd": "8be4db7e9ef789507ab1a9cf4e3897de5f51a12ba4abb46cc8d7a97b80df013c",
+        "bwd": "4495feb5896c54c02c874d2a63973212055a6082ac9c768f9a52a1cb5b483824",
+        "fb": "1c81dd24c717a0d8ef5e966657e656632d092d0e7aeda03dae848594a1aefe5a",
+        "step": "e8fc193d48c490c26cd8c90040ec6cb01e9de51acd91ab09642757a5d173f6a0"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 1,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "kda",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "bwd": "2f5256265a81031600eeff51e448730adea90bef06a3095bab0d1d15f247946d",
+        "fb": "52f6f4dbf012b5c593abce20b48d6ea238d1a73e64453636f2bf735fe6e3d5d2",
+        "step": "91594d17a4837702c025dc58d3eda6eca3446c979ff1e28dd9ab9f4e3ca872c1",
+        "fwd": "46e2b2daca3d20881743a854e900adf7a0bad2684b8c6a82a20050b2ee28e5ba"
+      },
+      "raw_sha256": {
+        "bwd": "c7cbc65bf9931c25a44babf76536baf28770051453295e270dd8f0e93fc96b0f",
+        "fb": "f711a17f24081376fcf1fd677d86404c9a73e76870987b0d2e0f1c178f2ce1ec",
+        "step": "46d5ff4e95c4477803caf991fce4f27affd5a86e029b52594bbf73465f6e7233",
+        "fwd": "d7b1933c1b3de0dfb733dd267e97357b80c818935b89040573b19b096f516d32"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 2,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "kda",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fb": "295de417719e77a2bf629db36cdbca6a55c5088a3dd27e19f501f2ca3b6bcc23",
+        "step": "cf721b34a156d69b7a9e352bacb39aa96524aa9d0e1eab42b7d3570fce562e65",
+        "fwd": "413d74b305a9923d30a7457cc767fcbebb3bc25308f25e758c983672a9ea7e2f",
+        "bwd": "5e2d6d3652f1d93414bfc0c380b028348e320d3910b4d9945885cb456b98ecd8"
+      },
+      "raw_sha256": {
+        "fb": "16faff65b8678b9d39d768c965bde989491df63c472237c59952372e1bf7d18e",
+        "step": "27b647c659f0b38cf995262f6047e24dbffba48d61ead402238ebfe3f7cca727",
+        "fwd": "915efba42cc08a80dca296611ee0b70a5a85b13b7a2b12c501e8fb7fb362f662",
+        "bwd": "d86be03faee2f2b7ef839e0f241b7e48e24521ff4bc776123b832097ecb4c783"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 3,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "comba",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "fwd": "391e1932034970c41ca66fd50a359a196f3d8b19b7e72947c0cfb0c90b70af66",
+        "bwd": "2ddbffd5f12148e59f8f15165f155449cd134b65956d1abf57523556a73227f3",
+        "fb": "26f5babd72a7025288594a1b52f30d2fadf31fe92af82066dc92b395228ea9ad",
+        "step": "5a0aab4cb5c8b006910da3a88bd5ad01a8b750532a168140b28ac9d286d4aedb"
+      },
+      "raw_sha256": {
+        "fwd": "f0db5c44b43bef82b85a40fec9e8805163950965eee11e407913d92fa6b86606",
+        "bwd": "d78d7705e87fc4a4209947bc98ce2095053361c889741cb5f3d905173f60501f",
+        "fb": "c0c9a6e3c03c54f48e7bf2890e91571dfb66b864a16db9de5e9a73592c9888de",
+        "step": "388f9c54ecb9b064aa673159e3cbb8b4b962f044f2f72330a3a977388ed021a6"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 4,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "comba",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "bwd": "59e3a4250925c02092341cabdd5e5c84b99d61802d2eb7ce5f488683eecb9433",
+        "fb": "04ccd4a7ca296f7d7849825a63ed3036878a7c89ab794665912b65168855e163",
+        "step": "0f5dd5e57063797c7ce49ec1e6ac774e86b7afa33c863845b05364a9e89f2c36",
+        "fwd": "46d0de880926b59779ceb1ec27f29b99d46a9184a96112879cc8212811d34c14"
+      },
+      "raw_sha256": {
+        "bwd": "ab1e60eaeac43f8aa95c3343d21832741f7f7ca6385e323306c4b36586547b0e",
+        "fb": "1ca22fd9b787936c99f24773036d449e5ca498f745bba9b7fd4af6721d3a07dc",
+        "step": "41b693b304a832bb6acb1fdcdd631bd1b0c5fc83eeec91cf6bd6b732bce01282",
+        "fwd": "fd89ff36784a3f5a3e8ad2e54776ed062d0fcb4f9acb0000ebdb7a71e4dd8e20"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 5,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "comba",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "fb": "047b8668f1bdc352873a16e4e800a0f418bebb934ef234d901cf42a22423e959",
+        "step": "7a61d07eeab0b82c8fc7850be10d7b4e778e665029431e1650cfe5f3b83bc8f5",
+        "fwd": "366f006a2a06638ef35635576a3bd2514e8eb305facdc771c86c0693aedce52e",
+        "bwd": "a85394fbb854913c36ef480045df23e6e3845cb37d10cc4c700a7f1ea298ff88"
+      },
+      "raw_sha256": {
+        "fb": "438715753f921b63527c0400ca3383376172967d7ec1beebbc416445574c87cf",
+        "step": "f206d3aaf1682c1875ce90ca3c6ec69994bc214b6f4ba6e4833fadb83a96c0ce",
+        "fwd": "1545fa4cf39016127f1b7f36a509f50d959da8eadbb1a9566aacf1ba00218f90",
+        "bwd": "2c6437e3a864309ba2ca44afdb1a354e0bdd184532fdf2a33da3da54e186d92b"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 6,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "hdn_tc",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fwd": "62192874bb2d4bcd582c62dcc0e0be035a4379748eab6e421f98a8812cbae4be",
+        "bwd": "b1dec293c907d491294f92585dd9490de023424021c66985aa43b7d61ca32e6b",
+        "fb": "74669db153b96a2c71af3db81907d55f577f0520e2a8e6e542922f19a356321a",
+        "step": "acb43cbed3909147b752e32ef9e156a550301a7794f2754c6c487cc8a51a380c"
+      },
+      "raw_sha256": {
+        "fwd": "5d2010b4f917c55be80d1d0310800430fb973cca6c852112a1394ac19606a0e2",
+        "bwd": "89c734cdc0d67cb43eab8a820b9449e65f3b1dfdd573edb27ba3600863f9440b",
+        "fb": "c507c49209b51d3faa9342d8a46ef8f4ea8fbe364f7859da5310c0e3a50a731a",
+        "step": "14027eb7705a00f84e4fb54048464441e9ff7ad094b5f47dd77688dfa8c16264"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 7065305088
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 7,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "hdn_tc",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "bwd": "3f69255e6cbbc8d5aa8b75198f9830289a459f0e38f65b94aceafd77e183453f",
+        "fb": "c77648a3d58eb988d6d9d31544b7328214b88d33d62cae89d7ed18dec8448c8e",
+        "step": "6c15cd548cf2edbc90eacbbfb21e04a0e2bfa77aaa5a3115029e57e05e55cc84",
+        "fwd": "8e530582d7c8a104948af429898801ed8a1ae1d18fb71889f282448781bc17f1"
+      },
+      "raw_sha256": {
+        "bwd": "31f67c8fbc9ea02dfa6edd3fe9601eef109abb4fdd72aff9a96831d724a249b8",
+        "fb": "f8602b585b269b3e08f33dfbb1b7d3a2e86ae40f54925e524e7a0620ad461fe9",
+        "step": "d314e1e73ef90d8c0ce02b2ae3c8ff9740fe14d1027ac9f55919425bb6a40b22",
+        "fwd": "5ea08141fcfb9825f746bb44dc60150c50309a12869a357b16074998f4539f43"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 7065305088
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 8,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "hdn_tc",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fb": "cfefc4646feb8bbc4b23ab1abde68136b60a3ad23c73359863077495134ee10e",
+        "step": "3fd5f8846ea34290d0db79a8a4f1cc5115911993484266a5b06496e99ee45560",
+        "fwd": "23d049011ef972b80d54d69cb84e48b75947157870f04937320fcc86b95c5ef0",
+        "bwd": "7fefc8291a9a9d706d4ecb5783aca4008c3b2f5bcb354cf0265b89cab35c8344"
+      },
+      "raw_sha256": {
+        "fb": "e9f5698bce6b503f545641015ca8b9eaa1ffe189e5ae52c7dfcd67b81197ebeb",
+        "step": "e6f67283a0e9342a600723bc8f9c63f00f9f70538816cc1904f0e9700ff24c1c",
+        "fwd": "762f94d6b7cd8d6b5578aee56460579821a848119311c4a67151194706858723",
+        "bwd": "3ec1ddf9047572d17982f37bacb3f7f1aceb036443086619e7925d5ee6825232"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 7065305088
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 9,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "hdn_staged",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fwd": "72d586b09bade4f375f08956afd4a5649f653a2a78dfeb217c5aeacaf3cab13f",
+        "bwd": "ee95b9bdb6f2db14ecd59012ea1918dcc3680d0e240e847385378d06dec7d550",
+        "fb": "11c87a562b137e08a8d843ecf48d2cecbf2ebd53451f682e2700bb402eb07092",
+        "step": "7d61bdab6566910368c39c3c7d25d9736a42e3a534a95fdbbf2581e895c6740c"
+      },
+      "raw_sha256": {
+        "fwd": "c51ac6336603c63176d00e0928cbe461f96dd7e213da017377a680f93cb8700f",
+        "bwd": "0220305db945c52e2de115568510e6822d1c1ae052d93e2358247cddc946a8c9",
+        "fb": "61d397c40443472ded83dd0f80fadd970295ab31f9d33fc30bda3a0981eb8d78",
+        "step": "25c60089ed65c7b67b33fa4741b833cbe26f1ab6e147a79ee8f66bb513fc8200"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 7065305088
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 10,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "hdn_staged",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "bwd": "fdfb61f5412975c50842555af9c3ea75af2524344c5fdce5f6aad49bdd865f95",
+        "fb": "88d2d3975fa8ee29c73902ecd4a0caef68255831042bfd204ac8341a38780dc5",
+        "step": "5c42d544da0f42c0fc965ba7cf84de54af52d0039d0cc80df6d611e5e2b62abe",
+        "fwd": "9b562589eba28c4b01f962ebff67bcb5fdd0a61ad71929e5e90a5abca46c221b"
+      },
+      "raw_sha256": {
+        "bwd": "7e96256ec962e5787370670b227db018b76f5fd49d54d4fd483245048dd0a68b",
+        "fb": "c392e0e6077df4476dfdf560cedbcf302945313085f7df881cc3442264472840",
+        "step": "40a4787771531017ec16874bb3a3cdacb991fcf83f6d2f289370420fbba225e8",
+        "fwd": "fc1312497b3699aca8636b2cadaffffbcf9be5c2651b2da228ef6abc6ca2c231"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 7065305088
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 11,
+      "series": "baseline",
+      "length": 2048,
+      "batch": 8,
+      "method": "hdn_staged",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fb": "5e16e2dca13dfbdb03a18ce279a2909ec63d20fe533dffa8ffc23ebfbaaf6cd9",
+        "step": "e99aa34c81ab907bb88583217cbe0f3e85f7c89d75dad6e546f78a4958e90324",
+        "fwd": "5f780ec26f5b7ba8e3b98e9bdf1b3de8af8de36ff81c31b6d68e3368a627415b",
+        "bwd": "11308d1505ac751409a1e28b25d9ac994b4cbfa6d8eaace884c6481099165a03"
+      },
+      "raw_sha256": {
+        "fb": "c12e6bb04403731f140ad79f84908d61ce27da91cc932e8d03f965e0d4f85a8a",
+        "step": "2807f345558372702e7224c2804d5f8c19169bd4f2e5d0dd258cc53598074c31",
+        "fwd": "a918b3c5028a593aa1c02780304998b9d5445991fcb53b5e96916b63c757c000",
+        "bwd": "b631c76d8f76c2b4a38831918efbaa690775613cd3c9f3ffb822fbb5e9a13820"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 7065305088
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5794430976
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 12,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "kda",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fwd": "1934119d584f9e31ea06a09c1ee09766c026cb7ae638b35feca23cd04b77ecba",
+        "bwd": "ae7e3f4b16be569fd475ae7d6c19604db8c882cb7021c925a58502e857dbd10a",
+        "fb": "1efc4a510598055ae6abe79c7104162b161d510a67e78da0087fc5687988d0bf",
+        "step": "7f7df2c4c1220514c33e84bc9ea52229996d2daad1283e8e67383de794181868"
+      },
+      "raw_sha256": {
+        "fwd": "06abaf032f08b5e31e39499951a6d05f4bbc83926eaadd00ee7665ca8d1ba962",
+        "bwd": "a06e5f7cb460efbe8f28929a1ecd87fb0c63bfaafaff4c5b12d2fd3851f0c7b5",
+        "fb": "c5169222a6ef92e73f3fe77b8b815a1fd4bbb9dd22db6fd0572856f035fa7482",
+        "step": "936c21e9ab93f9cdd67cab1b4c502dfb6b1b4a3166fc9c437121bcd9f3e8bac8"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 13,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "kda",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "bwd": "3de6b4405e386665364bcf3c32451e578db91f902f6c7aa58a3b4cac3f8598a6",
+        "fb": "9fc65710dfeff3bbd6cbdc5c773c5e9750d34aa0df33197555cb5cd4bfdeebb4",
+        "step": "52ade85d88973335a964a58db2a259f9b85ac06117ec37513d28d18bfc78353d",
+        "fwd": "2d9bc624f54aad64be60b05286b1de04f327289e4d1da9cd5297b07f7860bc94"
+      },
+      "raw_sha256": {
+        "bwd": "0f4529610f06fd4e17fd2fa3977833be1305b9add9ea3e0b7172bdc64c0a6c90",
+        "fb": "87d8790d877c4890105a24efd17f4bb917442006a9249bf801de7353008f98df",
+        "step": "d8769db1dfcb54b67390138c37c484405198d6632d7b6c55130203d6c9f7cc98",
+        "fwd": "fedb32de21673c2b51738de6265637213f279926879e7a22f085bd03a70b0222"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 14,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "kda",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fb": "c4ea9dc6a24245453214df7ce020881baa5e91e3044bd8720cdd315babfb8305",
+        "step": "e470c8f9d1b82a47fa25a103d74ecb818fc641bfd625072c892f79e9e23ab8a6",
+        "fwd": "6846a4f8f55eee22ad62a880a12a3e10964c19fa7dd8c50849b3c40a3fc857d9",
+        "bwd": "7523241e21f88195f82460646c26237e00a4d006aaf6e2c47cde0a1fb8ee30a5"
+      },
+      "raw_sha256": {
+        "fb": "6dd6210477c28eb90cc0dfe3c939a3081870606c25a7b7fd6e778aab416bf76a",
+        "step": "529d86bfdcb345c9b34edcf834d5332fe6a11e35c7f50e4b10ed61902e559f33",
+        "fwd": "05eca6e7f7eabe9077769d117eeaface8efbe6dcbfb57bde50fdfe0a04ccf079",
+        "bwd": "1c01fd1fc0a60ce6134a97183eb1960da4e8f7a87a21763cdc34b43125f02b37"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 15,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "comba",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "fwd": "ef0712b455fd2ef74564e4a99911050a762db66eaaffdbcb59a313490eb05a02",
+        "bwd": "0506a70f91edf643f33e5bbcdd0c7c861149b5538714c7acf6371e49c131cfc3",
+        "fb": "8d65a510a9fddecaf845d23f39fd02509fd025fa951dbe527856039d5021af11",
+        "step": "0b0f06d9df158af4d3147e89e70d00fd6d4e2eacc2261ea369ff4ae4586d6e72"
+      },
+      "raw_sha256": {
+        "fwd": "6706af1df33903818c163e1907feee865ec45d921af5e81c65d5480d0b1b3eca",
+        "bwd": "d7c62e1ba069d3039f93dc20f19a2ba97b58e5c96b6783bc282663e3bfb20737",
+        "fb": "f887546cc8af4d52149e599bb5b44ca1cbf1c52ee67bd5038abc7c69d99ac30f",
+        "step": "e1e44e7e66ab877e7e141d98a40bf67a1ec4c4840f6479e1b67a86c4a4f81b77"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 16,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "comba",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "bwd": "c655e12169c59c73d1c67c2eb73ee8656b81dd80fdc499ae56f9b4084990fab0",
+        "fb": "c7ea1dce95d2c4172bd55d9e7706df5c23e489cddd3ff2adc140dce2ee56e89f",
+        "step": "a66372d77b6f881be6a8863302404369d2026b920ae3a7ff34bc44e4b43f20fd",
+        "fwd": "ed90183252f743f3a9453d356f609c9f333598caeb08b5d5c9272074337cddee"
+      },
+      "raw_sha256": {
+        "bwd": "24ca57076a726ae8989ead5ac628a1f47d1b6310c9db342cf10c1d61a6ace8e4",
+        "fb": "f9d54e138d7ca24087d25c3afeeefe70d5d8c2a337cb64cc144f3766a0c08282",
+        "step": "6b17b6d693abdc4f83e0d4ebf500dffa9c3a5c01d2d9e900fe49c76c3da3af52",
+        "fwd": "b728671abcae4e9e48374c858cbfae6f4170e9d8b651b14184b0311ace2d1b9e"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 17,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "comba",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "fb": "da4c0fae4c6f0b2d0b6909af478de14064f68e285bbada6fb235bcbb30a988d1",
+        "step": "68e1381c2fc3661db8ed31502264cae775246c014bdf14d2797b195ca7783a31",
+        "fwd": "8ef5a8bc7e693a7e4b44f2ea31030598e910435be8dd4863a744b6210b2aa5da",
+        "bwd": "0f66ec7c058898d3bbb675b0ae321b118b3396c0ab20abbedcba153c9a13dc1a"
+      },
+      "raw_sha256": {
+        "fb": "5fec4cffa250df9e9f893711c46ea6e94e85e7fe18b0b4586148502e3040443c",
+        "step": "766729d886c800e9d45f30df4f111db9f926448b5780037170f10bb4de6b8f98",
+        "fwd": "d9f6ba4690e7a2e6aa97de042e8ca576d60fdfe0fc5f3bfdcaf898dd32e4420e",
+        "bwd": "44fc33bb95d89466d2d3f1deb1041cc6b2f1814089a0a43a5d5e33e9079599b7"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 18,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "hdn_tc",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fwd": "342141d4aea8dabbd89a189f0bfd8ad39a7186bcf409783ec702e7e241e9160d",
+        "bwd": "b68f1f464d46fb1e72839f0575ee72ea73b3d3e77fb48471fdf5457ee8c231ac",
+        "fb": "93b491a72475b6ae5f98448950b37151faffb1431425db010d8a72c72c4cb17b",
+        "step": "6fc0ae2ea6a1d821756e8232773559cc30a0dd9b311c0dcdbb8179c34e513872"
+      },
+      "raw_sha256": {
+        "fwd": "7741a60325027b730832f4ab2b4a0113464e8a59ade762154c38ccc0a9e4499e",
+        "bwd": "8d97ce0bedae986177bb9fb8cfd1677b176683635715ed48333aa4929074f5a2",
+        "fb": "0a0e1579802d738b49249ecb51cd06ba0d02da02b5fccb5c2d7d9f1e3cacfaf0",
+        "step": "fc0544dc5f059dc416a83f0e5e40eace04726e6a91c4eabe51a993d13bf748c5"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 7061110784
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 19,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "hdn_tc",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "bwd": "25151b98eb8b8b93e2565fa1de411edf1db37d1aa28c6d74707e1ada9fdd7c0e",
+        "fb": "43f6a4e40135e39656a4ea376d0dbf050c86e9e3d3c6f552fccdb51c01a1fb5a",
+        "step": "ce995927c8bc62d1906d596ed7e85da38f6e19ccae11be113a57c5dc7918406c",
+        "fwd": "3e6741d46a9512fdaeb6951a518d5be5f321300a425ffa74e4ab0fa7b8b207c3"
+      },
+      "raw_sha256": {
+        "bwd": "b9f36a49f557236a31f78d0b5438c7fdb25881cf921d146fda1254c7a36167e8",
+        "fb": "ac69a14a7ffe336251c252648240a02da28a998284a4f28053b3ba7f97370169",
+        "step": "54af8a07d987eef30e0644e986091ec241bfa7e75c975484635b7bbd511d966d",
+        "fwd": "6a8d9defd230bfb08b7bc5e15ff4b8c0617a1f7f3df5bcbacc06b0034e1bf525"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 7061110784
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 20,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "hdn_tc",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fb": "f1fea63abb4efef9393fa60649fc5c8822cb9b2a584ac6ee9d78ea0b66ee6d9e",
+        "step": "419393a06207de893496c8debd6dfecb4f54e29212ce83091f6bd54b17a1fe14",
+        "fwd": "ca995e6e22b4bbad8b56964e838e6c58eca0d24978c21b299e8d37b798b10437",
+        "bwd": "7c0faad24a29cbaff18bfd8e746a83e787579f62381dcd6e7dd0e9c5bb770a74"
+      },
+      "raw_sha256": {
+        "fb": "056682169dd1ce85a613e587540d99722489ce29e39a7e53bb7d5130873ae2b1",
+        "step": "7fb8bd3895d16cfbda03805cb2b969142917626afb1b14b43b2aa52240e8a119",
+        "fwd": "e4bde4412ecf833f76667757a3313643827dbcadb12360d0e63fa619fbfb7070",
+        "bwd": "fcda5b26573f51e4d724bd40d117c353a43851907a439d0aa9bab7f0e77c4ee7"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 7061110784
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 21,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "hdn_staged",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fwd": "d26108527cd57f961abf5779d2e7ce1f84d2410131e453717e04a59829bea66e",
+        "bwd": "94b02ac486461d81764803d66bc9f6e688fa3114335fa0b278d68fa2a02cf671",
+        "fb": "c9026603a370639c69c9eae497a19dba6a44b551e6622b1fd0a5cc2d0c6e65ef",
+        "step": "81b9349d197ddd9d42933b27c4fe22cb515f5d54bda9551ee5acc0139d48388e"
+      },
+      "raw_sha256": {
+        "fwd": "5453b5a521e4fa893cb5bacf597015d07378d3dfbb55f2a23d82d34a15dfa673",
+        "bwd": "da3c69309d6b90fd3cb720e4d6f19c2edd52a67e8568a31b2ea6d96c00f20a2d",
+        "fb": "b2cbd1ba2d345b289fc641bc19bfce6a05919853e03fd775d66be4e73792b46a",
+        "step": "16adf9a84056606bf933fa5234db25734fc5e4b8dc7a6ad09320a399050ba855"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 7061110784
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 22,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "hdn_staged",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "bwd": "a14b93b478e8d81e301295475f0a681f019fc376ba0b7bba31d7d872b7c2d443",
+        "fb": "e95cb2affe65eddbc4bb94233b2033ec3beab71aee2f1c103012b349a2f34bf2",
+        "step": "f8b2da64bb0bcb56b2c0d79ec7d08092651ddaae28b35cc018df28942f4691fd",
+        "fwd": "78bf486b869a15a164c8b05e91a38cb01e8dcd116e4786bb8ce900ad1ca90cac"
+      },
+      "raw_sha256": {
+        "bwd": "0b079336a17b75becab5c0464c36b953e93a6deb33854f70047f8667d3f9026d",
+        "fb": "8421a2ba03744fa194821504d410b9d0a78ad4851fec7b95cb49858e97e6975f",
+        "step": "d8f57118bd58cf6a42b370e1847a86027ffad11bdd9f4e923a56fcf34ec49ca9",
+        "fwd": "d4ac7e83da779aa5ab1c76bc19477c2d11c5311d966e3188d9a0d5ab850aa87b"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 7061110784
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 23,
+      "series": "baseline",
+      "length": 4096,
+      "batch": 4,
+      "method": "hdn_staged",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fb": "c81a0f5f0df9454b2c8e437a28d04a4c423c36bf4554b20b32b707bc4026ac63",
+        "step": "7c5bf85f2b57dd1580f67b1799f681e4ff46c98821b6056d8b5e192a9cb24141",
+        "fwd": "ac0e870f9aeb81b3050c805bf6f3dfc8f21bd9f46383444446cedf60e48c486f",
+        "bwd": "c971ecebed8a6cccf180c90fb5a1b31a7aa124be624e38145b28176608d60a29"
+      },
+      "raw_sha256": {
+        "fb": "41c408be7babbdc9d39ca5e74f6faf94f8c9915e688cb088a127558391ce816c",
+        "step": "aa3b271dbd26114983082a9462784b1dc1f63230459c9640e1bdc5149aaedb13",
+        "fwd": "630cc681da909a896edf6ffce1044cd5da477da64ae48df01f4f38f387a20f71",
+        "bwd": "5d59ad95d7d94c71721aaeb267ceb92df9e5495c053ea98bc65e60f32b5c6b30"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 7061110784
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5807013888
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 24,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "kda",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fwd": "06c622663b5f277768aaa37d23654a1ab1af2027708ce56df97d79c5700bc525",
+        "bwd": "7ce014bba15ab8d354324cb7026f52762cdb7226222cfef56baf8887d242f7f1",
+        "fb": "16b49b6d93f9a76b5fc07d812f1ceb396bcecde475fa0da8540cae519dd618d9",
+        "step": "e33a526975b1faac4126de5dc3653946706963272a4aff15f9f87bfaf69b68af"
+      },
+      "raw_sha256": {
+        "fwd": "577c82128aaed67d3ecf34e6b0ea8aa065af151ac258768bb072160c2cea34c0",
+        "bwd": "d6b45ed664758255d461de827f0e06b950cfe21eefbba4f42c3747d1851c832b",
+        "fb": "518371f96c78f05acf46eb63578936b30d58f2de15648cc52c06d8f87601b251",
+        "step": "39c0a1fb8e904a73444adda10f70f6811651d42be53ba475c0a123197ed88536"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 25,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "kda",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "bwd": "74bd1815bac67d1acebaf6efd11f339a902b99231e8ef3f6e7dc462601193d4c",
+        "fb": "73adf7dd1f9f02420ca5edd494fb16434082b01bbb4b2619c05f701c3eb7ad32",
+        "step": "0d9022d21ad9ffdb14666d202c6a45216e9101cad62acd6eaf56fc2e722436cb",
+        "fwd": "ec0c75003f2ba5eb31d5c5eaf51b11a51a67a13eb4e1b40c40a8ee2d2c8f4cb8"
+      },
+      "raw_sha256": {
+        "bwd": "fb28e3671044c76993bccdf54d9347373d38df3dc479ea0e35370101a7f0668e",
+        "fb": "f7f9b6c6db6f070b21e99032e9ab73e73e3ee06881877ae69a0b334b0da67697",
+        "step": "c1cdb3862131c81794b9d0e239f047fe653e497bea02662548bc77226d3041e4",
+        "fwd": "c4dbda59cdd0e79e0674af85789a2524dd78666167ebe3e453f42e68c0ed36c8"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 26,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "kda",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fb": "dbf0f684d421d69454f86a32e7755d8c9b6b9d4150ec5169acf5ef03979de1be",
+        "step": "7143044f1d6ce3700b539e7163b5fce649a6d115867e4bbe3ab6c6dbb329de9f",
+        "fwd": "b26a0d2d5d70d7301cbea6e695fdfa0085d4b21d22ed0a5c610c63016fe1c67a",
+        "bwd": "4c0df8aa510e14c85af3a31223dd9847e1de74a922727d2381e4fafe3f41c9f1"
+      },
+      "raw_sha256": {
+        "fb": "6ea6acc86a56ea452dd98455b1b2d3dc657286a830c29da4dcec75b65d3cd27b",
+        "step": "b3878d27b33ece69b94a6768fca088f14eb3309df7ac6c5b6bc76b7d15f53366",
+        "fwd": "b0592fc1bda276c26d176391d09a73bfb0df20af930b1062021133dacff6f8d1",
+        "bwd": "e4079c983a18a86227e45a32fc5c89b7f6c328019c249520431f378bd26683d2"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 27,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "comba",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "fwd": "cdcfc99c430fe859e709bcd4099d65f5c182116d530de5b70ee62050de0fdd56",
+        "bwd": "93a70f04801b16f2a08834fe4c0b6c3e471d13a7fb56df732711aa0da0d849f9",
+        "fb": "6e4b9beab6a36262eaccc766996286838b7b277802c0f608dd15130d13225205",
+        "step": "4f43bddc8f6d062bad363309e30eca2aaf96c79343dde789e30d3f6b32571981"
+      },
+      "raw_sha256": {
+        "fwd": "5ecc8dbf3fa096b59263edf078daeda468fd92bdb905727fd5bcd47391151848",
+        "bwd": "56e6339a409ff6f0afc8ef4237a17abf042bb44c053f587c4eb52d2828803e86",
+        "fb": "913eedda80b22a30f3ad049a5d2347b13e96baa5e0313d95f18ff678c8d7f9c8",
+        "step": "f4cff57a8035e84825749e133f8e89b4aecc6815f2685e6df82e5c7045ee5ab5"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 28,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "comba",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "bwd": "27ce19ede7436e35b21fe450d592127a3666dbf22d5fbdf9b971307d732df737",
+        "fb": "607b55c70aa556aef6f71f2c7a894a159abbf9e1a7a4a09b66b21af20bbdaf77",
+        "step": "7a665af91a3fa7babdc75c5f8343784f0561dac66431fff490012b1ca8141919",
+        "fwd": "e196f4233a9e826f21e4cc0067a11cce666d036e7a1e12ef097e9727a40b8dc7"
+      },
+      "raw_sha256": {
+        "bwd": "fc0ebe6f5d8917ade72ef1be1e650d929eb2fc8012dbf96dd46676b4a5ec272a",
+        "fb": "09286333f69b0432dcf9c5445e0c7253f57ca8ccbde6071d2940e62f1e24d5c3",
+        "step": "d55f33b2924df1969fd66224742008cafb608fa41b079226dc64105e6fe0faba",
+        "fwd": "1148d5da71418401f9584f9f74041d00d506d16e46c16242bbf2ad39e429aced"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 29,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "comba",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "fb": "03246d0b0c067b5ce55f1b74811bb0d029e65baf22fbbeebbf436676b9ab5560",
+        "step": "3cb646c2dcc881657dd66f0022d97bda58f212948dc08c692e7f56f69f7b5da8",
+        "fwd": "e61bc8a3c71e9b05aae3c6bd186d3dfc0c7d1e2ea0c0a6845aca32190399c7d7",
+        "bwd": "77479f79897e90bec250266d6adf0ea5ee86be853920c53cec9e5aa274246cd3"
+      },
+      "raw_sha256": {
+        "fb": "efbbcc4e62846b4eaec5c0d996ce473ab245a435250e2119d355c383c2cb1c88",
+        "step": "15ddcbfe7834161bf51a02ce9632f6f074cad9470dd148a9eae5f18bd4e82b1f",
+        "fwd": "81191c35c6f2eb0c63a82d2a267e46c39023e40f5b3f25ff39a9335778945c1f",
+        "bwd": "0570d7a7283bcea505a6a11b1ae4583bd5dfbb9f8e09c6d6387511bbd90bb778"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 30,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "hdn_tc",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fwd": "4266a678c25397d956064c8d3aa95c405dc33be777b54dab69b5587d1a37f2ad",
+        "bwd": "d430aa359100e6bcc19cd035e34797d8ee380a71d832593c07e8154e5558ce63",
+        "fb": "1dd113424598f5ac87e11461ebe9f7f0ac9a5371a294d335fcef26795b7d1424",
+        "step": "8a2531a130f68b455b98a67899d8771b7521f502c2e78724f7273121bf64b7a3"
+      },
+      "raw_sha256": {
+        "fwd": "94baa747a3e1d6f1a19a96785194f36e38db1334ce8fa62fc5fbac036e6b9d62",
+        "bwd": "ac04d47ea00b0bc9d4d6d4612e31172085dbd63c3e825d5f3146a33375cad4df",
+        "fb": "a6cbd44d125a5cec9505a0c24d88c517add3759354744edb6fc14352df0da65e",
+        "step": "48e926b3307568036f39e324bbbacbf2e6fd32468834522f7e05d9fec7912006"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 7059013632
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 31,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "hdn_tc",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "bwd": "095697078ac96ed4422cb8659ee493cf4d3c5e276a1bdbbfe638c92803f05525",
+        "fb": "c053a3debfbe6719fb445adc77bbebd876906de2166b1460176cfd6885a31597",
+        "step": "07d37303315e8ce2018dd31c03dbfe11b6af7ea30161493a37bebb96fa5f3035",
+        "fwd": "a15f3746302f21525046553ae73a8e4db38180ab196de131c840057e98a38426"
+      },
+      "raw_sha256": {
+        "bwd": "8636863620e28105fc493e034ae255767191d3d6a59b838c6714095fd53d7970",
+        "fb": "f7db6aca4f77a44c7f42271a51242a4e14e7fa9aa1005040390be284bb48be16",
+        "step": "9cbb8338cbaf88bed2233c4e04df9187841b95261256eac2bc38307d4d89e1b8",
+        "fwd": "b6f728e02e0c5df4e5bd5aafbd89f1781518b8199e4690a67c6e2246e80b1651"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 7059013632
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 32,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "hdn_tc",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fb": "a58268ae1285697cb7038fb26ed610eb8bc737250110fec1716080842d47e6dc",
+        "step": "5055eb3a5e8a78d147b771fdf5789ad0a22858c5a2f8d0a9e340843318980419",
+        "fwd": "8bc9a6617a2a05f9fd8a1e82e9a08452ce99e8bcfabca7007b8e1e42842f81d2",
+        "bwd": "ddc4fffe8d4b0a3940a0fed238bed7d2a6bf230e185d5493a6a280de8830f0f6"
+      },
+      "raw_sha256": {
+        "fb": "352e8de5a845d3086756422dfcb3e3e60e52a4d129f55e93820ed410b3adbc9d",
+        "step": "e42ce6e640478162e8f7c68eb84b3ca342667e5924301d83868139e79fa638a3",
+        "fwd": "8f33bcb7be88cdd1d9bf4264eed5f073f63a8fe69ccd29c85a31f856d95564cd",
+        "bwd": "6df2b0ac8c070d260198ba46ec2a79767f703cc4b7f5f2e4646e4e14ab0cc3a8"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 7059013632
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 33,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "hdn_staged",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fwd": "c8380984b6750c8f7cdf791331f99f1e6bd7813767a07067183d7b0d89204aa3",
+        "bwd": "a03f89d7cadab0df9be63e0e0a190972effd3f391dc1fcba1e2ce2a7a74378ac",
+        "fb": "ebe3122ecb2369158974f12cf659cb8b44e65284441c3784893e0f3a50ba0db8",
+        "step": "28be95284255879667daec5cadc222027bd8cef3ded7a37f33a28932e74f79a7"
+      },
+      "raw_sha256": {
+        "fwd": "cb3603e32ddbe882f7fed02c9a12f61c6b94469f5b46bc1781c0b8e0fdc0e9fa",
+        "bwd": "e74121365150d37ed285f76cacdc49fcfe01590f8ef7721656d9277db552322c",
+        "fb": "23b4307b2b2e0310bfff6593129ccda3e7b6ec8a4b0de9122ba3e0dbc9caf740",
+        "step": "39ebfb35cd2683aaf3f02757a59f1948e6ae40468149b6325f8035247be8b894"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 6117392384
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 34,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "hdn_staged",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "bwd": "4d261dd01a1ca6de91adc490bd0992aa8fc04e7a835bd9ab958bdca4f37cacd5",
+        "fb": "3224ae4935a8adcd96ed3b917a98846fd38c515e05e75e356a01971250c049f4",
+        "step": "1ed562c8fb7d351401183ae0382f99ed5f197a336a3cde45ea99d2ee51db566f",
+        "fwd": "40b445ab0d90af22005e5a311f9f2d4faa542de9c8563b9604425892d34f3fe7"
+      },
+      "raw_sha256": {
+        "bwd": "f8b7ce1e89c7e5cf28972213f76f4c894e8babda913161fb419d323c13156e14",
+        "fb": "f6546275c30204f81e4c782eab06c7182649c79d2e86c7c80bb8a2c014978827",
+        "step": "b144d961abff5115868fcc8ebab405b77141f8c00b49edfa1f02bad01ab15b98",
+        "fwd": "a2dc24532928776160422219329ec1b3f6211daa7c9a9ad92d81262888aa64e6"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 6117392384
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 35,
+      "series": "baseline",
+      "length": 8192,
+      "batch": 2,
+      "method": "hdn_staged",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fb": "987f5445f15b04df68371a81c6dfc5ca5bc40ec165d12aba2c8a765b9fecc973",
+        "step": "16ff85f9382449b99092182fedc718d7791f0981e6400926f40bf073984bcc8c",
+        "fwd": "efc31d91bdbb46848f369acc6dbf286673ec0b68a9c2edacfebfc5ffd7ab8e14",
+        "bwd": "e3514f750332955dc3ab8e151b9036af944c18baf199d24f51a512d53f716a01"
+      },
+      "raw_sha256": {
+        "fb": "d43b78bd3ed798e27eb4e94aae564ca286588472f14f5eafc7ad1decf901894e",
+        "step": "95c61d095e872300f39c9e9c01ea6baf0a38721b12e60e41741d72c0aaed9730",
+        "fwd": "40008120c8f2ac09b61a04bcea9dcfde70482fea6fb4c181c9093fac68add287",
+        "bwd": "079fc3ee55384326db75213e49e91a057f8ccdfd6fd8a79a7fb28d4f06e5e43a"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 6117392384
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 36,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "kda",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fwd": "b06debf1c6f1a5ce92b311051871dbd2a1a8b6727be9c2e4c78e26674e6150e9",
+        "bwd": "3748af7bf3fe70f772a09fa952580328e287c20117ef50d57005c5b663e16dab",
+        "fb": "1c733d18fbafd991a03655d81e160954635995d5cde589b9cf7e0e3d35558ed1",
+        "step": "755248395f0e0fdeff886d3cf5384fc21dc670f5bcc094a89b2a7831daccd9ab"
+      },
+      "raw_sha256": {
+        "fwd": "8a84082a992832b7a6f40dbbcaa44695a7fbbbc9c44890ddbb8119062d06893e",
+        "bwd": "da4f888fc7428442c231f6aa731b27f767cc4347ae618c3470271ff4b1efd549",
+        "fb": "e3468cf82c5fd802f688d1a480a110ced750acc0bea9ad3e8b8aa5228fb0794a",
+        "step": "7c84c584972200de502083928f8c1e5092b203dfc17e1d892b02df67fb5541f4"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 37,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "kda",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "bwd": "9532258132ae95fc25b53540f4f0e7c8b1884c51dd1e263c8246c76adbc82aef",
+        "fb": "d04f2ced1916f97668f6edeeb19d4a00ac2ef60c520a2653fe7b1bffdd4e991b",
+        "step": "b2d9892d1c64099935f8f4e145b956319a7e9d0bdc4a5c540bc0b3ad69292d74",
+        "fwd": "05813419fea3327d2c9b43cdd85d8b62f8111c80e080c9d6ebd9a92920613260"
+      },
+      "raw_sha256": {
+        "bwd": "92e55c95efc5a8b592a6e96e9714b7dd9150721c10a5428fc5173f86214118c8",
+        "fb": "db89f32396825795ac204ba4efa1085267b7e00b3848d1042852e5e413d57ab0",
+        "step": "3f7b88b50deb6be86833dc6809fce9093bc40c40fd8824a74a44922d7ea517e5",
+        "fwd": "ec87b0b7723d883f5629237142914f0fab207535e221f9e13d9bd69002736252"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 38,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "kda",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fb": "7c03c7a45aadd0a4239a4024953147b8114b7fc90671d085fe18110c39f186f6",
+        "step": "aae09047aa3dca34d89d9ecb9cb80cf3f931456cdd746fe1de9ad27d63fb4953",
+        "fwd": "fa41242abef130f12ba9e88e2d003b20bb5991feb909846a7d1f7dd5f1200e3b",
+        "bwd": "59680c0540645ed895cf21830ccda2be866537f85a20c3730f09d12807cbdb64"
+      },
+      "raw_sha256": {
+        "fb": "8b582dadd6ac22d02955397db34c28d67b4726bd2b67005e33d2bff246cd82d6",
+        "step": "f7c2b145def6034cf430085015ea5477f68edd01f2ddac092b8d8a6fe2cbadef",
+        "fwd": "d8621c362d365aea0538c4e42fbe9377bd8d7e7577542281b81aa0364a336d77",
+        "bwd": "06164454095754d7f0733ca13c1c6316352fa4bc5cdd94c580eebcb46fd76204"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 39,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "comba",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "fwd": "abaf69ec42b29461ecfcdd444fd26c6f9301dc4bfbc262f9813bac28e8f45560",
+        "bwd": "3e324007c023d95ed237fcd5134d5cebd96a600aee824c829d72a0442735edf5",
+        "fb": "43edaf850294ee89d3b6cd9c3f6022b6353ae12fc66c7ea74fa52e8ed314d04c",
+        "step": "8860afceb32d5183bc2a5a5495b15fdb40a15ee3a5b0f4f8cf066bcb2367715e"
+      },
+      "raw_sha256": {
+        "fwd": "f9753076b27bbced9c658872178fe774f0a6eff653ac53611e5ef105c051bb63",
+        "bwd": "77e4db8dfc6accb43fd8fa525adf8aaef7b65457a9283091a312b942f4d61591",
+        "fb": "2196748e86e589d485a233cbc60dfce7d75168a269c5b7056ae4501ec87ee694",
+        "step": "c05b0157f4e0cd8492cc2ce74c0514175d31b1f67f33760a60e0d7c3a16a7377"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 40,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "comba",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "bwd": "c5b90cadf7254f1c4ced0c5ebf0c189fbbad4f174df53e7add8ab1d3465ae88c",
+        "fb": "b45dc922479e0fccb0cd41f30f3f99fb1f890d4d9abf5e9ae439bd9bc4a07e98",
+        "step": "483b29cdae939bd626cf4b0a964a35dbb606abac52349c9d110640c07d802df8",
+        "fwd": "7ba4f683e1d8ed34b2d78480011b2217325119f4fc471343a0138ddc215d1254"
+      },
+      "raw_sha256": {
+        "bwd": "23742c071055f5d0593c4f73f99aef2271d3fbd6f6291fc6b051858f4bdd6e82",
+        "fb": "6d05cd17912e520e65425ae447e71bff6d9f4738e0e3884a1b0c30e196ad45fe",
+        "step": "32e5b8803fdb7db3bfef2bee03ebaeb267e050d7cb5846f71aafe38f8355e47c",
+        "fwd": "b4cb34328cb1d6c1778b4e44d29fa7943b427a087491a07ca960d96bf79ac0ca"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 41,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "comba",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1401068032,
+      "qualification": {
+        "fb": "f7ac93886df2df82dde169d13f28465bffffa69f198815a13bf52a3a310e2867",
+        "step": "bb287d28f27e1cfd1758b554655876deba6719aef15c8ec9f5897c228e476395",
+        "fwd": "6aff8e80f74a71dd8d98f5e7aa63ef1f8662dd9a0d262b24085668574dc66c16",
+        "bwd": "1054e6a7c96f47f64a9a9901fe3278ee372e870df23f6690e70ea3960f1b527e"
+      },
+      "raw_sha256": {
+        "fb": "9835cbd68fc1ecb1b24b091206cd48695d72e4adeafc35303b898478653658a6",
+        "step": "fb6150e0477d2bd974e5893ce19a2ea0ac4693e8ff9c4fd4daf1626744d084ce",
+        "fwd": "d16ac257c138a4b79776f1ece6cbc431e05f634d3d0b2d172351b0dcc35cbd05",
+        "bwd": "314d3f7b8432aa89acf0bfa8c8034b1794e0441c6f83747899844e16ccb636f0"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5671424000,
+          "reserved": 6157238272
+        },
+        "step": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "fwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        },
+        "bwd": {
+          "allocated": 5671424000,
+          "reserved": 5813305344
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "dd3b6f648d6bc6cb5afe6f991d8397e5f006e8dbd8634313d1e6439435168428",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 42,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "hdn_tc",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fwd": "b3b1f55b820da68d91cedcb1489db3b95046bad75810249923b4b17d26ac490d",
+        "bwd": "e62494699d6de0cf7063d5aed6a338f2c7bd18da1de3106a857fdae76a6a7cf6",
+        "fb": "9b6ee83db2dfa628a6f2ea162e3047268f534b24a1977e8e69e3cf47010737da",
+        "step": "b2305989647a1913fec99c4e160994c59be0cf49ffc9c61dd9b14561b609c7fc"
+      },
+      "raw_sha256": {
+        "fwd": "5fe40fd743ac13a994a36bf6697822107c7dd2b57e2a478eeddaae987b511331",
+        "bwd": "057b274c0010426328556918f1391c81d9461fad72988dbb41344be59ef07615",
+        "fb": "9e08764053a454ed7e0c340270cf57e2e3917a41ff6aa2406a399661bb02024f",
+        "step": "e01b9e2333694c46fedb38a1d9561db804c3a2a0e32695e3522149871e7ca778"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 7059013632
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 43,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "hdn_tc",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "bwd": "51b0f3ecf0288cb18bd1f01d6055f80ca6958ccc0f764f8adeb564a9e860a7d5",
+        "fb": "b2810daae2157fd4cfd51e6d3e75166af564e5acc94409d8e67210abe8055d17",
+        "step": "a915c21295c5155ad5c7ac90d015d3da6ea1be4076a23b4d057160f01a83c76b",
+        "fwd": "95b181f3c4017f0ea91e9f012ca0be8a27bbba097b5564f162273d4fb7959f71"
+      },
+      "raw_sha256": {
+        "bwd": "1f3332a405044947d1d5df41527d03bc4e9fcd9020860cea3ec12d6ad00116a2",
+        "fb": "d43682a9aaa4167711345f8b8aa8ec15c508f79d6e1e998bc73aae3fe63734a7",
+        "step": "2fdc126641cea4f0b5ad590b4faef1d4c14366c955b335f8409a126da0fb7e89",
+        "fwd": "c2dd7ea410e4e30d3ac939b83d2f8bb110b6ba9f1b9e9d16c12969af38d548c2"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 7059013632
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 44,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "hdn_tc",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fb": "317080e87caf40b91b0f7f87bc7ea3f78edcf2ba099a7c97bfe1671d641dc248",
+        "step": "e8352c11de44ac823af8914a012cb1296b7d4e4f74034e2526b8aa3e03ea553f",
+        "fwd": "9fe46922c3341cfa21ba3cdee87cfd6da06641cc35c7f83e4c719d020df31e24",
+        "bwd": "5abf63acaf2066aa4198263b4dbca19caa1f1e3cd66e3ce86f946d6ab09e01a7"
+      },
+      "raw_sha256": {
+        "fb": "b29dd14729c56364c68705e781f515bba6c8382b30a31293f38c9163de16707a",
+        "step": "e42d6e90e1c6a660caeb0b93c3a71333e2a72596d4b63d44b9c12146236ba0af",
+        "fwd": "77c316593baeef4f5b16a2278e1415a7e43297951df5b06284929cfd39d5939f",
+        "bwd": "b4cf901a94f58694f81b45c8ea49c4f321205d494096f377cd37f034c6512bdb"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 7059013632
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5804916736
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 45,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "hdn_staged",
+      "trial": 0,
+      "gpu_uuid": "GPU-b227c2b5-70d2-40a0-a170-503d7adc77de",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fwd": "2c79702f62dbfaeebe11328ea6fd714048988624d94d7c2ca52c1f9496dde1c7",
+        "bwd": "7c6950d01f63d3db4b0a52ac805443e0d66828b2ee714daf62ca0fe700b4b8f4",
+        "fb": "b9a676d01464835602b501746ff928cc3f54143cf7c665628f38338232d7b876",
+        "step": "ebadb5be98f0987d541f51630e8a8482dd0976ada1424a3173511a3b1b1c51b2"
+      },
+      "raw_sha256": {
+        "fwd": "d9bc67cbfa2762c9a100eed06edd45e66fec4f5d90a6e8defc7ee6d51d2b5ee5",
+        "bwd": "c4fadb17285800307fd7d1834e32a40dec20aa39057a9bcf98ebe56f320a0153",
+        "fb": "52e14f0e50cb0dcea048d3ab8d0ec5dfb0ed9371557bf776a34fc5530f5ab3bf",
+        "step": "39533dc64f599c280d19b8242674b158ab9366133d9d60feae5793bbfbb15a9f"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 6117392384
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 46,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "hdn_staged",
+      "trial": 1,
+      "gpu_uuid": "GPU-bdb70b8c-759d-bb6c-e784-50e3648737c1",
+      "mode_order": [
+        "bwd",
+        "fb",
+        "step",
+        "fwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "bwd": "359a6bbb801c2eeeb343313422a3f2bbf12b288afa45e69b950875c7e9098189",
+        "fb": "7e3119681028bc4e2d8624b81686076116e320b5ee3459de5fdeb6936f3e3626",
+        "step": "34f781e6ef6e634e110a3766e4444c4f4a26ba08868afb495df5729c79905a73",
+        "fwd": "945e4991328df34310bfebf13de9f35a2625c143bf97e90537d137d4f288aea4"
+      },
+      "raw_sha256": {
+        "bwd": "590412c2c77607cc2f297a19b6ec27861464e0c07d5dd98768bde90d00cba185",
+        "fb": "c914c0c5e859701c545b63e8ad6a947c2a42d27880cd0c2bd06ae12afad99216",
+        "step": "bb533401198cfb0ba9f6a87dde4acd97e58d4c4d25c56842882c45208178c4da",
+        "fwd": "47b49137401d749541d1bd028e2808fca14711ebc3d8801c1670e826f062d24a"
+      },
+      "initial_memory_bytes": {
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 6117392384
+        },
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 47,
+      "series": "baseline",
+      "length": 16384,
+      "batch": 1,
+      "method": "hdn_staged",
+      "trial": 2,
+      "gpu_uuid": "GPU-c245ec08-19f6-fc96-db3b-38787d1a1150",
+      "mode_order": [
+        "fb",
+        "step",
+        "fwd",
+        "bwd"
+      ],
+      "parameter_count": 1400280064,
+      "qualification": {
+        "fb": "a2efb2152711a560d7fbb93349277ca683686c9fcef4bffe692c5eb2be123b74",
+        "step": "5869d0d416678b53b5a92fbcbe839a30246f6109a90b7168d6f62be81f9bee22",
+        "fwd": "7f6b382fe0a9154edee199fb4fd673527837df778557070f8c73e999f87fbf73",
+        "bwd": "3e40784cd6215fc3757cecbfc6f15d79c203aa708bd32bd4fc0b2f647b44564b"
+      },
+      "raw_sha256": {
+        "fb": "dc864e73c27b9275a93a5ef87d91730bc6b6873b7a29f98d0c78209c6431be82",
+        "step": "d1b06a13f8a52d7b68cb1cd9db1b330351a5b2712ec13b054a67521bca6cdd71",
+        "fwd": "eefe76d751f9b08555a8ff036b34f7b84a1d584bbd373370a34c9511b539416c",
+        "bwd": "315fc7b22ad0972c9fb70c9a79e2e8cab10bd770b571ab65e9cf1054383ea654"
+      },
+      "initial_memory_bytes": {
+        "fb": {
+          "allocated": 5668229120,
+          "reserved": 6117392384
+        },
+        "step": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "fwd": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        },
+        "bwd": {
+          "allocated": 5668229120,
+          "reserved": 5817499648
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "5f57c354b5348a98677a8ad4edd1b4cd9fce34ed624f960d08ea4c7e8c54ba91",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 48,
+      "series": "same_card",
+      "length": 2048,
+      "batch": 8,
+      "method": "khdn_fs6",
+      "trial": 0,
+      "gpu_uuid": "GPU-9800449a-f89d-b005-d11e-7087a0bddcdb",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1412912512,
+      "qualification": {
+        "fwd": "da816aa9280f8619bb6ed95ab55cf2b79297dfe81a60a9d2cccced4e068a5e7b",
+        "bwd": "fb2b117b623a81a875bb8d7f89b689079bccb4a514773f1dc010a14b2408170d",
+        "fb": "42fd9ec72cb353680ca02bb0517b35b71bffe0290efd6c1cde8839cd2b54eae0",
+        "step": "4558ad2a1ab2254070e90191e28f1553574bf6dcd68a3b4e4262fa06c3d4fac3"
+      },
+      "raw_sha256": {
+        "fwd": "aebf7495127fca6606c099c5a7a9e8ef6df582edb05e3c3cdf530be5900591a4",
+        "bwd": "b9cf89944e04ca438bae60c701b963e1bf56bdb8171535242f66c3b333959d8d",
+        "fb": "fa6ae9f323a657cb7939cde429c2dfe313084f197b923711d687e2ca6555625e",
+        "step": "b3ce33d667b06a1be98731869afda0e2dda9ac00b2052ec737b43236b690df76"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5718769664,
+          "reserved": 6067060736
+        },
+        "bwd": {
+          "allocated": 5718769664,
+          "reserved": 5851054080
+        },
+        "fb": {
+          "allocated": 5718769664,
+          "reserved": 5851054080
+        },
+        "step": {
+          "allocated": 5718769664,
+          "reserved": 5851054080
+        }
+      },
+      "sampler_sha256": "d5626a4de3d69c730cc325df7e94926e8cfa81e33c2b3d5e9e4b2efdff024605",
+      "initial_weights_sha256": "54fd2dee600bce88643418d79f6abb9ccb077eecc97951fd98e52c2c7902ef52",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "f18372724acf2aee48e50653b1c19baccbeaffee14918938746112e0dcdfd1bd",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    },
+    {
+      "id": 49,
+      "series": "same_card",
+      "length": 2048,
+      "batch": 8,
+      "method": "kda",
+      "trial": 0,
+      "gpu_uuid": "GPU-9800449a-f89d-b005-d11e-7087a0bddcdb",
+      "mode_order": [
+        "fwd",
+        "bwd",
+        "fb",
+        "step"
+      ],
+      "parameter_count": 1324881280,
+      "qualification": {
+        "fwd": "1b0ab57fd68e640462fa934c84fda17f3daacbc68c7f1cdb730f7859e5ffbcea",
+        "bwd": "83c037b4afe7cb1203f4ce5b12db42c0a29ea4c78e614547f7e7faaeb7d87ea0",
+        "fb": "efe2f74af53757bf55bd2718e6901f32641c2b3a39efc61556a6d97630f5471d",
+        "step": "42d9abb0eaf09fa4697380ed2e52bbb76209e938a28f15804bee16d0cb5664ba"
+      },
+      "raw_sha256": {
+        "fwd": "7b159ab4f9645ef5ef5966728204b99f37221a5d338056d41038d8266ea69f1a",
+        "bwd": "c497ff340c5737c95e9bc1616fb19523dd984fc0fbc039e013e7aeb40484e6a6",
+        "fb": "78ff3f07aeb92a3c6edaa7d58d01f4bb17b09ac51c3c0eb168489a2f77436245",
+        "step": "db79a543cd0e82e32719fc064b49a258b102a7003cffec77fc5e5b679aa17e74"
+      },
+      "initial_memory_bytes": {
+        "fwd": {
+          "allocated": 5368741888,
+          "reserved": 5857345536
+        },
+        "bwd": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "fb": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        },
+        "step": {
+          "allocated": 5368741888,
+          "reserved": 5500829696
+        }
+      },
+      "sampler_sha256": "12231298dd4500f09b56b3074daebfde158f6e4ba61b1718d8d7c332f05e4c22",
+      "initial_weights_sha256": "77f2179510a5b6da8197408a16149ce3e52621777bbc03f5f5376939fc55da77",
+      "parameter_dtype": "torch.float32",
+      "source_snapshot": "631c8cb904d6de706c2c80249cbe12d8834c07e33e67dd28fec95038d5f3c4a5",
+      "compiler_sha256": "1f48e0f0f7fb841418645069b378b787e41338192b5fd1ac81f95e1ffb05ed32"
+    }
+  ]
+}

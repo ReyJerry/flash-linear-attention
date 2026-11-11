@@ -76,6 +76,7 @@ class PHBABlock(GradientCheckpointingLayer):
             gsa_num_slots=config.gsa_num_slots,
             gate_logit_normalizer=config.gate_logit_normalizer,
             elementwise_affine=config.elementwise_affine,
+            phba_ablation=config.phba_ablation,
         )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(
             config.hidden_size,

@@ -217,14 +217,20 @@ def _branch(
 
 
 def build_direct_metadata(
-    rtok: torch.Tensor, rstate: torch.Tensor, nc: int, *, retain_token_slots: bool = False, derived_state_layout
+    rtok: torch.Tensor,
+    rstate: torch.Tensor,
+    nc: int,
+    *,
+    retain_token_slots: bool = False,
+    derived_state_layout,
+    derive_state_from_token: bool = True,
 ) -> DirectMetadata:
-    """Build canonical metadata for token routes [H, T, Kh] and state routes [H, T, Kh + 1]."""
+    """Build token/state metadata; derive states only when both readouts share all historical edges."""
     H, T, kh = rtok.shape
     if rstate.shape != (H, T, kh + 1):
         raise fail("invalid_shape", f"Rstate must have shape [H, T, Kh + 1]={(H, T, kh + 1)}, got {tuple(rstate.shape)}")
     tok = _branch(rtok, nc, kpad_tok(kh), retain_slots=retain_token_slots, sorted_counts=True) if kh > 0 else None
-    if tok is not None:
+    if tok is not None and derive_state_from_token:
         state = derive_state(tok, derived_state_layout, H, T * H * (kh + 1))
     else:
         state = _branch(rstate, nc, kpad_state(kh + 1))

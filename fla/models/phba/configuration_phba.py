@@ -50,6 +50,7 @@ class PHBAConfig(PreTrainedConfig):
         use_phba: bool = True,
         gsa_num_slots: int = 128,
         gate_logit_normalizer: float = 8,
+        phba_ablation: str = "full",
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -85,6 +86,9 @@ class PHBAConfig(PreTrainedConfig):
         self.use_phba = use_phba
         self.gsa_num_slots = gsa_num_slots
         self.gate_logit_normalizer = gate_logit_normalizer
+        if type(phba_ablation) is not str or phba_ablation not in ("full", "current_state_only", "routed_states_only"):
+            raise ValueError("phba_ablation must be full, current_state_only or routed_states_only")
+        self.phba_ablation = phba_ablation
 
         if hidden_size <= 0 or num_heads <= 0 or hidden_size % num_heads:
             raise ValueError("PHBA hidden_size must be positive and divisible by num_heads")

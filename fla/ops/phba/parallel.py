@@ -32,8 +32,13 @@ class BlockMajorConfig:
     bq_backward: int = 16
     fa_segment_batch_max: int = 65535
     fa_rows_per_call_max: int = 1 << 20
+    phba_ablation: str = "full"
 
     def __post_init__(self):
+        if type(self.phba_ablation) is not str or self.phba_ablation not in (
+            "full", "current_state_only", "routed_states_only",
+        ):
+            raise ValueError("phba_ablation must be full, current_state_only or routed_states_only")
         for name in ("window_tokens", "workspace_budget_bytes", "fa_segment_batch_max", "fa_rows_per_call_max"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -181,6 +186,8 @@ def _history_partial(
     BC: tl.constexpr,
     BD: tl.constexpr,
     INDEX32: tl.constexpr,
+    USE_HISTORY_TOKENS: tl.constexpr,
+    USE_HISTORY_STATES: tl.constexpr,
 ):
     task = tl.program_id(0)
     if task >= tl.load(task_offset + tl.cast(EXPERTS, tl.int64)):
@@ -199,32 +206,34 @@ def _history_partial(
     t = (r // H).to(tl.int64)
     d = tl.arange(0, BD)
     qm = valid[:, None] & (d < D)[None, :]
-    qrt = tl.load(qr + t[:, None] * SQT + head * SQH + d[None, :], qm, other=0)
-    qwt = tl.load(qw + t[:, None] * SWT + head * SWH + d[None, :], qm, other=0)
     m = tl.full((BQ, 1), float("-inf"), tl.float32)
     z = tl.zeros((BQ, 1), tl.float32)
     u = tl.zeros((BQ, BD), tl.float32)
     lane = tl.arange(0, BC)
-    start, end = tl.load(bp + block.to(tl.int64)), tl.load(bp + block.to(tl.int64) + 1)
-    for k0 in range(0, C, BC):
-        memory = k0 + lane < end - start
-        ix = start.to(tl.int64) + k0 + lane
-        mask = memory[:, None] & (d < D)[None, :]
-        kt = tl.load(kr + ix.to(tl.int64)[:, None] * SKT + head * SKH + d[None, :], mask, other=0)
-        vt = tl.load(v + ix.to(tl.int64)[:, None] * SVT + head * SVH + d[None, :], mask, other=0)
-        score = tl.dot(qrt, tl.trans(kt), out_dtype=tl.float32) * SCALE
-        score = tl.where(valid[:, None] & memory[None, :], score, float("-inf"))
-        m, z, u = _update(m, z, u, score, vt)
-    if tl.load(prefix_valid + block.to(tl.int64)) != 0:
-        for k0 in range(0, M, BC):
-            slot = k0 + lane
-            mask = (slot < M)[:, None] & (d < D)[None, :]
-            address = block.to(tl.int64) * SPB + head * SPH + slot.to(tl.int64)[:, None] * SPM + d[None, :]
-            kt = tl.load(pk + address, mask, other=0)
-            vt = tl.load(pv + address, mask, other=0)
-            score = tl.dot(qwt, tl.trans(kt), out_dtype=tl.float32) * SCALE
-            score = tl.where(valid[:, None] & (slot < M)[None, :], score, float("-inf"))
+    if USE_HISTORY_TOKENS:
+        qrt = tl.load(qr + t[:, None] * SQT + head * SQH + d[None, :], qm, other=0)
+        start, end = tl.load(bp + block.to(tl.int64)), tl.load(bp + block.to(tl.int64) + 1)
+        for k0 in range(0, C, BC):
+            memory = k0 + lane < end - start
+            ix = start.to(tl.int64) + k0 + lane
+            mask = memory[:, None] & (d < D)[None, :]
+            kt = tl.load(kr + ix.to(tl.int64)[:, None] * SKT + head * SKH + d[None, :], mask, other=0)
+            vt = tl.load(v + ix.to(tl.int64)[:, None] * SVT + head * SVH + d[None, :], mask, other=0)
+            score = tl.dot(qrt, tl.trans(kt), out_dtype=tl.float32) * SCALE
+            score = tl.where(valid[:, None] & memory[None, :], score, float("-inf"))
             m, z, u = _update(m, z, u, score, vt)
+    if USE_HISTORY_STATES:
+        qwt = tl.load(qw + t[:, None] * SWT + head * SWH + d[None, :], qm, other=0)
+        if tl.load(prefix_valid + block.to(tl.int64)) != 0:
+            for k0 in range(0, M, BC):
+                slot = k0 + lane
+                mask = (slot < M)[:, None] & (d < D)[None, :]
+                address = block.to(tl.int64) * SPB + head * SPH + slot.to(tl.int64)[:, None] * SPM + d[None, :]
+                kt = tl.load(pk + address, mask, other=0)
+                vt = tl.load(pv + address, mask, other=0)
+                score = tl.dot(qwt, tl.trans(kt), out_dtype=tl.float32) * SCALE
+                score = tl.where(valid[:, None] & (slot < M)[None, :], score, float("-inf"))
+                m, z, u = _update(m, z, u, score, vt)
     tl.store(pm + pos.to(tl.int64)[:, None], m, valid[:, None])
     tl.store(pz + pos.to(tl.int64)[:, None], z, valid[:, None])
     tl.store(pu + pos.to(tl.int64)[:, None] * D + d[None, :], u, qm)
@@ -519,6 +528,8 @@ def launch_history(qr, qw, kr, v, pk, pv, layout, ws, config):
         BC=config.bc,
         BD=triton.next_power_of_2(d),
         INDEX32=ws.plan["edge_capacity"] <= INT32_MAX - config.bq,
+        USE_HISTORY_TOKENS=config.phba_ablation != "routed_states_only",
+        USE_HISTORY_STATES=config.phba_ablation != "current_state_only",
         num_warps=4,
         num_stages=1,
     )
@@ -638,6 +649,16 @@ def block_major_forward(qr, qw, kr, v, pk, pv, rtok, layout, *, config=BlockMajo
     return out, lse
 
 
+def _readout_routes(rtok, rstate, mode):
+    """Mask readout edges without changing the forward scheduling routes or their shapes."""
+    if mode == "current_state_only":
+        rstate = rstate.clone()
+        rstate[..., 1:] = -1
+    elif mode == "routed_states_only":
+        rtok = torch.full_like(rtok, -1)
+    return rtok, rstate
+
+
 class BlockMajorAttentionFn(torch.autograd.Function):
     @staticmethod
     @input_guard
@@ -645,13 +666,22 @@ class BlockMajorAttentionFn(torch.autograd.Function):
     def forward(ctx, qr, qw, kr, v, pk, pv, rtok, rstate, layout, config, needs_backward):
         from fla.ops.phba.metadata import build_direct_metadata
 
+        full = config.phba_ablation == "full"
+        rtok_read, rstate_read = _readout_routes(rtok, rstate, config.phba_ablation) if needs_backward else (rtok, rstate)
         retain_slots = False
-        if needs_backward and rtok.shape[-1] > 0:
+        if needs_backward and full and rtok.shape[-1] > 0:
             t, h, d = qr.shape
             estimate = workspace_plan(t, h, d, rtok.shape[-1], layout.Nc, config)
             retain_slots = estimate["workspace_bytes"] + rtok.numel() <= config.workspace_budget_bytes
         meta = (
-            build_direct_metadata(rtok, rstate, layout.Nc, retain_token_slots=retain_slots, derived_state_layout=layout)
+            build_direct_metadata(
+                rtok_read,
+                rstate_read,
+                layout.Nc,
+                retain_token_slots=retain_slots,
+                derived_state_layout=layout,
+                derive_state_from_token=full,
+            )
             if needs_backward
             else None
         )
@@ -707,7 +737,7 @@ class BlockMajorAttentionFn(torch.autograd.Function):
             ]
             if ctx.has_token:
                 saved.extend((meta.tok.count, meta.tok.offset, meta.tok.rho))
-            saved.extend((rtok, rstate))
+            saved.extend((rtok_read, rstate_read))
             ctx.save_for_backward(*saved)
         return out, lse
 

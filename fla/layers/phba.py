@@ -66,6 +66,7 @@ class PHBA(nn.Module):
         gsa_num_slots: int = 128,
         gate_logit_normalizer: float = 8.0,
         elementwise_affine: bool = True,
+        phba_ablation: str = "full",
     ):
         super().__init__()
         if not use_phba:
@@ -88,6 +89,9 @@ class PHBA(nn.Module):
         self.moba_topk = moba_topk
         self.gsa_num_slots = gsa_num_slots
         self.gate_logit_normalizer = gate_logit_normalizer
+        if type(phba_ablation) is not str or phba_ablation not in ("full", "current_state_only", "routed_states_only"):
+            raise ValueError("phba_ablation must be full, current_state_only or routed_states_only")
+        self.phba_ablation = phba_ablation
         self.use_output_gate = use_output_gate
         self.q_proj = PHBALinear(hidden_size, hidden_size, bias=qkv_bias)
         self.k_proj = PHBALinear(hidden_size, hidden_size, bias=qkv_bias)
@@ -183,6 +187,7 @@ class PHBA(nn.Module):
             topk=self.moba_topk,
             gate_logit_normalizer=self.gate_logit_normalizer,
             length_plan=plan,
+            phba_ablation=self.phba_ablation,
         )
         if indices is not None:
             output = pad_input(output.squeeze(0), indices, batch, tokens)

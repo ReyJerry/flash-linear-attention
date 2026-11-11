@@ -34,6 +34,7 @@ def chunk_phba(
     cu_seqlens: torch.Tensor | None = None,
     length_plan: SequenceLengthPlan | None = None,
     output_final_state: bool = False,
+    phba_ablation: str = "full",
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
     """Compute causal block-routed attention with gated prefix-state compensation.
 
@@ -66,11 +67,15 @@ def chunk_phba(
             If cu_seqlens is also supplied, its values must agree with this plan. Default: `None`.
         output_final_state (bool, Optional):
             Whether to return final prefix states. Default: `False`.
+        phba_ablation (str, Optional):
+            Readout mode: "full", "current_state_only" or "routed_states_only". Default: "full".
+            All modes retain local causal tokens, current prefix states and the original recurrence and routing.
 
     Returns:
         tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
             Output [B, T, H, D] and optional nondifferentiable FP32 key/value states [Nseq, H, M, D].
     """
+    config = BlockMajorConfig(phba_ablation=phba_ablation)
     if q.ndim != 4 or any(x.shape != q.shape for x in (k, v, q_rope, k_rope)):
         raise ValueError("PHBA q, k, v and rotary inputs must have the same [B, T, H, D] shape")
     if q.device.type != "cuda" or q.dtype not in (torch.float16, torch.bfloat16):
@@ -116,7 +121,7 @@ def chunk_phba(
         rtok=token_route,
         rstate=state_route,
         layout=layout,
-        config=BlockMajorConfig(),
+        config=config,
     )
     final = (final_k, final_v) if output_final_state else None
     return output.reshape(batch, tokens, heads, width), final
